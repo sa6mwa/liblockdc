@@ -3,7 +3,7 @@ local lockdc = require("lockdc")
 local endpoint = os.getenv("LOCKDC_URL") or "https://localhost:19441"
 local client_pem = os.getenv("LOCKDC_CLIENT_PEM")
   or "./devenv/volumes/lockd-disk-a-config/client.pem"
-local namespace_name = os.getenv("LOCKDC_NAMESPACE") or "default"
+local namespace = os.getenv("LOCKDC_NAMESPACE") or "default"
 local queue = os.getenv("LOCKDC_QUEUE") or "examples-lua-consumer"
 local owner = os.getenv("LOCKDC_OWNER") or "lua-example-consumer"
 
@@ -13,25 +13,25 @@ local owner = os.getenv("LOCKDC_OWNER") or "lua-example-consumer"
 local client, err = lockdc.open({
   endpoints = { endpoint },
   client_bundle_source = { path = client_pem },
-  default_namespace = namespace_name,
+  default_namespace = namespace,
 })
 
 if client == nil then
   error(("lockdc.open failed: %s"):format(err.message))
 end
 
-local ok, consumer_err = client:start_consumer({
-  Name = "lua-example-consumer",
-  Queue = queue,
-  WithState = true,
-  Options = {
-    namespace_name = namespace_name,
+local service = assert(client:new_consumer_service({
+  name = "lua-example-consumer",
+  request = {
+    namespace = namespace,
+    queue = queue,
     owner = owner,
     visibility_timeout_seconds = 30,
     wait_seconds = 5,
   },
-  MessageHandler = function(message, state)
-    local payload, payload_err = message:payload_json()
+  with_state = true,
+  handle = function(message, state)
+    local payload, payload_err = message:read_payload_json()
     local document, meta
 
     if payload == nil then
@@ -44,12 +44,12 @@ local ok, consumer_err = client:start_consumer({
     ))
 
     if state ~= nil then
-      document, meta = state:get_json()
+      document, meta = state:read_json()
       if meta ~= nil and meta.no_content then
         document = {}
       elseif document == nil then
         return {
-          message = "state:get_json returned nil without no_content metadata",
+          message = "state:read_json returned nil without no_content metadata",
         }
       end
 
@@ -69,11 +69,12 @@ local ok, consumer_err = client:start_consumer({
 
     return nil
   end,
-})
+}))
+local ok, consumer_err = service:run()
 
 if ok == nil then
   client:close()
-  error(("client:start_consumer failed: %s"):format(consumer_err.message or tostring(consumer_err)))
+  error(("consumer service failed: %s"):format(consumer_err.message or tostring(consumer_err)))
 end
 
 client:close()

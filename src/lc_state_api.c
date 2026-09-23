@@ -32,7 +32,7 @@ typedef struct lc_engine_query_response_json {
   lonejson_uint64 index_seq;
 } lc_engine_query_response_json;
 typedef struct lc_engine_query_body_json {
-  char *namespace_name;
+  char *ns;
   lonejson_json_value selector;
   lonejson_int64 limit;
   char *cursor;
@@ -40,12 +40,11 @@ typedef struct lc_engine_query_body_json {
   char *return_mode;
 } lc_engine_query_body_json;
 typedef struct lc_engine_mutate_body_json {
-  char *namespace_name;
+  char *ns;
   lonejson_string_array mutations;
 } lc_engine_mutate_body_json;
 static const lonejson_field lc_engine_acquire_body_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_request, namespace_name,
-                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_request, ns, "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_request, key, "key"),
     LONEJSON_FIELD_I64(lc_engine_acquire_request, ttl_seconds, "ttl_seconds"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_request, owner, "owner"),
@@ -55,8 +54,7 @@ static const lonejson_field lc_engine_acquire_body_fields[] = {
                         "if_not_exists"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_request, txn_id, "txn_id")};
 static const lonejson_field lc_engine_keepalive_body_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_keepalive_request, namespace_name,
-                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_keepalive_request, ns, "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_keepalive_request, key, "key"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_keepalive_request, lease_id,
                                 "lease_id"),
@@ -65,8 +63,7 @@ static const lonejson_field lc_engine_keepalive_body_fields[] = {
     LONEJSON_FIELD_I64(lc_engine_keepalive_request, fencing_token,
                        "fencing_token")};
 static const lonejson_field lc_engine_release_body_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_release_request, namespace_name,
-                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_release_request, ns, "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_release_request, key, "key"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_release_request, lease_id,
                                 "lease_id"),
@@ -78,8 +75,7 @@ static const lonejson_field lc_engine_metadata_body_fields[] = {
     LONEJSON_FIELD_BOOL(lc_engine_metadata_request, query_hidden,
                         "query_hidden")};
 static const lonejson_field lc_engine_query_body_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_query_body_json, namespace_name,
-                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_query_body_json, ns, "namespace"),
     LONEJSON_FIELD_JSON_VALUE_REQ(lc_engine_query_body_json, selector,
                                   "selector"),
     LONEJSON_FIELD_I64(lc_engine_query_body_json, limit, "limit"),
@@ -88,8 +84,7 @@ static const lonejson_field lc_engine_query_body_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_query_body_json, return_mode,
                                 "return")};
 static const lonejson_field lc_engine_mutate_body_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_mutate_body_json, namespace_name,
-                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_mutate_body_json, ns, "namespace"),
     LONEJSON_FIELD_STRING_ARRAY(lc_engine_mutate_body_json, mutations,
                                 "mutations", LONEJSON_OVERFLOW_FAIL)};
 static const lonejson_field lc_engine_query_response_fields[] = {
@@ -110,7 +105,7 @@ typedef struct lc_engine_query_hidden_json {
   int query_hidden;
 } lc_engine_query_hidden_json;
 typedef struct lc_engine_acquire_response_json {
-  char *namespace_name;
+  char *ns;
   char *key;
   char *owner;
   char *lease_id;
@@ -134,7 +129,7 @@ typedef struct lc_engine_update_response_json {
   lonejson_int64 bytes;
 } lc_engine_update_response_json;
 typedef struct lc_engine_metadata_response_json {
-  char *namespace_name;
+  char *ns;
   char *key;
   lonejson_int64 version;
   lc_engine_query_hidden_json metadata;
@@ -144,7 +139,7 @@ typedef struct lc_engine_remove_response_json {
   lonejson_int64 new_version;
 } lc_engine_remove_response_json;
 typedef struct lc_engine_describe_response_json {
-  char *namespace_name;
+  char *ns;
   char *key;
   char *owner;
   char *lease_id;
@@ -155,7 +150,7 @@ typedef struct lc_engine_describe_response_json {
   lc_engine_query_hidden_json metadata;
 } lc_engine_describe_response_json;
 typedef struct lc_engine_queue_stats_response_json {
-  char *namespace_name;
+  char *ns;
   char *queue;
   lonejson_int64 waiting_consumers;
   lonejson_int64 pending_candidates;
@@ -182,7 +177,7 @@ typedef struct lc_engine_queue_extend_response_json {
 } lc_engine_queue_extend_response_json;
 static const lonejson_map lc_engine_query_hidden_map;
 static const lonejson_field lc_engine_acquire_response_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_response_json, namespace_name,
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_response_json, ns,
                                 "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_response_json, key, "key"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_acquire_response_json, owner,
@@ -213,8 +208,8 @@ static const lonejson_field lc_engine_update_response_fields[] = {
                                 "new_state_etag"),
     LONEJSON_FIELD_I64(lc_engine_update_response_json, bytes, "bytes")};
 static const lonejson_field lc_engine_metadata_response_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_metadata_response_json,
-                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_metadata_response_json, ns,
+                                "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_metadata_response_json, key, "key"),
     LONEJSON_FIELD_I64(lc_engine_metadata_response_json, version, "version"),
     LONEJSON_FIELD_OBJECT(lc_engine_metadata_response_json, metadata,
@@ -224,8 +219,8 @@ static const lonejson_field lc_engine_remove_response_fields[] = {
     LONEJSON_FIELD_I64(lc_engine_remove_response_json, new_version,
                        "new_version")};
 static const lonejson_field lc_engine_describe_response_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_describe_response_json,
-                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_describe_response_json, ns,
+                                "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_describe_response_json, key, "key"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_describe_response_json, owner,
                                 "owner"),
@@ -323,15 +318,14 @@ static int lc_engine_buffer_append_long_decimal(lc_engine_buffer *buffer,
 static int lc_engine_build_get_path(lc_engine_client *client,
                                     const lc_engine_get_request *request,
                                     lc_engine_buffer *path) {
-  char *namespace_name;
+  char *ns;
   char *key;
   int rc;
 
-  namespace_name = lc_engine_url_encode(
-      lc_engine_effective_namespace(client, request->namespace_name));
+  ns = lc_engine_url_encode(lc_engine_effective_namespace(client, request->ns));
   key = lc_engine_url_encode(request->key);
-  if (namespace_name == NULL || key == NULL) {
-    free(namespace_name);
+  if (ns == NULL || key == NULL) {
+    free(ns);
     free(key);
     return LC_ENGINE_ERROR_NO_MEMORY;
   }
@@ -343,11 +337,11 @@ static int lc_engine_build_get_path(lc_engine_client *client,
   if (rc == LC_ENGINE_OK)
     rc = lc_engine_buffer_append_cstr(path, "&namespace=");
   if (rc == LC_ENGINE_OK)
-    rc = lc_engine_buffer_append_cstr(path, namespace_name);
+    rc = lc_engine_buffer_append_cstr(path, ns);
   if (rc == LC_ENGINE_OK && request->public_read)
     rc = lc_engine_buffer_append_cstr(path, "&public=1");
 
-  free(namespace_name);
+  free(ns);
   free(key);
   return rc;
 }
@@ -355,15 +349,14 @@ static int lc_engine_build_get_path(lc_engine_client *client,
 static int lc_engine_build_update_path(lc_engine_client *client,
                                        const lc_engine_update_request *request,
                                        lc_engine_buffer *path) {
-  char *namespace_name;
+  char *ns;
   char *key;
   int rc;
 
-  namespace_name = lc_engine_url_encode(
-      lc_engine_effective_namespace(client, request->namespace_name));
+  ns = lc_engine_url_encode(lc_engine_effective_namespace(client, request->ns));
   key = lc_engine_url_encode(request->key);
-  if (namespace_name == NULL || key == NULL) {
-    free(namespace_name);
+  if (ns == NULL || key == NULL) {
+    free(ns);
     free(key);
     return LC_ENGINE_ERROR_NO_MEMORY;
   }
@@ -375,9 +368,9 @@ static int lc_engine_build_update_path(lc_engine_client *client,
   if (rc == LC_ENGINE_OK)
     rc = lc_engine_buffer_append_cstr(path, "&namespace=");
   if (rc == LC_ENGINE_OK)
-    rc = lc_engine_buffer_append_cstr(path, namespace_name);
+    rc = lc_engine_buffer_append_cstr(path, ns);
 
-  free(namespace_name);
+  free(ns);
   free(key);
   return rc;
 }
@@ -385,15 +378,14 @@ static int lc_engine_build_update_path(lc_engine_client *client,
 static int lc_engine_build_mutate_path(lc_engine_client *client,
                                        const lc_engine_mutate_request *request,
                                        lc_engine_buffer *path) {
-  char *namespace_name;
+  char *ns;
   char *key;
   int rc;
 
-  namespace_name = lc_engine_url_encode(
-      lc_engine_effective_namespace(client, request->namespace_name));
+  ns = lc_engine_url_encode(lc_engine_effective_namespace(client, request->ns));
   key = lc_engine_url_encode(request->key);
-  if (namespace_name == NULL || key == NULL) {
-    free(namespace_name);
+  if (ns == NULL || key == NULL) {
+    free(ns);
     free(key);
     return LC_ENGINE_ERROR_NO_MEMORY;
   }
@@ -405,9 +397,9 @@ static int lc_engine_build_mutate_path(lc_engine_client *client,
   if (rc == LC_ENGINE_OK)
     rc = lc_engine_buffer_append_cstr(path, "&namespace=");
   if (rc == LC_ENGINE_OK)
-    rc = lc_engine_buffer_append_cstr(path, namespace_name);
+    rc = lc_engine_buffer_append_cstr(path, ns);
 
-  free(namespace_name);
+  free(ns);
   free(key);
   return rc;
 }
@@ -416,15 +408,14 @@ static int
 lc_engine_build_metadata_path(lc_engine_client *client,
                               const lc_engine_metadata_request *request,
                               lc_engine_buffer *path) {
-  char *namespace_name;
+  char *ns;
   char *key;
   int rc;
 
-  namespace_name = lc_engine_url_encode(
-      lc_engine_effective_namespace(client, request->namespace_name));
+  ns = lc_engine_url_encode(lc_engine_effective_namespace(client, request->ns));
   key = lc_engine_url_encode(request->key);
-  if (namespace_name == NULL || key == NULL) {
-    free(namespace_name);
+  if (ns == NULL || key == NULL) {
+    free(ns);
     free(key);
     return LC_ENGINE_ERROR_NO_MEMORY;
   }
@@ -436,9 +427,9 @@ lc_engine_build_metadata_path(lc_engine_client *client,
   if (rc == LC_ENGINE_OK)
     rc = lc_engine_buffer_append_cstr(path, "&namespace=");
   if (rc == LC_ENGINE_OK)
-    rc = lc_engine_buffer_append_cstr(path, namespace_name);
+    rc = lc_engine_buffer_append_cstr(path, ns);
 
-  free(namespace_name);
+  free(ns);
   free(key);
   return rc;
 }
@@ -446,15 +437,14 @@ lc_engine_build_metadata_path(lc_engine_client *client,
 static int lc_engine_build_remove_path(lc_engine_client *client,
                                        const lc_engine_remove_request *request,
                                        lc_engine_buffer *path) {
-  char *namespace_name;
+  char *ns;
   char *key;
   int rc;
 
-  namespace_name = lc_engine_url_encode(
-      lc_engine_effective_namespace(client, request->namespace_name));
+  ns = lc_engine_url_encode(lc_engine_effective_namespace(client, request->ns));
   key = lc_engine_url_encode(request->key);
-  if (namespace_name == NULL || key == NULL) {
-    free(namespace_name);
+  if (ns == NULL || key == NULL) {
+    free(ns);
     free(key);
     return LC_ENGINE_ERROR_NO_MEMORY;
   }
@@ -466,9 +456,9 @@ static int lc_engine_build_remove_path(lc_engine_client *client,
   if (rc == LC_ENGINE_OK)
     rc = lc_engine_buffer_append_cstr(path, "&namespace=");
   if (rc == LC_ENGINE_OK)
-    rc = lc_engine_buffer_append_cstr(path, namespace_name);
+    rc = lc_engine_buffer_append_cstr(path, ns);
 
-  free(namespace_name);
+  free(ns);
   free(key);
   return rc;
 }
@@ -477,15 +467,14 @@ static int
 lc_engine_build_describe_path(lc_engine_client *client,
                               const lc_engine_describe_request *request,
                               lc_engine_buffer *path) {
-  char *namespace_name;
+  char *ns;
   char *key;
   int rc;
 
-  namespace_name = lc_engine_url_encode(
-      lc_engine_effective_namespace(client, request->namespace_name));
+  ns = lc_engine_url_encode(lc_engine_effective_namespace(client, request->ns));
   key = lc_engine_url_encode(request->key);
-  if (namespace_name == NULL || key == NULL) {
-    free(namespace_name);
+  if (ns == NULL || key == NULL) {
+    free(ns);
     free(key);
     return LC_ENGINE_ERROR_NO_MEMORY;
   }
@@ -497,9 +486,9 @@ lc_engine_build_describe_path(lc_engine_client *client,
   if (rc == LC_ENGINE_OK)
     rc = lc_engine_buffer_append_cstr(path, "&namespace=");
   if (rc == LC_ENGINE_OK)
-    rc = lc_engine_buffer_append_cstr(path, namespace_name);
+    rc = lc_engine_buffer_append_cstr(path, ns);
 
-  free(namespace_name);
+  free(ns);
   free(key);
   return rc;
 }
@@ -552,7 +541,7 @@ lc_engine_copy_dequeue_response(lc_engine_dequeue_response *dst,
     return LC_ENGINE_ERROR_INVALID_ARGUMENT;
   }
 
-  dst->namespace_name = lc_engine_strdup_local(src->namespace_name);
+  dst->ns = lc_engine_strdup_local(src->ns);
   dst->queue = lc_engine_strdup_local(src->queue);
   dst->message_id = lc_engine_strdup_local(src->message_id);
   dst->attempts = src->attempts;
@@ -576,7 +565,7 @@ lc_engine_copy_dequeue_response(lc_engine_dequeue_response *dst,
   dst->state_txn_id = lc_engine_strdup_local(src->state_txn_id);
   dst->next_cursor = lc_engine_strdup_local(src->next_cursor);
 
-  if ((src->namespace_name != NULL && dst->namespace_name == NULL) ||
+  if ((src->ns != NULL && dst->ns == NULL) ||
       (src->queue != NULL && dst->queue == NULL) ||
       (src->message_id != NULL && dst->message_id == NULL) ||
       (src->payload_content_type != NULL &&
@@ -763,8 +752,7 @@ int lc_engine_client_acquire(lc_engine_client *client,
 
   lc_engine_acquire_response_cleanup(response);
   body_src = *request;
-  body_src.namespace_name =
-      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  body_src.ns = (char *)lc_engine_effective_namespace(client, request->ns);
   body_field_count = 0U;
   body_fields[body_field_count++] = lc_engine_acquire_body_fields[0];
   body_fields[body_field_count++] = lc_engine_acquire_body_fields[1];
@@ -796,8 +784,7 @@ int lc_engine_client_acquire(lc_engine_client *client,
     return rc;
   }
 
-  response->namespace_name =
-      lc_engine_strdup_local(response_json.namespace_name);
+  response->ns = lc_engine_strdup_local(response_json.ns);
   response->key = lc_engine_strdup_local(response_json.key);
   response->owner = lc_engine_strdup_local(response_json.owner);
   response->lease_id = lc_engine_strdup_local(response_json.lease_id);
@@ -806,8 +793,7 @@ int lc_engine_client_acquire(lc_engine_client *client,
   response->version = response_json.version;
   response->state_etag = lc_engine_strdup_local(response_json.state_etag);
   response->fencing_token = response_json.fencing_token;
-  if ((response_json.namespace_name != NULL &&
-       response->namespace_name == NULL) ||
+  if ((response_json.ns != NULL && response->ns == NULL) ||
       (response_json.key != NULL && response->key == NULL) ||
       (response_json.owner != NULL && response->owner == NULL) ||
       (response_json.lease_id != NULL && response->lease_id == NULL) ||
@@ -959,8 +945,7 @@ int lc_engine_client_keepalive(lc_engine_client *client,
 
   lc_engine_keepalive_response_cleanup(response);
   body_src = *request;
-  body_src.namespace_name =
-      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  body_src.ns = (char *)lc_engine_effective_namespace(client, request->ns);
   body_field_count = 0U;
   body_fields[body_field_count++] = lc_engine_keepalive_body_fields[0];
   body_fields[body_field_count++] = lc_engine_keepalive_body_fields[1];
@@ -1043,8 +1028,7 @@ int lc_engine_client_release(lc_engine_client *client,
 
   lc_engine_release_response_cleanup(response);
   body_src = *request;
-  body_src.namespace_name =
-      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  body_src.ns = (char *)lc_engine_effective_namespace(client, request->ns);
   body_field_count = 0U;
   body_fields[body_field_count++] = lc_engine_release_body_fields[0];
   body_fields[body_field_count++] = lc_engine_release_body_fields[1];
@@ -1362,14 +1346,13 @@ int lc_engine_client_mutate(lc_engine_client *client,
     lc_engine_buffer_cleanup(&path);
     return lc_engine_set_client_error(error, rc, "failed to build mutate path");
   }
-  body_src.namespace_name =
-      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  body_src.ns = (char *)lc_engine_effective_namespace(client, request->ns);
   body_src.mutations.items = (char **)request->mutations;
   body_src.mutations.count = request->mutation_count;
   body_src.mutations.capacity = request->mutation_count;
   body_src.mutations.flags = LONEJSON_ARRAY_FIXED_CAPACITY;
   body_field_count = 0U;
-  if (body_src.namespace_name != NULL && body_src.namespace_name[0] != '\0') {
+  if (body_src.ns != NULL && body_src.ns[0] != '\0') {
     body_fields[body_field_count++] = lc_engine_mutate_body_fields[0];
   }
   body_fields[body_field_count++] = lc_engine_mutate_body_fields[1];
@@ -1448,7 +1431,7 @@ void lc_engine_metadata_response_cleanup(
   if (response == NULL) {
     return;
   }
-  lc_engine_free_string(&response->namespace_name);
+  lc_engine_free_string(&response->ns);
   lc_engine_free_string(&response->key);
   lc_engine_free_string(&response->correlation_id);
   memset(response, 0, sizeof(*response));
@@ -1541,11 +1524,9 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
     return rc;
   }
 
-  response->namespace_name =
-      lc_engine_strdup_local(response_json.namespace_name);
+  response->ns = lc_engine_strdup_local(response_json.ns);
   response->key = lc_engine_strdup_local(response_json.key);
-  if ((response_json.namespace_name != NULL &&
-       response->namespace_name == NULL) ||
+  if ((response_json.ns != NULL && response->ns == NULL) ||
       (response_json.key != NULL && response->key == NULL)) {
     rc = LC_ENGINE_ERROR_NO_MEMORY;
   }
@@ -1560,7 +1541,7 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
   }
   if (rc != LC_ENGINE_OK) {
     lc_engine_metadata_response_cleanup(response);
-    lc_engine_free_string(&response_json.namespace_name);
+    lc_engine_free_string(&response_json.ns);
     lc_engine_free_string(&response_json.key);
     lc_engine_http_result_cleanup(&result);
     return lc_engine_set_protocol_error(error,
@@ -1694,7 +1675,7 @@ void lc_engine_describe_response_cleanup(
   if (response == NULL) {
     return;
   }
-  lc_engine_free_string(&response->namespace_name);
+  lc_engine_free_string(&response->ns);
   lc_engine_free_string(&response->key);
   lc_engine_free_string(&response->owner);
   lc_engine_free_string(&response->lease_id);
@@ -1744,13 +1725,11 @@ int lc_engine_client_describe(lc_engine_client *client,
     return rc;
   }
 
-  response->namespace_name =
-      lc_engine_strdup_local(response_json.namespace_name);
+  response->ns = lc_engine_strdup_local(response_json.ns);
   response->key = lc_engine_strdup_local(response_json.key);
   response->owner = lc_engine_strdup_local(response_json.owner);
   response->lease_id = lc_engine_strdup_local(response_json.lease_id);
-  if ((response_json.namespace_name != NULL &&
-       response->namespace_name == NULL) ||
+  if ((response_json.ns != NULL && response->ns == NULL) ||
       (response_json.key != NULL && response->key == NULL) ||
       (response_json.owner != NULL && response->owner == NULL) ||
       (response_json.lease_id != NULL && response->lease_id == NULL)) {
@@ -1773,7 +1752,7 @@ int lc_engine_client_describe(lc_engine_client *client,
   }
   if (rc != LC_ENGINE_OK) {
     lc_engine_describe_response_cleanup(response);
-    lc_engine_free_string(&response_json.namespace_name);
+    lc_engine_free_string(&response_json.ns);
     lc_engine_free_string(&response_json.key);
     lc_engine_free_string(&response_json.owner);
     lc_engine_free_string(&response_json.lease_id);
@@ -1815,8 +1794,7 @@ int lc_engine_client_query(lc_engine_client *client,
   lc_engine_query_response_cleanup(response);
   runtime = lc_engine_lonejson_runtime(client);
   memset(&body_src, 0, sizeof(body_src));
-  body_src.namespace_name =
-      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  body_src.ns = (char *)lc_engine_effective_namespace(client, request->ns);
   body_src.limit = request->limit;
   body_src.cursor = (char *)request->cursor;
   body_src.return_mode = (char *)request->return_mode;
@@ -1853,7 +1831,7 @@ int lc_engine_client_query(lc_engine_client *client,
     }
   }
   body_field_count = 0U;
-  if (body_src.namespace_name != NULL && body_src.namespace_name[0] != '\0') {
+  if (body_src.ns != NULL && body_src.ns[0] != '\0') {
     body_fields[body_field_count++] = lc_engine_query_body_fields[0];
   }
   body_fields[body_field_count++] = lc_engine_query_body_fields[1];

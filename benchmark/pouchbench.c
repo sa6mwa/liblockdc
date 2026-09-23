@@ -55,8 +55,8 @@ static void lockdc_bench_fill_production_payload(char *payload,
     return;
   }
   written = snprintf(snippet, sizeof(snippet),
-                     " audit remediation evidence workflow row %ld gen %ld;",
-                     row, generation);
+                     " audit remediation evidence outbox row %ld gen %ld;", row,
+                     generation);
   if (written <= 0 || (size_t)written >= sizeof(snippet)) {
     return;
   }
@@ -86,7 +86,7 @@ static const char *lockdc_bench_region(long row) {
   return (row % 3L) == 0L ? "us" : (row % 3L) == 1L ? "eu" : "apac";
 }
 
-static const char *lockdc_bench_workflow_stage(long row) {
+static const char *lockdc_bench_outbox_stage(long row) {
   return (row % 6L) == 0L   ? "ingest"
          : (row % 6L) == 1L ? "review"
          : (row % 6L) == 2L ? "approve"
@@ -125,7 +125,7 @@ static const char *lockdc_bench_narrative_summary(long row) {
 }
 
 static const char *lockdc_bench_narrative_description(void) {
-  return "long production description capturing the full audit trail, workflow "
+  return "long production description capturing the full audit trail, outbox "
          "transitions, validation notes, customer-visible symptoms, previous "
          "remediation attempts, backoffice comments, service ownership "
          "history, "
@@ -141,7 +141,7 @@ static const char *lockdc_bench_operator_notes(long row) {
              ? "operator notes include critical escalation context, manual "
                "override history, cross-team review comments, incident "
                "timeline, retry budget exhaustion notes, and final remediation "
-               "checklist for the current production workflow"
+               "checklist for the current production outbox"
              : "operator notes include routine triage comments, observed state "
                "transitions, queue consumer handoff details, attachment review "
                "status, replay expectations, and post-processing verification "
@@ -224,21 +224,21 @@ static int lockdc_bench_validate_document_fields(const void *bytes,
     return rc;
   }
   written = snprintf(snippet, sizeof(snippet),
-                     "\"workflow\":{\"stage\":\"%s\",\"attempt\":%ld,"
+                     "\"outbox\":{\"stage\":\"%s\",\"attempt\":%ld,"
                      "\"owner\":{\"team\":\"%s\",\"user\":\"user-%05ld\"}}",
-                     lockdc_bench_workflow_stage(row), generation + 1L,
+                     lockdc_bench_outbox_stage(row), generation + 1L,
                      lockdc_bench_team(row), row % 10000L);
   if (written <= 0 || (size_t)written >= sizeof(snippet)) {
     return LC_ERR_INVALID;
   }
-  rc = lockdc_bench_expect_contains(bytes, length, snippet, "workflow", error);
+  rc = lockdc_bench_expect_contains(bytes, length, snippet, "outbox", error);
   if (rc != LC_OK) {
     return rc;
   }
   written = snprintf(
       snippet, sizeof(snippet),
       "\"risk\":{\"score\":%ld,\"summary\":\"%s risk signal for production "
-      "timeout workflow %ld\"}",
+      "timeout outbox %ld\"}",
       (row * 37L) % 100L, lockdc_bench_message(row), row);
   if (written <= 0 || (size_t)written >= sizeof(snippet)) {
     return LC_ERR_INVALID;
@@ -276,7 +276,7 @@ static int lockdc_bench_validate_document_fields(const void *bytes,
   }
   written =
       snprintf(snippet, sizeof(snippet),
-               "\"payload\":\" audit remediation evidence workflow row %ld gen "
+               "\"payload\":\" audit remediation evidence outbox row %ld gen "
                "%ld;",
                row, generation);
   if (written <= 0 || (size_t)written >= sizeof(snippet)) {
@@ -304,7 +304,7 @@ static long lockdc_bench_expected_query_matches(const char *scenario,
       if ((row % 8L) == 0L) {
         ++count;
       }
-    } else if (strcmp(scenario, "WorkflowEscalated") == 0) {
+    } else if (strcmp(scenario, "OutboxEscalated") == 0) {
       if ((row % 6L) == 1L || (row % 6L) == 3L) {
         ++count;
       }
@@ -526,8 +526,8 @@ static const char *lockdc_bench_selector_lql(const char *scenario) {
   if (strcmp(scenario, "TenantEnterprise") == 0) {
     return "eq{field=/tenant/tier,value=enterprise}";
   }
-  if (strcmp(scenario, "WorkflowEscalated") == 0) {
-    return "in{field=/workflow/stage,any=review|escalated}";
+  if (strcmp(scenario, "OutboxEscalated") == 0) {
+    return "in{field=/outbox/stage,any=review|escalated}";
   }
   if (strcmp(scenario, "AmountBand") == 0) {
     return "range{field=/metrics/amount_usd,gte=10000,lt=90000}";
@@ -594,7 +594,7 @@ static int lockdc_bench_seed(lc_client *client, long rows, lc_error *error) {
     snprintf(key, sizeof(key), "doc/%08ld", i);
     lease = NULL;
     lc_acquire_req_init(&acquire_req);
-    acquire_req.namespace_name = "bench";
+    acquire_req.ns = "bench";
     acquire_req.key = key;
     acquire_req.owner = "pouch-query-bench";
     acquire_req.ttl_seconds = 60L;
@@ -628,7 +628,7 @@ static int lockdc_bench_flush(lc_client *client, lc_error *error) {
 
   lc_index_flush_req_init(&req);
   memset(&res, 0, sizeof(res));
-  req.namespace_name = "bench";
+  req.ns = "bench";
   req.mode = "wait";
   rc = client->flush_index(client, &req, &res, error);
   lc_index_flush_res_cleanup(&res);
@@ -719,7 +719,7 @@ static char *lockdc_bench_document(long row, long generation,
             "notes, audit trail references, and downstream service health "
             "annotations";
   narrative_description =
-      "long production description capturing the full audit trail, workflow "
+      "long production description capturing the full audit trail, outbox "
       "transitions, validation notes, customer-visible symptoms, previous "
       "remediation attempts, backoffice comments, service ownership history, "
       "deployment context, business priority, compliance review markers, and "
@@ -731,7 +731,7 @@ static char *lockdc_bench_document(long row, long generation,
             "override history, cross-team review comments, incident timeline, "
             "retry budget exhaustion notes, and final remediation checklist "
             "for "
-            "the current production workflow"
+            "the current production outbox"
           : "operator notes include routine triage comments, observed state "
             "transitions, queue consumer handoff details, attachment review "
             "status, replay expectations, and post-processing verification "
@@ -743,12 +743,12 @@ static char *lockdc_bench_document(long row, long generation,
       "\"created_at\":\"%s\","
       "\"tenant\":{\"id\":\"tenant-%03ld\",\"tier\":\"%s\","
       "\"region\":\"%s\"},"
-      "\"workflow\":{\"stage\":\"%s\",\"attempt\":%ld,"
+      "\"outbox\":{\"stage\":\"%s\",\"attempt\":%ld,"
       "\"owner\":{\"team\":\"%s\",\"user\":\"user-%05ld\"}},"
       "\"metrics\":{\"amount_usd\":%ld,\"latency_ms\":%ld,"
       "\"retries\":%ld},"
       "\"risk\":{\"score\":%ld,\"summary\":\"%s risk signal for "
-      "production timeout workflow %ld\"},"
+      "production timeout outbox %ld\"},"
       "\"narrative\":{\"summary\":\"%s\",\"description\":\"%s\","
       "\"operator_notes\":\"%s\"},"
       "\"details\":{\"message\":\"%s production benchmark document "
@@ -989,7 +989,7 @@ static int lockdc_bench_queue_roundtrip(lc_client *client, long messages,
     }
     lc_enqueue_req_init(&enqueue_req);
     memset(&enqueue_res, 0, sizeof(enqueue_res));
-    enqueue_req.namespace_name = "bench";
+    enqueue_req.ns = "bench";
     enqueue_req.queue = "production";
     enqueue_req.visibility_timeout_seconds = 30L;
     enqueue_req.ttl_seconds = 3600L;
@@ -1019,7 +1019,7 @@ static int lockdc_bench_queue_roundtrip(lc_client *client, long messages,
 
     lc_dequeue_req_init(&dequeue_req);
     memset(&batch, 0, sizeof(batch));
-    dequeue_req.namespace_name = "bench";
+    dequeue_req.ns = "bench";
     dequeue_req.queue = "production";
     dequeue_req.owner = "pouch-production-bench";
     dequeue_req.visibility_timeout_seconds = 30L;
@@ -1082,7 +1082,6 @@ static int lockdc_bench_queue_roundtrip(lc_client *client, long messages,
                                                      : LC_ERR_INVALID;
       }
       ++dequeued;
-      batch.messages[index] = NULL;
     }
     if (!saw_message) {
       lc_dequeue_batch_cleanup(&batch);
@@ -1241,7 +1240,7 @@ static int lockdc_bench_query(lc_client *client, const char *scenario,
 
   lc_query_req_init(&req);
   memset(&res, 0, sizeof(res));
-  req.namespace_name = "bench";
+  req.ns = "bench";
   req.selector_lql = lockdc_bench_selector_lql(scenario);
   req.engine = engine;
   req.limit = limit > 0L ? limit : 1L;
@@ -1380,7 +1379,7 @@ lockdc_bench_concurrency_write(lockdc_bench_concurrency_worker *worker,
   lease = NULL;
   source = NULL;
   lc_acquire_req_init(&acquire_req);
-  acquire_req.namespace_name = "bench";
+  acquire_req.ns = "bench";
   acquire_req.key = key;
   acquire_req.owner = owner;
   acquire_req.ttl_seconds = 60L;
@@ -1928,7 +1927,7 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
 
     snprintf(key, sizeof(key), "doc/%08ld", row);
     lc_acquire_req_init(&acquire_req);
-    acquire_req.namespace_name = "bench";
+    acquire_req.ns = "bench";
     acquire_req.key = key;
     acquire_req.owner = "pouch-production-bench";
     acquire_req.ttl_seconds = 120L;
@@ -2196,17 +2195,17 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
                       lockdc_bench_now_ns());
   matched_rows = 0L;
   phase_start = lockdc_bench_now_ns();
-  phase = "WorkflowEscalated scan keys";
-  rc = lockdc_bench_query(client, "WorkflowEscalated", "scan", 0, rows,
+  phase = "OutboxEscalated scan keys";
+  rc = lockdc_bench_query(client, "OutboxEscalated", "scan", 0, rows,
                           &matched_rows, &error);
   if (rc != LC_OK) {
     goto done;
   }
   if (matched_rows !=
-      lockdc_bench_expected_query_matches("WorkflowEscalated", rows)) {
+      lockdc_bench_expected_query_matches("OutboxEscalated", rows)) {
     rc = LC_ERR_INVALID;
     snprintf(out->error, sizeof(out->error),
-             "pouch production WorkflowEscalated scan query matched %ld rows",
+             "pouch production OutboxEscalated scan query matched %ld rows",
              matched_rows);
     lc_error_cleanup(&error);
     lc_error_init(&error);
@@ -2430,7 +2429,7 @@ int lockdc_pouch_bench_compaction_run(
   if (scheduled == 0) {
     memset(&maintenance_options, 0, sizeof(maintenance_options));
     memset(&maintenance_result, 0, sizeof(maintenance_result));
-    maintenance_options.namespace_name = "bench";
+    maintenance_options.ns = "bench";
     maintenance_options.force = 1;
     phase_start = lockdc_bench_now_ns();
     rc = lc_pouch_maintenance_run(pouch, &maintenance_options,

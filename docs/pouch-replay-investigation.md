@@ -32,23 +32,32 @@ make build
 python3 tests/e2e/pouch_replay.py build/debug/bench/lockdc_pouch_replay_probe \
   --keys 1 --updates 256 --encrypted --shared --unclean --live-staged
 ctest --test-dir build/debug -R '^pouch_replay_' --output-on-failure --parallel 1 --no-tests=error
+make pouch-replay-capture-churn
 ```
 
-The driver creates disposable roots underneath the working directory, seeds
-through the public client/lease API, and starts two independent reader
-processes. It checks every committed JSON value and logical version. Reads use
-acquire/get/release, so probes append lease records; the second open observes
-that slightly larger root. `--live-staged` leaves an additional uncommitted
-update on a different key. `_exit` prevents clean-close projection creation;
-it does not simulate a torn write, power loss, or cold page cache.
+The driver creates disposable roots underneath the working directory and uses
+the public client/lease API to seed them before starting two independent reader
+processes. It checks every committed JSON value and logical version. The
+ordinary suite uses one small replay fixture. The separate hardening fixture
+uses the captured one-segment shape: 4,687 distinct keys, encrypted
+shared-root recovery, and a live staged record. It requires its exact
+one-segment topology and bounded logical reads for startup and all probe
+operations; it has no elapsed-time assertion. Reads use acquire/get/release,
+so probes append lease records; the second open observes that slightly larger
+root. `--live-staged` leaves an additional uncommitted update on a different
+key. `_exit` prevents clean-close projection creation; it does not simulate a
+torn write, power loss, or cold page cache.
 
 Measurements separate open, first acquire/get/release, remaining keys, and
 close. Linux `/proc/self/io` provides logical bytes and read calls, including
-page-cache hits; these are process-wide, not segment-exclusive. Wall and CPU
-times are diagnostic only. The assertion bounds startup reads by 64 times the
-pre-open store size plus 1 MiB metadata allowance. It is a regression detector,
-not a promised storage complexity limit. The CTest watchdog is only a hang
-guard; neither fixture creation nor assertions use sleeps or timing thresholds.
+page-cache hits; these are process-wide, not segment-exclusive. The probe also
+reports current and peak resident bytes from `/proc/self/status` for every
+phase. Wall and CPU times are diagnostic only. The assertion bounds startup
+reads by 64 times the pre-open store size plus 1 MiB metadata allowance. The
+capture hardening fixture tightens startup to 8 times and bounds all probe
+reads to 16 times. These are regression detectors, not promised storage
+complexity limits. Test watchdogs are only hang guards; neither fixture
+creation nor assertions use sleeps or timing thresholds.
 
 Two registered offline e2e cases exercise plain/encrypted shared roots with
 64 KiB segment targets. The Pouch unit recovery test separately verifies that
@@ -86,3 +95,54 @@ Control workloads without surviving staged updates did not reproduce:
 These controls were measured before the fix. The triggering regression cases
 and full debug suite were run after it. Historical binaries, production data,
 cold-cache behavior, and power-loss recovery were not tested here.
+
+## Captured C89 metrics diagnosis (2026-09-18)
+
+The captured `c89-systems` executable is Vectis 0.15.1 statically linked with
+liblockdc 0.13.1. Its metrics worker persists one checkpoint through a new
+public liblockdc client at most once every five minutes: it opens the client,
+acquires and updates the checkpoint, then closes the client. The Vectis
+process is long-lived, but the Pouch client used for this operation is not.
+
+The encrypted metrics namespace has one 21,653,369-byte active segment after
+migration, with 34,753 frames:
+
+| Frame | Count |
+| --- | ---: |
+| state put | 4,687 |
+| state delete | 4,687 |
+| state link | 4,687 |
+| state metadata | 16,005 |
+| transaction decision | 4,687 |
+
+There are 4,688 logical keys in the terminal projection: 4,687 deleted
+checkpoint/staging keys and one metadata key. Legacy `LPL1` records describe
+those canonical keys; they are not independent state-cache keys. The root has
+no query-index artifacts, and no live payload body large enough to account for
+the reported resident memory.
+
+This explains the periodic CPU report. On every fresh client, 0.13.1 runs
+staged-decision recovery before the checkpoint acquire. It enumerates all
+4,687 durable decisions and calls the full-log state scan once for each one,
+even though their staging keys are already absent. For this 21.65 MB encrypted
+segment that is about 101.5 GB of repeated logical traversal for one periodic
+checkpoint. A single core busy for minutes is therefore expected behavior from
+the deployed binary, not evidence of a compaction loop.
+
+The current implementation replaces the per-decision scan with a lookup in
+the namespace projection. The existing offline e2e uses separate processes,
+retains live staging, and bounds logical reads instead of elapsed time. A
+capture-scale fixture with 4,687 historical decisions completed its first
+recovery operation in about 0.17 CPU seconds. On a disposable migrated copy of
+the actual metrics root, subsequent encrypted opens read one 21.7 MB segment
+and used about 0.054 CPU seconds with a 10.5 MB RSS in a non-sanitized build.
+
+The current root is below the default 64 MiB active-segment rollover, so normal
+compaction has no inactive segment to reclaim. That is a storage-growth policy
+question, but it was not the source of this incident. Transformed bodies are
+cached only after a caller consumes the corresponding source through successful
+authenticated EOF. The first body source remains a direct streaming transform;
+projection creation, metadata-only reads, and writes retain payload spans and
+never decrypt, decompress, or materialize every eligible live body to prefill
+the 16 MiB per-namespace cache. A direct regression removes the segment after
+metadata-only recovery and proves that the body was not silently retained.

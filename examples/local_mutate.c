@@ -54,7 +54,7 @@ int main(int argc, char **argv) {
   const char *endpoint;
   const char *fallback_endpoint;
   const char *client_pem;
-  const char *namespace_name;
+  const char *ns;
   const char *owner;
   const char *base_dir;
   const char *endpoints[2];
@@ -79,7 +79,7 @@ int main(int argc, char **argv) {
   endpoint = EXAMPLE_ENDPOINT;
   fallback_endpoint = EXAMPLE_FALLBACK_ENDPOINT;
   client_pem = EXAMPLE_CLIENT_PEM;
-  namespace_name = EXAMPLE_NAMESPACE;
+  ns = EXAMPLE_NAMESPACE;
   owner = EXAMPLE_OWNER;
   base_dir = ".";
   key = NULL;
@@ -120,7 +120,7 @@ int main(int argc, char **argv) {
       client_pem = optarg;
       break;
     case 'n':
-      namespace_name = optarg;
+      ns = optarg;
       break;
     case 'o':
       owner = optarg;
@@ -161,7 +161,7 @@ int main(int argc, char **argv) {
   lc_client_config_init(&config);
   config.endpoints = endpoints;
   config.endpoint_count = endpoint_count;
-  config.default_namespace = namespace_name;
+  config.default_namespace = ns;
 
   lc_error_init(&error);
   client = NULL;

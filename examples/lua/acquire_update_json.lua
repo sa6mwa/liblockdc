@@ -3,14 +3,14 @@ local lockdc = require("lockdc")
 local endpoint = os.getenv("LOCKDC_URL") or "https://localhost:19441"
 local client_pem = os.getenv("LOCKDC_CLIENT_PEM")
   or "./devenv/volumes/lockd-disk-a-config/client.pem"
-local namespace_name = os.getenv("LOCKDC_NAMESPACE") or "default"
+local namespace = os.getenv("LOCKDC_NAMESPACE") or "default"
 local key = os.getenv("LOCKDC_KEY") or "examples/lua/acquire-update-json"
 local owner = os.getenv("LOCKDC_OWNER") or "lua-example-acquire"
 
 local client, err = lockdc.open({
   endpoints = { endpoint },
   client_bundle_source = { path = client_pem },
-  default_namespace = namespace_name,
+  default_namespace = namespace,
 })
 
 if client == nil then
@@ -28,7 +28,7 @@ if lease == nil then
   error(("client:acquire failed: %s"):format(acquire_err.message))
 end
 
-local state, meta = lease:get_json()
+local state, meta = lease:read_json()
 if meta ~= nil and meta.no_content then
   state = {
     kind = "lua-example",
@@ -38,7 +38,7 @@ if meta ~= nil and meta.no_content then
 elseif state == nil then
   lease:close()
   client:close()
-  error("lease:get_json returned nil without no_content metadata")
+  error("lease:read_json returned nil without no_content metadata")
 end
 
 state.status = "updated-via-lua"

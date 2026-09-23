@@ -34,6 +34,12 @@ typedef struct test_value_doc {
   lonejson_int64 value;
 } test_value_doc;
 
+typedef struct client_closing_sink {
+  lc_client *client;
+  lc_sink *delegate;
+  size_t write_calls;
+} client_closing_sink;
+
 static const lonejson_field test_value_fields[] = {
     LONEJSON_FIELD_I64(test_value_doc, value, "value")};
 
@@ -151,6 +157,7 @@ typedef struct https_testserver {
   size_t handled_count;
   long response_delay_ms;
   int allow_response_write_failure;
+  volatile sig_atomic_t stop_requested;
   char failure_message[1024];
 } https_testserver;
 
@@ -174,7 +181,7 @@ typedef struct canceling_subscribe_capture {
 
 typedef struct watch_capture {
   int event_count;
-  char namespace_name[64];
+  char ns[64];
   char queue[64];
   char head_message_id[64];
   char correlation_id[64];
@@ -213,6 +220,7 @@ typedef struct tracking_allocator_state {
 
 typedef struct test_enqueue_source {
   lc_source pub;
+  lc_client *client_to_close;
   const unsigned char *bytes;
   size_t length;
   size_t offset;
@@ -234,6 +242,10 @@ static size_t test_enqueue_source_read(lc_source *self, void *buffer,
   source = (test_enqueue_source *)self;
   if (source == NULL || buffer == NULL || count == 0U) {
     return 0U;
+  }
+  if (source->client_to_close != NULL) {
+    lc_client_close(source->client_to_close);
+    source->client_to_close = NULL;
   }
   if (source->offset >= source->length) {
     return 0U;
@@ -375,9 +387,8 @@ static int watch_capture_sink(void *context,
   (void)error;
   capture = (watch_capture *)context;
   capture->event_count += 1;
-  if (event->namespace_name != NULL) {
-    snprintf(capture->namespace_name, sizeof(capture->namespace_name), "%s",
-             event->namespace_name);
+  if (event->ns != NULL) {
+    snprintf(capture->ns, sizeof(capture->ns), "%s", event->ns);
   }
   if (event->queue != NULL) {
     snprintf(capture->queue, sizeof(capture->queue), "%s", event->queue);
@@ -627,6 +638,33 @@ static lonejson_status test_lonejson_capture_sink(void *user, const void *data,
   capture = (test_request_capture *)user;
   return buffer_append(capture, data, len) ? LONEJSON_STATUS_OK
                                            : LONEJSON_STATUS_ALLOCATION_FAILED;
+}
+
+static int client_closing_sink_write(lc_sink *self, const void *bytes,
+                                     size_t count, lc_error *error) {
+  client_closing_sink *sink;
+
+  sink = (client_closing_sink *)self->impl;
+  if (sink == NULL || sink->delegate == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "client-closing sink is unavailable", NULL, NULL, NULL);
+  }
+  sink->write_calls += 1U;
+  if (sink->client != NULL) {
+    lc_client_close(sink->client);
+    sink->client = NULL;
+  }
+  return sink->delegate->write(sink->delegate, bytes, count, error);
+}
+
+static void client_closing_sink_close(lc_sink *self) {
+  client_closing_sink *sink;
+
+  sink = self != NULL ? (client_closing_sink *)self->impl : NULL;
+  if (sink != NULL && sink->delegate != NULL) {
+    lc_sink_close(sink->delegate);
+    sink->delegate = NULL;
+  }
 }
 
 static char *make_repeat_json_body(const char *prefix, const char *suffix,
@@ -1291,6 +1329,8 @@ static void *https_testserver_main(void *context) {
     client_fd =
         accept(server->listener_fd, (struct sockaddr *)&addr, &addr_len);
     if (client_fd < 0) {
+      if (server->stop_requested)
+        break;
       set_failure(server, "accept failed: %s", strerror(errno));
       break;
     }
@@ -1623,6 +1663,17 @@ static void https_testserver_stop(https_testserver *server) {
   }
 }
 
+/* A deadline test can intentionally stop before the fixture's next expected
+ * connection. Wake its blocking accept without classifying that designed early
+ * stop as a server failure. */
+static void https_testserver_stop_early(https_testserver *server) {
+  if (server->listener_fd >= 0) {
+    server->stop_requested = 1;
+    (void)shutdown(server->listener_fd, SHUT_RDWR);
+  }
+  https_testserver_stop(server);
+}
+
 static void init_client_config(lc_engine_client_config *config,
                                unsigned short port, const char *bundle_path) {
   static char endpoint[128];
@@ -1831,7 +1882,7 @@ static void test_state_transport_honors_client_cancel(void **state) {
   assert_int_equal(lc_engine_client_open(&config, &client, &error),
                    LC_ENGINE_OK);
   lc_engine_client_set_cancel_check(client, test_delayed_cancel_check, &cancel);
-  request.namespace_name = "cancel-test";
+  request.ns = "cancel-test";
   request.key = "key";
   request.owner = "owner";
   request.ttl_seconds = 30L;
@@ -2183,7 +2234,7 @@ static void test_state_transport_paths_use_mtls(void **state) {
 
   memset(&get_req, 0, sizeof(get_req));
   memset(&get_res, 0, sizeof(get_res));
-  get_req.namespace_name = "transport-ns";
+  get_req.ns = "transport-ns";
   get_req.key = "resource/1";
   get_req.public_read = 1;
   rc = lc_engine_client_get(client, &get_req, &get_res, &error);
@@ -2226,6 +2277,22 @@ test_public_client_namespaced_load_rejects_empty_namespace(void **state) {
   rc = lc_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(client);
+
+  rc = lc_get_in_namespace(client, NULL, "resource/1", NULL, NULL, &get_res,
+                           &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "namespaced get requires client and namespace");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = client->get_in_namespace(client, "", "resource/1", NULL, NULL, &get_res,
+                                &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "namespaced get requires a non-empty namespace");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
 
   rc = client->load_in_namespace(client, NULL, "resource/1", &test_value_map,
                                  &value_doc, NULL, &get_res, &error);
@@ -2287,7 +2354,7 @@ test_state_transport_parses_buffered_typed_json_response(void **state) {
   req.key = "resource/1";
   rc = lc_engine_client_describe(client, &req, &res, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
-  assert_string_equal(res.namespace_name, "transport-ns");
+  assert_string_equal(res.ns, "transport-ns");
   assert_string_equal(res.key, "resource/1");
   assert_string_equal(res.owner, "owner-a");
   assert_string_equal(res.lease_id, "lease-1");
@@ -2349,7 +2416,7 @@ static void test_management_transport_paths_use_mtls(void **state) {
 
   memset(&ns_req, 0, sizeof(ns_req));
   memset(&ns_res, 0, sizeof(ns_res));
-  ns_req.namespace_name = "team-a";
+  ns_req.ns = "team-a";
   ns_req.preferred_engine = "index";
   ns_req.fallback_engine = "scan";
   ns_req.if_etag = "\"config-etag\"";
@@ -2623,13 +2690,13 @@ test_watch_stream_filters_events_and_finishes_trailing_event(void **state) {
   rc = lc_engine_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
 
-  watch_req.namespace_name = "transport-ns";
+  watch_req.ns = "transport-ns";
   watch_req.queue = "jobs";
   rc = lc_engine_client_watch_queue(client, &watch_req, watch_capture_sink,
                                     &capture, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
   assert_int_equal(capture.event_count, 1);
-  assert_string_equal(capture.namespace_name, "transport-ns");
+  assert_string_equal(capture.ns, "transport-ns");
   assert_string_equal(capture.queue, "jobs");
   assert_string_equal(capture.head_message_id, "msg-1");
   assert_string_equal(capture.correlation_id, "corr-watch-header");
@@ -2683,7 +2750,7 @@ static void test_watch_stream_rejects_malformed_selected_event(void **state) {
   rc = lc_engine_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
 
-  watch_req.namespace_name = "transport-ns";
+  watch_req.ns = "transport-ns";
   watch_req.queue = "jobs";
   rc = lc_engine_client_watch_queue(client, &watch_req, watch_capture_sink,
                                     &capture, &error);
@@ -2744,7 +2811,7 @@ static void test_watch_stream_rejects_oversized_line(void **state) {
   rc = lc_engine_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
 
-  watch_req.namespace_name = "transport-ns";
+  watch_req.ns = "transport-ns";
   watch_req.queue = "jobs";
   rc = lc_engine_client_watch_queue(client, &watch_req, watch_capture_sink,
                                     &capture, &error);
@@ -2809,7 +2876,7 @@ test_watch_stream_rejects_oversized_event_data_after_prior_event(void **state) {
   rc = lc_engine_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
 
-  watch_req.namespace_name = "transport-ns";
+  watch_req.ns = "transport-ns";
   watch_req.queue = "jobs";
   rc = lc_engine_client_watch_queue(client, &watch_req, watch_capture_sink,
                                     &capture, &error);
@@ -3139,6 +3206,87 @@ test_state_transport_rejects_invalid_numeric_headers_as_protocol(void **state) {
   lc_engine_client_close(client);
   https_testserver_stop(&server);
   assert_server_ok(&server);
+  lc_engine_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+typedef struct test_deadline_clock {
+  unsigned int calls;
+} test_deadline_clock;
+
+static int test_deadline_clock_gettime(clockid_t clock_id, struct timespec *out,
+                                       void *context) {
+  test_deadline_clock *clock;
+
+  if (clock_id != CLOCK_MONOTONIC || out == NULL || context == NULL) {
+    return -1;
+  }
+  clock = (test_deadline_clock *)context;
+  out->tv_sec = clock->calls++ == 0U ? 1000 : 1001;
+  out->tv_nsec = 0L;
+  return 0;
+}
+
+/* A bounded higher-level operation can use a one-shot transport clone. Its
+ * absolute deadline must cover node-passive failover rather than resetting for
+ * the second endpoint. The old per-attempt limit returned the 200 response. */
+static void
+test_engine_request_deadline_bounds_node_passive_failover(void **state) {
+  static const char *json_headers[] = {"Content-Type: application/json"};
+  static const https_expectation expectations[] = {
+      {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1", NULL,
+       0U, NULL, 0U, 1, 503, json_headers, 1U, "{\"error\":\"node_passive\"}",
+       "liblockdc test client"},
+      {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1", NULL,
+       0U, NULL, 0U, 1, 200, json_headers, 1U, "{\"value\":1}",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_engine_client_config config;
+  lc_engine_client *client;
+  lc_engine_get_request request;
+  lc_engine_get_response response;
+  lc_engine_error error;
+  struct timespec deadline;
+  test_deadline_clock clock;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  memset(&request, 0, sizeof(request));
+  memset(&response, 0, sizeof(response));
+  memset(&clock, 0, sizeof(clock));
+  lc_engine_error_init(&error);
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+  init_client_config_two_endpoints(&config, server.port,
+                                   material.client_bundle_path);
+  assert_int_equal(lc_engine_client_open(&config, &client, &error),
+                   LC_ENGINE_OK);
+  /* The first endpoint deterministically sees one second of budget and
+   * returns node_passive. The second attempt observes the same absolute
+   * deadline as elapsed, without relying on scheduler or TLS timing. */
+  deadline.tv_sec = 1001;
+  deadline.tv_nsec = 0L;
+  lc_engine_client_set_request_deadline(client, &deadline);
+  lc_transport_test_clock_gettime = test_deadline_clock_gettime;
+  lc_transport_test_clock_context = &clock;
+  request.key = "resource/1";
+  request.public_read = 1;
+  rc = lc_engine_client_get(client, &request, &response, &error);
+  lc_transport_test_clock_gettime = NULL;
+  lc_transport_test_clock_context = NULL;
+  assert_int_equal(rc, LC_ENGINE_ERROR_TRANSPORT);
+  assert_string_equal(error.message, "request deadline elapsed");
+  assert_int_equal(clock.calls, 2U);
+
+  lc_engine_get_response_cleanup(&response);
+  lc_engine_client_close(client);
+  https_testserver_stop_early(&server);
+  assert_int_equal(server.handled_count, 1U);
+  assert_true(server.failure_message[0] == '\0');
   lc_engine_error_cleanup(&error);
   https_tls_material_cleanup(&material);
 }
@@ -4382,7 +4530,7 @@ test_public_attachment_get_preserves_i64_timestamp_headers(void **state) {
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
-  req.lease.namespace_name = "transport-ns";
+  req.lease.ns = "transport-ns";
   req.lease.key = "resource/1";
   req.selector.name = "blob.txt";
   req.public_read = 1;
@@ -4586,7 +4734,7 @@ test_public_client_update_rejects_non_rewindable_retry_source(void **state) {
   rc = test_enqueue_source_new_non_rewindable("{\"value\":2}", 11U, 0U, &src,
                                               &src_state, &error);
   assert_int_equal(rc, LC_OK);
-  update_req.lease.namespace_name = "transport-ns";
+  update_req.lease.ns = "transport-ns";
   update_req.lease.key = "resource/1";
   update_req.lease.lease_id = "lease-1";
   update_req.lease.txn_id = "txn-acquire";
@@ -4824,7 +4972,7 @@ test_enqueue_from_retries_node_passive_and_cleans_parser_state(void **state) {
   rc = lc_engine_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
 
-  req.namespace_name = "transport-ns";
+  req.ns = "transport-ns";
   req.queue = "jobs";
   req.payload_content_type = "application/json";
   rc = lc_engine_client_enqueue_from(client, &req, NULL, NULL, &res, &error);
@@ -4838,7 +4986,7 @@ test_enqueue_from_retries_node_passive_and_cleans_parser_state(void **state) {
              server.handled_count);
   }
   assert_int_equal(rc, LC_ENGINE_OK);
-  assert_string_equal(res.namespace_name, "transport-ns");
+  assert_string_equal(res.ns, "transport-ns");
   assert_string_equal(res.queue, "jobs");
   assert_string_equal(res.message_id, "msg-enqueue-passive-2");
   assert_string_equal(res.correlation_id, "corr-enqueue-passive-2");
@@ -4904,7 +5052,7 @@ static void test_enqueue_from_checks_public_metadata_range(void **state) {
   rc = lc_engine_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
 
-  req.namespace_name = "transport-ns";
+  req.ns = "transport-ns";
   req.queue = "jobs";
   req.payload_content_type = "application/json";
   rc = lc_engine_client_enqueue_from(client, &req, NULL, NULL, &res, &error);
@@ -4992,7 +5140,7 @@ test_enqueue_from_rejects_non_rewindable_retry_source(void **state) {
   rc = test_enqueue_source_new_non_rewindable("hello world", 11U, 0U, &src,
                                               &src_state, NULL);
   assert_int_equal(rc, LC_OK);
-  req.namespace_name = "transport-ns";
+  req.ns = "transport-ns";
   req.queue = "jobs";
   req.payload_content_type = "application/json";
   bridge.source = src;
@@ -5161,7 +5309,7 @@ static void test_public_management_methods_emit_logs(void **state) {
   rc = lc_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_OK);
 
-  ns_req.namespace_name = "team-a";
+  ns_req.ns = "team-a";
   rc = lc_get_namespace_config(client, &ns_req, &ns_res, &error);
   assert_int_equal(rc, LC_OK);
 
@@ -5409,6 +5557,7 @@ static void test_public_enqueue_streams_payload_from_source(void **state) {
   rc = test_enqueue_source_new(payload, sizeof(payload) - 1U, 4U, &src,
                                &src_state, &error);
   assert_int_equal(rc, LC_OK);
+  src_state->client_to_close = client;
 
   req.queue = "jobs";
   req.content_type = "application/json";
@@ -5416,13 +5565,13 @@ static void test_public_enqueue_streams_payload_from_source(void **state) {
   req.visibility_timeout_seconds = 30L;
   rc = lc_enqueue(client, &req, src, &out, &error);
   assert_int_equal(rc, LC_OK);
+  assert_null(src_state->client_to_close);
   assert_int_equal(out.payload_bytes, (long)(sizeof(payload) - 1U));
   assert_true(src_state->read_count > 1U);
   assert_int_equal(src_state->offset, sizeof(payload) - 1U);
 
   lc_enqueue_res_cleanup(&out);
   lc_source_close(src);
-  lc_client_close(client);
   https_testserver_stop(&server);
   assert_server_ok(&server);
   lc_error_cleanup(&error);
@@ -5604,6 +5753,8 @@ static void test_public_query_stream_captures_headers_and_body(void **state) {
   lc_query_res res;
   lc_error error;
   lc_sink *sink;
+  lc_sink closing_sink;
+  client_closing_sink closing_context;
   const void *bytes;
   size_t length;
   int rc;
@@ -5611,6 +5762,8 @@ static void test_public_query_stream_captures_headers_and_body(void **state) {
   (void)state;
   client = NULL;
   sink = NULL;
+  memset(&closing_sink, 0, sizeof(closing_sink));
+  memset(&closing_context, 0, sizeof(closing_context));
   bytes = NULL;
   length = 0U;
   assert_true(https_tls_material_init(&material, 1));
@@ -5629,8 +5782,13 @@ static void test_public_query_stream_captures_headers_and_body(void **state) {
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
+  closing_context.client = client;
+  closing_context.delegate = sink;
+  closing_sink.write = client_closing_sink_write;
+  closing_sink.close = client_closing_sink_close;
+  closing_sink.impl = &closing_context;
 
-  req.namespace_name = "transport-ns";
+  req.ns = "transport-ns";
   req.selector_json = "{\"owner\":\"owner-a\"}";
   req.limit = 2L;
   req.cursor = "cursor-0";
@@ -5638,8 +5796,10 @@ static void test_public_query_stream_captures_headers_and_body(void **state) {
   req.return_mode = "compact";
   req.engine = "scan engine/1";
   req.refresh = "wait&refresh+now";
-  rc = lc_query(client, &req, sink, &res, &error);
+  rc = lc_query(client, &req, &closing_sink, &res, &error);
   assert_int_equal(rc, LC_OK);
+  assert_int_equal(closing_context.write_calls, 1U);
+  assert_null(closing_context.client);
   rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(length, strlen("{\"key\":\"resource/1\"}\n"));
@@ -5650,8 +5810,7 @@ static void test_public_query_stream_captures_headers_and_body(void **state) {
   assert_string_equal(res.correlation_id, "corr-query-stream");
 
   lc_query_res_cleanup(&res);
-  lc_sink_close(sink);
-  lc_client_close(client);
+  lc_sink_close(&closing_sink);
   https_testserver_stop(&server);
   assert_server_ok(&server);
   lc_error_cleanup(&error);
@@ -5716,7 +5875,7 @@ static void test_public_query_keys_streams_chunks_and_headers(void **state) {
   handler.begin = capture_query_key_begin;
   handler.chunk = capture_query_key_chunk;
   handler.end = capture_query_key_end;
-  req.namespace_name = "transport-ns";
+  req.ns = "transport-ns";
   req.selector_lql = "eq{field=/owner,value=owner-a}";
   req.limit = 2L;
   req.engine = "index&scan/fast+safe";
@@ -7802,6 +7961,10 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
   cmocka_unit_test(                                                            \
       test_public_lease_attach_retries_node_passive_and_cleans_parser_state)
 #elif defined(                                                                 \
+    LC_HTTPS_CASE_ENGINE_REQUEST_DEADLINE_BOUNDS_NODE_PASSIVE_FAILOVER)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_engine_request_deadline_bounds_node_passive_failover)
+#elif defined(                                                                 \
     LC_HTTPS_CASE_PUBLIC_ATTACHMENT_GET_PRESERVES_I64_TIMESTAMP_HEADERS)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_public_attachment_get_preserves_i64_timestamp_headers)
@@ -8009,6 +8172,8 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
           test_public_lease_attach_rejects_malformed_json_response),              \
       cmocka_unit_test(                                                           \
           test_public_lease_attach_retries_node_passive_and_cleans_parser_state), \
+      cmocka_unit_test(                                                           \
+          test_engine_request_deadline_bounds_node_passive_failover),             \
       cmocka_unit_test(                                                           \
           test_public_attachment_get_preserves_i64_timestamp_headers),            \
       cmocka_unit_test(                                                           \

@@ -12,14 +12,16 @@ sdk_prefix="$2"
 lua_package_path="$3"
 lua_script="$4"
 
-lua_bin="${LOCKDC_LUA_BIN:-lua5.5}"
+lua_bin="${LOCKDC_LUA_BIN:?LOCKDC_LUA_BIN must name the project-built Bootlin Lua runner}"
 luarocks_bin="${LOCKDC_LUAROCKS_BIN:-luarocks}"
 lua_version="${LOCKDC_LUA_VERSION:-5.5}"
-lonejson_src_rock="${LOCKDC_LONEJSON_SRC_ROCK:-https://github.com/sa6mwa/lonejson/releases/download/v0.43.0/lonejson-0.43.0-1.src.rock}"
+lonejson_src_rock="${LOCKDC_LONEJSON_SRC_ROCK:-https://github.com/sa6mwa/lonejson/releases/download/v0.44.0/lonejson-0.44.0-1.src.rock}"
 luarocks_build_root="${LOCKDC_LUAROCKS_BUILD_ROOT:-${tree_dir}/.luarocks-build}"
 luarocks_workdir="${LOCKDC_LUAROCKS_WORKDIR:-$PWD}"
 run_lua_smoke="${LOCKDC_RUN_LUA_SMOKE:-1}"
-lockdc_ld_preload="${LOCKDC_LD_PRELOAD:-}"
+luarocks_cc="${LOCKDC_LUAROCKS_CC:?LOCKDC_LUAROCKS_CC must name the selected Bootlin C compiler}"
+luarocks_cflags="${LOCKDC_LUAROCKS_CFLAGS:?LOCKDC_LUAROCKS_CFLAGS must contain the selected Bootlin C flags}"
+luarocks_lua_incdir="${LOCKDC_LUAROCKS_LUA_INCDIR:?LOCKDC_LUAROCKS_LUA_INCDIR must name the c.pkt.systems Lua headers}"
 
 # shellcheck source=assert_generated_path.sh
 source "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/assert_generated_path.sh"
@@ -44,6 +46,8 @@ require_path "$sdk_prefix"
 require_path "$lua_package_path"
 require_path "$lua_script"
 require_path "$luarocks_workdir"
+require_path "$luarocks_cc"
+require_path "$luarocks_lua_incdir/lua.h"
 lockdc_assert_generated_path "$luarocks_workdir" "$tree_dir"
 lockdc_assert_generated_path "$luarocks_workdir" "$luarocks_build_root"
 
@@ -54,7 +58,7 @@ if [ "$lua_runtime_version" != "Lua 5.5" ]; then
 fi
 
 install_lonejson_dependency() (
-  # LoneJSON 0.43 selects its native Bootlin toolchain through CMake.  Do not
+  # LoneJSON 0.44 selects its native Bootlin toolchain through CMake.  Do not
   # preload liblockdc's vendored libraries into that host-tool invocation:
   # loader diagnostics on stderr are part of the target-discovery output.
   unset LD_LIBRARY_PATH
@@ -97,26 +101,29 @@ install_lonejson_dependency() (
   "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" install "$lonejson_src_rock"
 )
 
-export LD_LIBRARY_PATH="$sdk_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+unset LD_LIBRARY_PATH
+unset LD_PRELOAD
 export LOCKDC_PREFIX="$sdk_prefix"
 : "${LONEJSON_LIBDIR:=$sdk_prefix/lib}"
 export LONEJSON_LIBDIR
-if [ -n "$lockdc_ld_preload" ]; then
-  export LD_PRELOAD="$lockdc_ld_preload${LD_PRELOAD:+:$LD_PRELOAD}"
-fi
 
 rm -rf "$tree_dir" "$luarocks_build_root"
 mkdir -p "$tree_dir"
 cd "$luarocks_workdir"
 
 install_lonejson_dependency
+luarocks_target_variables=(
+  "CC=${luarocks_cc}"
+  "CFLAGS=${luarocks_cflags}"
+  "LUA_INCDIR=${luarocks_lua_incdir}"
+)
 case "$lua_package_path" in
   *.rockspec)
     LOCKDC_LUAROCKS_BUILD_ROOT="$luarocks_build_root" \
-      "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" make "$lua_package_path"
+      "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" make "$lua_package_path" "${luarocks_target_variables[@]}"
     ;;
   *.src.rock|*.rock)
-    "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" install "$lua_package_path"
+    "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" install "$lua_package_path" "${luarocks_target_variables[@]}"
     ;;
   *)
     printf 'unsupported Lua package path: %s\n' "$lua_package_path" >&2
@@ -127,7 +134,7 @@ esac
 eval "$("$luarocks_bin" --tree "$tree_dir" path --lua-version "$lua_version")"
 
 if [ "$run_lua_smoke" = "0" ] || [ "$run_lua_smoke" = "OFF" ] || [ "$run_lua_smoke" = "FALSE" ]; then
-  printf '%s\n' "Skipping Lua runtime smoke: target module is not loadable by the host Lua VM"
+  printf '%s\n' "Skipping Lua runtime smoke: target module is not runnable on this host"
   exit 0
 fi
 

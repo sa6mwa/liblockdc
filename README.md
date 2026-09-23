@@ -1,6 +1,12 @@
 # liblockdc
 
-`liblockdc` is a C89/C90 client library for `lockd`. It provides a receiver-function public API for client, lease, queue delivery, attachment, management, and consumer-service handles, plus stream-based JSON and payload I/O. The project ships both static and shared libraries, a local development environment, a cross-architecture release workflow, and dependency-backed unit, e2e, sanitizer, coverage, fuzz, and benchmark targets.
+`liblockdc` is a C89/C90 client library for `lockd`. Its installed header is
+also usable from C++98-or-later applications through C linkage. It provides a
+receiver-function public API for client, lease, queue delivery, attachment,
+management, and consumer-service handles, plus stream-based JSON and payload
+I/O. The project ships both static and shared libraries, a local development
+environment, a cross-architecture release pipeline, and dependency-backed
+unit, e2e, sanitizer, coverage, fuzz, and benchmark targets.
 
 ## Supported targets
 
@@ -30,12 +36,19 @@ The library itself is delivered as:
 - streamed query-key callbacks and streaming queue subscribe/watch flows
 - managed consumer support with blocking and explicit start/stop/wait service modes
 - durable command-receipt, inbox, outbox, dispatcher, retry, reconciliation,
-  and dead-letter workflow receivers
+  and dead-letter outbox receivers
 - integrated SDK logging through `libpslog`
 
-The transactional messaging model, endpoint constraints, and C receiver
-surface are specified in [the workflow design](docs/inbox-outbox.md). The Lua
-workflow facade is documented in [the Lua SDK guide](docs/lua.md).
+The durable transactional messaging model and endpoint constraints are
+specified in [the outbox design](docs/inbox-outbox.md). The threadless
+producer, explicit dispatcher, and Vectis integration contract are specified
+in [the outbox dispatch architecture](docs/outbox-dispatch-architecture.md).
+The Lua outbox facade is documented in [the Lua SDK guide](docs/lua.md).
+The executable direct deployment pair is
+[`examples/outbox_producer.c`](examples/outbox_producer.c) and
+[`examples/lua/outbox_dispatcher.lua`](examples/lua/outbox_dispatcher.lua):
+the producer commits and exits, while the dedicated Lua process performs the
+foreign-effect dispatch.
 
 ## Pouch storage
 
@@ -56,8 +69,11 @@ available for callers that need multiple active local writers by adding
 `?single_writer=false`; that mode preserves
 correctness and process fencing but is not the primary performance target.
 
-Pouch endpoint options mirror the public C config and direct Pouch storage
-options. Common options are:
+New C and Lua applications should configure Pouch root policy with the typed
+`lc_pouch_settings` / `lockdc.open({ pouch = ... })` API. The endpoint options
+below remain fully supported for deployment compatibility and are overridden
+per field by typed settings. See [typed Pouch open settings](docs/pouch-open-settings-api.md).
+Common legacy options are:
 
 - `compression=zlib` for streaming at-rest zlib
   compression
@@ -73,12 +89,16 @@ options. Common options are:
 - `background_compaction=false` to disable the default idle-debounced
   compaction worker, and `disable_compaction_throttling=true` to remove its
   default throughput bound
-- `retention_seconds=<u64>` and `janitor_interval_seconds=<u64>` for the
-  post-mutation retention worker
+- `terminal_reclaim_min_bytes=<u64>` to set the minimum active-segment size
+  before bounded terminal-history compaction seals it (default 1 MiB)
 - `queue_watch=true` to request filesystem-assisted queue wake-up where the
   local filesystem supports it, with polling fallback otherwise
 - `query_engine=index|scan` and `query_fallback_engine=index|scan` for the
   namespace query preference used at open
+- `query_indexing=false` for roots that never use indexed queries. This
+  disables local index maintenance and makes implicit queries use scans;
+  explicit indexed queries and `flush_index` are unavailable. Pouch outbox
+  recovery and dead-letter management continue through bounded scan queries.
 
 The public API remains the same receiver-function SDK surface for remote and
 Pouch clients. State bodies, queue payloads, attachments, scan output,
@@ -87,7 +107,7 @@ the caller explicitly chooses an in-memory source or sink.
 
 ## Build system
 
-The repository (<https://github.com/sa6mwa/liblockdc>) uses a Makefile-first workflow with CMake as the build backend:
+The repository (<https://github.com/sa6mwa/liblockdc>) uses a Makefile-first lifecycle with CMake as the build backend:
 
 - `Makefile`
   - primary developer entry point
@@ -108,20 +128,28 @@ Normal development expects:
 - Ninja
 - GNU Make
 - host `clang-format` for `make format`
+- host `clangd` for editor diagnostics of the public C API
 - host Valgrind for the native Memcheck gate
 - `qemu-aarch64` and `qemu-arm` for the non-host release test matrix
 - `nerdctl compose` preferred for the local development environment, with `docker compose` as a fallback
 
 Every Linux build uses its matching pinned Bootlin GCC collection, including
 the compiler, linker, binutils, sysroot, headers, and runtime. The Make and
-CMake workflows provision those collections automatically; do not substitute
+CMake configurations provision those collections automatically; do not substitute
 host or distro cross compilers. Toolchains are shared under
 `${CPKT_TOOLCHAIN_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/c.pkt.systems/toolchains}`
 and verified dependency archives under
 `${CPKT_DEPENDENCY_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/c.pkt.systems/deps}`.
 Repository-local `.cache/` directories are disposable build and staging state.
 
-## Common workflows
+The pinned `c.pkt.systems` 0.10.0 GNU SDKs require glibc 2.43 or newer at
+deployment. This does not change the `liblockdc` public ABI, but deployments
+using the shared GNU SDK must upgrade their runtime accordingly. Development
+executables, tests, examples, Lua module checks, and SDK consumer probes run
+directly with their selected Bootlin ELF interpreter and private runtime lookup
+paths; they do not use `LD_LIBRARY_PATH` or a host Lua interpreter.
+
+## Common commands
 
 Build the normal host development preset:
 
@@ -136,8 +164,10 @@ dependency cache.
 Run the host release suites for the shipped x86_64 GNU and musl builds:
 
 ```bash
-make test
+make test-host
 ```
+
+`make test` is the short alias for the sanitizer-instrumented debug suite.
 
 Run the non-host cross release suites:
 
@@ -151,18 +181,17 @@ Run the complete local confidence path:
 make test-all
 ```
 
-`make test-all` runs the sanitizer-instrumented debug suite, both
-host-executable Bootlin release suites, QEMU cross suites, Valgrind, and
-deterministic local e2e. Its CTest suites use a bounded four-job default
+`make test-all` runs the sanitizer-instrumented debug suite and deterministic
+local e2e. It is the complete fast functional edit-loop gate, not an alias for
+the release matrix. Its CTest suites use a bounded four-job default
 (`LOCKDC_CTEST_PARALLEL_LEVEL` overrides it), while tests marked serial remain
-serial. Fuzz smoke stays explicit (`make fuzz-smoke`) and in `make prerelease`:
-it runs AFL++ only for deterministic unit-level parsers, streams, and Pouch
-primitives, then runs the full Pouch LQL and lifecycle scenarios in isolated
-normal processes with deterministic input mutation. The AFL++ compiler
-bootstrap is hardening work, not an everyday functional invariant. Performance
-workloads likewise belong to the explicit
-`make bench-gate` command. The complete artifact rehearsal remains `make
-release-matrix`.
+serial. Cross-target testing, Valgrind, and fuzzing are release confidence
+work: `make prerelease` runs the native debug/e2e suite, Valgrind, and full
+fuzzing, while `make release-matrix` builds, tests, packages, and verifies the
+shipped Bootlin GNU/musl and QEMU cross matrix. The AFL++ compiler bootstrap is
+hardening work, not an everyday functional invariant. Performance workloads
+belong to the explicit `make bench-gate` command. The complete artifact
+rehearsal remains `make release`.
 
 `make prerelease-hardening` is the longer pre-release layer. It keeps the
 normal release gate bounded, then adds native benchmarks, the Pouch-vs-lockd
@@ -194,7 +223,7 @@ the same iteration count across all benchmark cases.
 All significant Make targets print total elapsed time on completion.
 
 `make format` runs `clang-format` over the C source/header tree and is also
-part of the clean-slate release workflow.
+part of the clean-slate release pipeline.
 
 ## Local development environment
 
@@ -223,7 +252,7 @@ Stop the environment:
 make dev-down
 ```
 
-The e2e workflow is self-contained. `make test-e2e` resets the generated environment state, starts the compose stack, waits for the generated bundles and listeners, probes the active disk endpoint, and then runs the e2e CTest preset.
+The e2e environment is self-contained. `make test-e2e` resets the generated environment state, starts the compose stack, waits for the generated bundles and listeners, probes the active disk endpoint, and then runs the e2e CTest preset.
 
 Additional development-environment notes are available in the repository at `devenv/README.md`.
 
@@ -237,11 +266,12 @@ Create the complete release set:
 make release
 ```
 
-`make release` is the final clean-slate release workflow. It verifies release
+`make release` is the final clean-slate release pipeline. It verifies release
 tag semantics, removes generated state, then runs the same proof graph as
 `make prerelease`: formatting, debug sanitizer tests including Lua coverage,
-Valgrind, fuzz smoke, lockd e2e, bounded benchmark smoke, and the release
-matrix. Use
+Valgrind, full deterministic fuzzing, lockd e2e, and the release matrix. The
+longer performance, churn, and compaction campaigns remain the explicit
+`make prerelease-hardening` layer. Use
 `make release-matrix` when you explicitly want to reuse existing build and
 dependency caches for a faster release matrix/package rerun.
 
@@ -341,7 +371,7 @@ This keeps lease identity, transaction identifiers, and related lifecycle state 
 
 ### JSON and lonejson
 
-`liblockdc` depends on `lonejson 0.43.0` with shared-library ABI `26`.
+`liblockdc` depends on `lonejson 0.44.0` with shared-library ABI `26`.
 `lonejson` is used for:
 
 - typed JSON response parsing for management, attachment, queue, namespace,
@@ -398,7 +428,7 @@ The intended ownership model is:
   client distribution instead of maintaining a second `lockd` Lua client or an
   incompatible JSON binding layout
 
-This keeps one coherent SDK import path for downstream Lua workflow runtimes.
+This keeps one coherent SDK import path for downstream Lua outbox runtimes.
 
 For the Lua public surface, consumer behavior, and packaging model, see:
 
@@ -543,7 +573,7 @@ The examples in the repository at <https://github.com/sa6mwa/liblockdc/tree/main
   - AFL++ unit harnesses and isolated-process Pouch integration mutation
     harnesses
 - `scripts/`
-  - workflow and environment scripts
+  - build, release, and environment scripts
 - `devenv/`
   - local environment notes
 

@@ -36,7 +36,7 @@ SDK root or make `lockdc.pc` visible to `pkg-config`.
 The generated rockspec expects:
 
 - package `lockdc`
-- `lonejson == 0.43.0-1`
+- `lonejson == 0.44.0-1`
 - Lua `>= 5.5, < 5.6`
 
 The lifecycle executes and packages only Lua 5.5. Each release includes the
@@ -45,7 +45,31 @@ standalone `liblockdc-lua-<version>.tar.gz` source package, the rendered
 embeds that exact standalone archive; all three artifacts are checksum-listed
 and recursively privacy-scanned before release.
 
-The C SDK is pinned to the matching `lonejson 0.43.0` native dependency for
+For local examples and test modules, use the `LOCKDC_LUA_BIN` value printed by
+`make lua-env`. It names the project-built Lua 5.5 runner linked to the selected
+Bootlin runtime. LuaRocks remains a packaging tool; it is not used as the
+interpreter for a Bootlin-built native module.
+
+## Local runner and search paths
+
+`make lua-env` prints shell-evaluable exports for the project-built Bootlin Lua
+runner and the repository's local Lua module paths. It does not install either
+Lua rock. After installing `lockdc` and `lonejson` into a local LuaRocks tree,
+load that tree's complete paths after the project exports, then run examples
+with the Bootlin runner:
+
+```bash
+eval "$(make -s lua-env)"
+eval "$(luarocks --tree /path/to/lua-tree --lua-version 5.5 path)"
+"$LOCKDC_LUA_BIN" examples/lua/acquire_update_json.lua
+```
+
+The LuaRocks path export supplies the installed `lonejson` module as well as
+`lockdc`. Do not replace this setup with `LD_LIBRARY_PATH` or a host Lua
+interpreter: prefix-selected `lockdc` modules carry their SDK runtime path and
+the lifecycle checks them through the Bootlin runner.
+
+The C SDK is pinned to the matching `lonejson 0.44.0` native dependency for
 mapped state load/save and internal typed JSON parsing. The Lua rock declares
 the corresponding Lua-facing `lonejson` rock so Lua JSON behavior and the C
 SDK JSON boundary stay in the same release line.
@@ -65,7 +89,7 @@ This keeps the Lua dependency graph coherent:
 
 - one SDK owner for the public lock client and JSON contract
 - one Lua JSON binding version aligned with the public `liblockdc` API surface
-- one installation/import path for downstream workflow runtimes
+- one installation/import path for downstream outbox runtimes
 
 The Lua binding does not expose `pslog` configuration. Native logging is a
 `liblockdc` SDK concern; normal Lua rock users get the SDK no-op logger
@@ -81,24 +105,74 @@ The top-level module is:
 local lockdc = require("lockdc")
 ```
 
+`lockdc` is the supported package. `lockdc.core` is an internal native module
+used to implement it; applications must not require it or depend on its
+methods, result shapes, or convenience behavior.
+
 Primary entrypoints:
 
 - `lockdc.open(config)`
 - `lockdc.version_string()`
+- `lockdc.xid_new()`
 - `lockdc.encode_json(value)`
 - `lockdc.decode_json(payload)`
 - `lockdc.json_null`
+- `lockdc.OK`, `lockdc.ERR_*`, and `lockdc.NACK_*` C status/intent constants
+- `lockdc.pouch_crypto_generate_key()`
+- `lockdc.pouch_crypto_default_key_file()`
+- `lockdc.pouch_crypto_generate_key_file(path[, overwrite])`
 
 Primary handle types:
 
 - `Client`
 - `Lease`
 - `Message`
-- `Workflow`
-- `WorkflowTransaction`
-- `WorkflowParticipant`
+- `Outbox`
+- `OutboxDispatcher`
+- `OutboxTransaction`
+- `OutboxParticipant`
 - `OutboxJob`
+- `HistoryConsumer`
 - `Service`
+
+## Byte sources, sinks, and explicit materialization
+
+The Lua façade keeps the C `lc_source`/`lc_sink` distinction visible. Methods
+that send bytes accept a source string, `{ bytes = ... }`, `{ path = ... }`,
+`{ fd = ... }`, or a callback source with `read(max_bytes)`, optional `reset`,
+and optional `close`. A callback source returns a byte string, `nil` at EOF,
+or `nil, message` on failure.
+
+Methods that receive bytes require a sink. A sink is a path string, file
+descriptor number, `{ path = ... }`, `{ fd = ... }`, or a callback table:
+
+```lua
+local streamed, written_or_err = job:write_payload({
+  write = function(chunk)
+    foreign_request:write(chunk) -- receives bounded chunks
+    return true                  -- nil/no return is also accepted
+  end,
+  close = function()
+    foreign_request:finish()
+  end,
+})
+assert(streamed == nil)
+assert(type(written_or_err) == "number")
+```
+
+`write` runs synchronously and must either accept the complete supplied chunk
+or return `false, message` / `nil, message` (or raise) to fail the operation.
+There are no partial writes. `close` is optional, runs once when liblockdc
+releases the sink, and cannot report an operation error. Do not call methods
+on the receiver that started a callback-sink operation; that receiver is
+deliberately protected against re-entry until streaming returns. In particular,
+terminal job methods are unavailable from a job payload sink.
+
+Streaming methods never silently buffer their output. Their first result is
+`nil` and their second result reports bytes written or operation metadata. The
+matching `read_*` method deliberately materializes bytes into a Lua string;
+`read_*_json` additionally decodes that string. Use a `read_*` method only
+when the value is deliberately bounded in process memory.
 
 ## Client API
 
@@ -127,32 +201,49 @@ local client, err = lockdc.open({
 })
 ```
 
-`client_bundle_path` remains available for compatibility, but new Lua code
-should prefer `client_bundle_source`.
+`client_bundle_path` is not a Lua API. Use `client_bundle_source` for every
+Lua configuration, including a path-shaped source.
 
 ### Local Pouch storage
 
-Use exactly one absolute `pouch://` endpoint for local storage. Lua exposes the
-same Pouch client configuration fields as `lc_client_config`: `pouch_crypto_key`,
-`pouch_crypto_key_file`, `pouch_crypto_generate_key_file`, and
-`pouch_compression`. Explicit Lua configuration takes the same precedence over
-endpoint query options as the C client configuration.
+Use exactly one absolute, option-free `pouch://` endpoint for local storage.
+Put all root-open policy in the nested `pouch` table; it includes crypto,
+compression, writer, durability, maintenance, queue-watch, and query-index
+settings. Presence is significant: `false` and `0` are explicit settings.
+Top-level `pouch_crypto_*`/`pouch_compression` fields and Pouch endpoint query
+options are not accepted by the Lua façade.
 
 ```lua
 local client, err = lockdc.open({
   endpoints = { "pouch:///var/lib/my-service/lockd-root" },
   default_namespace = "default",
-  pouch_crypto_key_file = "/var/lib/my-service/lockd-root/pouch.key",
-  pouch_crypto_generate_key_file = true,
-  pouch_compression = "zlib",
+  pouch = {
+    crypto_key_file = "/var/lib/my-service/lockd-root/pouch.key",
+    crypto_generate_key_file = true,
+    compression = "zlib",
+    query_indexing = false,
+    query_engine = "scan",
+  },
 })
 ```
 
 The supported compression values are `"none"` and `"zlib"`. Pouch remains
 exclusive single-writer by default; opening another writer for the same root
-returns the normal structured `lockdc.open` error. Endpoint query options stay
-supported for compatibility, including `?single_writer=false` where shared
-writers are explicitly required.
+returns the normal structured `lockdc.open` error. Set
+`pouch = { single_writer = false }` where shared writers are explicitly
+required.
+
+Typed Pouch settings are local-only: supplying a non-empty `pouch` table to a
+remote or Unix-socket client returns the normal structured open error. See
+[typed Pouch open settings](pouch-open-settings-api.md) for every key and its
+precedence rule.
+
+The explicit Pouch crypto helpers mirror the safe C utility workflows:
+`lockdc.pouch_crypto_generate_key()` returns a new key string,
+`lockdc.pouch_crypto_default_key_file()` returns the platform default path, and
+`lockdc.pouch_crypto_generate_key_file(path[, overwrite])` creates a mode-0600
+key file and returns its generated key. Treat returned keys as secrets and use
+the nested `pouch.crypto_key_file` setting for long-lived process configuration.
 
 Common client methods:
 
@@ -161,9 +252,10 @@ Common client methods:
 - `client:acquire(req)`
 - `client:acquire_for_update(req, handler)`
 - `client:describe(req)`
-- `client:get_raw(req, dest)`
-- `client:get_json(req)`
-- `client:update_raw(req, body)`
+- `client:get(req, sink)` and `client:read(req)` / `client:read_json(req)`
+  (`req.namespace` selects an explicit namespace; omitted uses the client
+  default)
+- `client:update(req, body)`
 - `client:update_json(req, value)`
 - `client:mutate(req)`
 - `client:metadata(req)`
@@ -172,7 +264,7 @@ Common client methods:
 - `client:release(req)`
 - `client:attach(req, body)`
 - `client:list_attachments(req)`
-- `client:get_attachment(req, dest)`
+- `client:get_attachment(req, sink)` and `client:read_attachment(req)`
 - `client:delete_attachment(req)`
 - `client:delete_all_attachments(req)`
 - `client:queue_stats(req)`
@@ -183,64 +275,126 @@ Common client methods:
 - `client:queue_ack(message_or_req)`
 - `client:queue_nack(req)`
 - `client:queue_extend(req)`
-- `client:query_raw(req, dest)` (`req.engine` and `req.refresh` may select the
-  query engine/refresh mode; document-query trailer metadata is returned as
-  `metadata_json`)
+- `client:query(req, sink)` and `client:read_query(req)` (`req.engine` and
+  `req.refresh` may select the query engine/refresh mode; document-query
+  trailer metadata is returned as `metadata_json`)
+- `client:query_keys(req, handler)` streams decoded key bytes to `handler`
 - `client:get_namespace_config(req)`
 - `client:update_namespace_config(req)`
 - `client:flush_index(req)`
-- `client:new_workflow(config)`
-- `client:subscribe(req, handler)`
-- `client:subscribe_with_state(req, handler)`
+- `client:txn_replay(req)`
+- `client:txn_prepare(req)`
+- `client:txn_commit(req)`
+- `client:txn_rollback(req)`
+- `client:tc_lease_acquire(req)`
+- `client:tc_lease_renew(req)`
+- `client:tc_lease_release(req)`
+- `client:tc_leader()`
+- `client:tc_cluster_announce(req)`
+- `client:tc_cluster_leave()`
+- `client:tc_cluster_list()`
+- `client:tc_rm_register(req)`
+- `client:tc_rm_unregister(req)`
+- `client:tc_rm_list()`
+- `client:new_outbox(config)`
+- `client:new_history_consumer(config)`
+- `client:subscribe(req, handler)` and `client:subscribe_with_state(req, handler)`
 - `client:watch_queue(req, handler)`
-- `client:new_consumer_service(...)`
-- `client:start_consumer(...)`
+- `client:new_consumer_service(config)`
 
-The Lua binding intentionally excludes the TC/XA administrative APIs.
+## Pouch durable-history consumers
 
-## Inbox/outbox workflows
+`client:new_history_consumer(config)` registers or reopens a durable Pouch
+retention cursor. It is a compaction-safety boundary, not a history-query API:
+the application remains responsible for obtaining and applying records through
+its own replication, backup, or resume protocol. Remote lockd clients reject
+this Pouch-only operation.
 
-`client:new_workflow(config)` creates the inbox/outbox parent receiver. Its
-`namespace` (or `namespace_name`) contains both durable inbox and outbox keys;
-the private dispatcher signals committed keys locally and performs recovery
-internally. Lua code never supplies an xid, manages the dispatcher, or receives
-a callback from its thread.
+`config.namespace` and `config.consumer_id` form the
+stable durable identity. A new identity begins at
+`initial_acknowledged_index_seq` (zero by default), or set
+`start_at_current = true` to retain only future history. Existing identities
+always keep their recorded acknowledgement; the supplied initial position is
+ignored. `start_at_current` and `initial_acknowledged_index_seq` are mutually
+exclusive.
+
+The returned receiver provides:
+
+- `history:position()` → `{ acknowledged_index_seq, current_index_seq }`
+- `history:advance(acknowledged_index_seq)` → the updated position; it may
+  only move forward and cannot exceed the current sequence.
+- `history:unregister()` → removes the durable retention pin.
+- `history:close()` → releases only the local handle; it deliberately leaves
+  the durable pin in place.
+
+Use a stable consumer ID and register it before producing history that must be
+retained. A slow cursor can retain more on-disk history, but normal Pouch open,
+read, query, and mutation paths never enumerate consumer records.
+
+## Inbox/outboxes
+
+`client:new_outbox(config)` creates a threadless inbox/outbox producer. Its
+`namespace` contains both durable inbox and outbox keys.
+It never starts a dispatcher, claims a job, performs recovery, or invokes a
+foreign effect. Use `outbox:dispatcher()` only in the dedicated worker or
+service domain that owns delivery. The complete lifecycle and host-integration
+contract is in [the outbox dispatch architecture](outbox-dispatch-architecture.md).
 
 ```lua
-local workflow = assert(client:new_workflow({
-  namespace = "orders-workflow",
+-- Request/producer domain: this is safe to construct without creating a
+-- background dispatcher.
+local outbox = assert(client:new_outbox({
+  namespace = "orders-outbox",
   owner = "orders-api",
   max_attempts = 100,
 }))
 
-local txn, receipt = assert(workflow:append_outbox({
+local txn = assert(outbox:append({
   operation_id = order_id,
   effect_id = "charge-card",
   effect_key = "charge:" .. order_id,
   payload_digest = payload_digest,
   kind = "http",
   destination = "https://payments.example/charges",
-  headers = { ["idempotency-key"] = "charge:" .. order_id },
+  headers_json = lockdc.encode_json({ ["idempotency-key"] = "charge:" .. order_id }),
 }, payload_source))
 
-local order = assert(txn:acquire({ namespace_name = "orders", key = order_id }))
+local order = assert(txn:acquire({ namespace = "orders", key = order_id }))
 assert(order:update_json({ status = "payment_pending" }))
 order:close()
-assert(txn:commit())
+local commit = assert(txn:commit())
 txn:close()
 
-local job = assert(workflow:next(1000))
--- Stream arbitrary bytes to a host-owned request-body sink; no dispatcher
--- thread enters the Lua VM.
-assert(job:write_payload(foreign_request_body_sink))
-assert(job:complete())
+-- `commit.outbox_receipts` exists only after the durable commit. A host with a
+-- bounded worker/supervisor wake channel may copy those keys now, never before.
+
+-- worker.lua, in a dedicated worker/service process. This opens its own client
+-- and outbox, then returns the one compatible local dispatcher or starts it
+-- lazily. It does not run Lua on its private C thread.
+-- For a Pouch root shared with the producer process, both client configurations
+-- must explicitly select the supported `single_writer=false` shared-root mode.
+local worker_client = assert(lockdc.open(worker_client_config))
+local worker_outbox = assert(worker_client:new_outbox({
+  namespace = "orders-outbox",
+  owner = "orders-api",
+  max_attempts = 100,
+}))
+local dispatcher = assert(worker_outbox:dispatcher())
+assert(dispatcher:run({
+  handlers = {
+    http = function(job)
+      assert(job:write_payload(foreign_request_body_sink))
+      return job:complete()
+    end,
+  },
+}))
 ```
 
-`headers` is the façade convenience form and is JSON-encoded into the durable
-`headers_json` envelope. Pass `headers_json` directly when it is already
-serialized; supplying both is an error. `workflow:accept_inbox(message)`
+`headers_json` is the durable serialized header envelope. Build it explicitly
+with `lockdc.encode_json` when the headers originate as a Lua table.
+`outbox:accept_inbox(message)`
 returns `nil, result` on an accepted duplicate, where `result.duplicate` is
-true. Otherwise it returns a `WorkflowTransaction` and `result.accepted` is
+true. Otherwise it returns a `OutboxTransaction` and `result.accepted` is
 true.
 
 Outbox `payload_digest` is required immutable metadata binding the supplied
@@ -252,58 +406,225 @@ or buffer the payload before it stages the attachment.
 `max_attempts` must fit the C API's signed 32-bit integer range; values outside
 that range are rejected instead of being narrowed or defaulted.
 
-Workflow receivers are explicit and owned. Parent acceptance and append
-operations return a new `WorkflowTransaction` only when they created fresh
+Pouch outboxes automatically retain a dead letter for 30 days by default and
+also cap retained dead letters at 1,024 envelopes or 64 MiB per namespace.
+Set `dead_letter_retention_seconds` to a positive override or `-1` to disable
+automatic retention. `dead_letter_max_count` and `dead_letter_max_bytes` set
+the two capacity limits; use `false` for either Lua field to disable that one
+capacity bound. This policy is local-Pouch-only—an explicit retention setting
+on a remote lockd outbox is rejected rather than silently ignored. Automatic
+reclamation requires a live dispatcher and is exact-key maintenance, never a
+query or a side effect of `dispatcher:next()`. See
+[Pouch dead-letter retention](pouch-dead-letter-retention.md).
+
+Outbox receivers are explicit and owned. Parent acceptance and append
+operations return a new `OutboxTransaction` only when they created fresh
 durable work:
 
-- `workflow:append_outbox(entry, payload)` returns `txn, receipt`; a matching
-  effect returns `nil, receipt` with `receipt.duplicate`.
-- `workflow:accept_inbox(message)` returns `txn, result`; a matching source
+- `outbox:append(entry, payload)` returns `txn, nil` for a fresh
+  append. Its receipt appears only in the successful `txn:commit()` result. A
+  matching committed effect returns `nil, receipt` with `receipt.duplicate`.
+- `outbox:accept_inbox(message)` returns `txn, result`; a matching source
   message returns `nil, result` with `result.duplicate`.
-- `workflow:accept_command(request)` returns `txn, receipt`; a matching
+- `outbox:accept_command(request)` returns `txn, receipt`; a matching
   command returns `nil, receipt` with `receipt.duplicate`. Use
-  `workflow:command_receipt(identity)` for a direct durable status read,
-  `workflow:write_command_result(identity, destination)` to stream a completed
-  result body, and `workflow:resume_command(identity)` to obtain a transaction
-  for a pending command. A terminal command resumes as `nil, receipt`.
-- `workflow:next(timeout_ms)` returns a claimed job. `0` only checks the local
-  ready set and `-1` waits indefinitely.
-- `workflow:stats()` returns process-local dispatcher counters;
-  `workflow:reconcile()` requests an asynchronous durable recovery sweep.
-- `workflow:replay_dead_letter(outbox_key)` returns one dead-lettered effect to
-  pending; `workflow:delete_dead_letter(outbox_key)` permanently deletes it and
-  its payload. `workflow:export_dead_letters(options, destination)` exports
-  envelopes as `"json"` or `"jsonl"`; omitting `destination` returns a
-  materialized Lua string, while file/fd destinations stream directly.
-- `workflow:close()` stops and joins the private dispatcher.
+  `outbox:get_command_receipt(identity)` for a direct durable status read,
+  `outbox:write_command_result(identity, sink)` to stream a completed result
+  body, `outbox:read_command_result(identity)` to materialize it, and
+  `outbox:resume_command(identity)` to obtain a transaction for a pending
+  command. A terminal command resumes as `nil, receipt`.
+  `outbox:get_command_receipt_by_id(command_id)` is suitable for an
+  authenticated status resource. `outbox:wait_command(command_id, timeout_ms)`
+  only waits for that durable receipt; it never runs a dispatcher handler or
+  starts a worker. Use `0` for one read, `-1` for no deadline, or a positive
+  monotonic deadline that also bounds each remote receipt read. On timeout it
+  returns `receipt, error`, where receipt
+  remains pending and `error.code` is `ERR_TIMEOUT`. Set
+  `generate_idempotency_key = true` and omit
+  `idempotency_key` in `accept_command` only when returning the generated key
+  or status reference to the caller.
+  Invalid or unknown command IDs use the normal Lua failure result
+  `nil, error, code`; only a timeout has a pending receipt to return.
+- `outbox:transaction(fn)` provides a lazy transaction proxy. Its first
+  participant may be `acquire`, `append`, `accept_inbox`, or
+  `accept_command`; it commits on normal callback return and rolls back on an
+  error or any failed staged operation, even when the callback elects to
+  inspect and return normally from that structured error. It starts no durable
+  marker by itself, so an empty transaction is invalid. Its successful result
+  includes `outbox_receipts`, so only that result contains fresh keys safe to
+  forward. A pre-existing duplicate found after a domain participant is staged
+  makes the transaction rollback-only, so no domain change can commit without
+  its outbox/idempotency boundary. A duplicate first record returns its durable
+  receipt even when the callback does not return it; a duplicate before a
+  domain participant is enrolled may still allow an independently fresh
+  outbox receipt to commit.
+- `outbox:begin()` returns the same lazy transaction receiver for advanced
+  code that needs explicit commit/rollback control. Its first participant has
+  the same domain-acquire/command/inbox/outbox choices as `transaction(fn)`.
+- `outbox:dispatcher()` acquires the compatible local dispatcher. It has no
+  configuration argument because dispatch policy comes from the outbox's
+  canonical configuration.
+- `client:new_outbox(config, { dispatcher = dispatcher })` creates another
+  threadless producer attached to an already-compatible dispatcher. It is the
+  local fast wake path only: a committed receipt remains the durable source of
+  truth and may still be forwarded to a supervisor.
+- `dispatcher:next(timeout_ms)` returns a claimed job for advanced pull-based
+  consumers and claims only on that demand. `dispatcher:next_with_state(timeout_ms)`
+  is the explicit Pouch-only stateful variant: it returns the same job shape
+  with `job:state()` available as an ordinary lease facade. It does not fall
+  back to stateless delivery when the selected backend cannot provide a paired
+  checkpoint claim. `dispatcher:next(0)` is strictly an in-memory, non-query
+  probe; a blocking call may request durable recovery. A stateful pull may
+  reclaim one exact completed-checkpoint marker before its probe; it never
+  scans or queries the namespace for that housekeeping.
+  `dispatcher:run({handlers = ..., with_state = true})` is the blocking
+  dedicated worker loop; bounded `dispatcher:pump({ ..., with_state = true })`
+  is for hosts that own their event loop. `with_state` has the same paired Pouch
+  claim semantics as `next_with_state`; omitting it preserves the stateless
+  path. `pump(options)`
+  is for hosts that own their event loop;
+  its `timeout_ms` is non-negative. Like `next(timeout_ms)`, it bounds only
+  this pull attempt; it is independent of the remote request
+  `shutdown_timeout_ms` configured on the outbox.
+  The first consumption choice binds a dispatcher to either raw pull or its
+  caller Lua state's handler table; the other mode, another handler table, or
+  another Lua state is rejected. A handler cannot recursively call `pump()` or
+  `run()` on that dispatcher (including through an alias), nor call blocking
+  `stop()` or `wait()` while it owns the active job. It must return its terminal
+  outcome before another job is consumed. Neither should run foreign effects in
+  an HTTP route.
+- `dispatcher:notify_outbox_key(outbox_key)` accepts a key from a successful
+  commit receipt as a bounded, process-local latency hint. It does not query
+  the durable namespace; duplicate, unavailable, and overflowed hints are
+  repaired by ordinary durable reconciliation.
+- `dispatcher:stats()` returns process-local counters;
+  `dispatcher:reconcile()` requests durable recovery.
+- `dispatcher:replay_dead_letter(outbox_key)` returns one dead-lettered effect
+  to pending; `dispatcher:delete_dead_letter(outbox_key)` permanently deletes
+  it and its payload. `dispatcher:export_dead_letters(options, sink)` exports
+  envelopes as `"json"` or `"jsonl"` to a required sink;
+  `dispatcher:read_dead_letters(options)` is the explicit materializer.
+- `outbox:close()` releases only the producer. `dispatcher:stop()` and
+  `dispatcher:wait()` control the explicitly acquired dispatcher;
+  `dispatcher:close()` releases a handle and does not stop shared work.
+- `client:close()` stops and joins private dispatcher workers but does not wait
+  for a job already returned to Lua. That job remains usable for its terminal
+  decision or close; stopped dispatcher wrappers reject new work and remain
+  closeable.
 
-Transactions provide `acquire`, `append_outbox`, `accept_command`,
+Transactions provide `acquire`, `append`, `accept_command`, `accept_inbox`,
 `complete_command`, `fail_command`, `commit`, `rollback`, and `close`.
 `accept_command` permits at most one command receipt per transaction.
-Participants provide `info`, `describe`, `get_raw`, `get_json`, `update_raw`,
+`txn:commit()` returns `{ outbox_receipts = { ... } }` only after a durable
+commit; it returns no fresh outbox key on failure or rollback.
+`txn:append()` may return an existing duplicate receipt, which is
+already safe to forward; fresh appended keys remain commit-published.
+Participants provide `info`, `describe`, `get`, `read`, `read_json`, `update`,
 `update_json`, `mutate`, `mutate_local`, `metadata`, `remove`, `keepalive`, and
-the full attachment surface. Jobs provide `info`, `write_payload` (also
-`payload`), `payload_json`, `renew`, `complete`, `retry`, `dead_letter`, and
-`close`.
+the full attachment surface. Jobs provide `info`, `write_payload`,
+`read_payload`, `read_payload_json`, `state`, `renew`, `complete`, `retry`,
+`dead_letter`, and `close`. `write_payload` requires a sink, including a
+callback sink; `read_payload_json` deliberately materializes and decodes the
+complete body, so use it only when that size is deliberately bounded.
 
 Participants deliberately have no release or terminal-decision method. Closing
 or deciding a transaction invalidates its participants, so close each view when
-finished. A workflow job is the only handoff to host effect execution; keep its
-claim alive with `job:renew()` for longer foreign operations, then select
+finished. A dispatcher job is the only handoff to host effect execution; keep
+its claim alive with `job:renew()` for longer foreign operations, then select
 exactly one terminal operation. A successful `complete`, `retry`, or
 `dead_letter` consumes the job. If a terminal operation returns an error, the
 job remains active and the same terminal operation may be retried until its
 claim expires. Use `job:close()` only when abandoning a non-terminal local
 handle; it does not retry or complete the durable job.
 
+`job:state()` returns `nil` for a normal stateless pull. For a stateful pull it
+returns an ordinary Lua lease facade over the job's paired checkpoint. Use its
+normal streaming, JSON, metadata, mutation, and attachment methods. It is a
+borrowed view: do not close it. The job retains the authoritative claim, and
+after a successful job terminal operation or `job:close()` a previously
+returned checkpoint wrapper is invalid. Checkpoints survive `retry`, expiry
+recovery, and dead-letter replay: every successful checkpoint or attachment
+mutation commits under the paired lease before the Lua method returns, rather
+than remaining as a claim-local stage that expiry can discard. The parent
+remembers that a stateful checkpoint may exist, so a later ordinary
+`dispatcher:next()` claimant also reclaims the checkpoint and attachments on
+completion. `state:remove()` removes its body but completion still retires any
+paired attachments. If a process stops after the parent terminal record is
+durable but before that cleanup, a later stateful pull reclaims the one durably
+named checkpoint before claiming work. Completion has already succeeded in
+that case: cleanup is deferred to the durable marker rather than risking a
+redelivery that lacks its checkpoint. If the terminal decision was not yet
+durable, normal redelivery keeps the checkpoint instead. A checkpoint captured
+by a handler is also invalid after
+that handler returns without a valid terminal outcome: its automatic retry
+consumes the native job. While a checkpoint `get()` or attachment read is
+streaming into a sink, `job:close()` and job terminal methods are rejected;
+the sink must return before the job can release its paired lease. Stateless
+pulls remain unaffected. The checkpoint is query-hidden and its key is
+deliberately not a Lua configuration or lookup surface.
+
+Inside a `dispatcher:run()` or `dispatcher:pump()` handler,
+`job:complete()`, `job:retry(options)`, and `job:dead_letter(diagnostic)`
+construct an outcome that the façade applies after the handler returns. The
+same methods on a job returned by raw `dispatcher:next()` perform the direct
+terminal operation. `retry({ delay_seconds = n, diagnostic = message })`
+durably reschedules the job within the configured retry bounds. `retry()` takes
+no argument or that options table; a diagnostic string by itself is invalid.
+
+## Raw XA and transaction-coordinator APIs
+
+The outbox API is the normal Lua transactional-outbox path. It creates and
+recovers durable decisions without requiring the application to manage an XID.
+For a coordinator, resource manager, or recovery tool that must operate at the
+same level as the C API, the raw XA surface is also available on `client`.
+
+Use `lockdc.xid_new()` to mint a valid transaction identifier for raw XA work.
+
+`txn_prepare`, `txn_commit`, and `txn_rollback` accept a table with `txn_id`,
+`participants`, optional `expires_at_unix`, optional `tc_term`, and optional
+`target_backend_hash`. Each participant has `namespace`, `key`, and an
+optional `backend_hash`. `txn_replay` accepts `{ txn_id = ... }`. Decision and
+replay results include `txn_id`, `state`, and `correlation_id`.
+
+```lua
+local txn_id = assert(lockdc.xid_new())
+local participant = { namespace = "orders", key = "order-42" }
+
+assert(client:txn_prepare({
+  txn_id = txn_id,
+  participants = { participant },
+  expires_at_unix = 2147483647,
+  tc_term = 1,
+}))
+assert(client:txn_commit({
+  txn_id = txn_id,
+  participants = { participant },
+  tc_term = 1,
+}))
+```
+
+The `tc_lease_*`, `tc_leader`, `tc_cluster_*`, and `tc_rm_*` methods map their
+C requests and results directly to Lua tables. Terms must fit Lua's
+non-negative integer range. Result lists are ordinary dense Lua arrays in
+`endpoints` or `backends`.
+
+`client:query_keys(req, handler)` has the same query request fields as
+`client:query`, but sends each decoded key directly to Lua instead of materializing
+the query response. Selectors are optional, so `engine = "scan"` with a cursor
+can enumerate every key in a namespace. Pass either a function for key chunks
+or a table with a required `chunk(bytes)` function and optional `begin()` and
+`finish()` hooks.
+A key can arrive in multiple chunks, including inside a UTF-8 sequence; collect
+only the current key between `begin` and `finish` if complete strings are needed.
+
 `client:acquire_for_update(req, handler)` wraps the common acquire, snapshot,
-update, release workflow. The handler receives a context table with:
+update, release outbox. The handler receives a context table with:
 
 - `lease`
 - `state`
 - `state_meta`
 - `load_json()`
-- `update_raw(body, req)`
+- `update(body, req)`
 - `update_json(value, req)`
 - `mutate(req)`
 - `mutate_local(req)`
@@ -315,6 +636,10 @@ The helper always attempts to release the lease after the handler returns.
 Handler success commits staged changes; handler failure releases with rollback
 so partial callback updates are not published. Return `nil` from the handler
 for success, or return an error value to report failure and roll back:
+
+`af.lease` is a scoped lease: it is valid only while this handler is running.
+Do not retain it, pass it to another coroutine, or use it after the handler
+returns. This preserves Pouch's single staged-update boundary.
 
 ```lua
 local ok, err = client:acquire_for_update({
@@ -334,16 +659,18 @@ end)
 
 ## Lease API
 
-Returned by `client:acquire(...)` and by `message:state()`.
+Returned by `client:acquire(...)` and by `message:state()`. The latter is an
+independently closable lease view copied from the message's borrowed state
+lease; it does not extend the delivery's server-side lease lifetime. Complete
+the message's `ack()` or `nack()` decision only after state work has finished.
 
 Common lease methods:
 
 - `lease:info()`
 - `lease:close()`
 - `lease:describe()`
-- `lease:get_raw(req, dest)`
-- `lease:get_json(req)`
-- `lease:update_raw(body, req)`
+- `lease:get(req, sink)` and `lease:read(req)` / `lease:read_json(req)`
+- `lease:update(body, req)`
 - `lease:update_json(value, req)`
 - `lease:mutate(req)`
 - `lease:mutate_local(req)`
@@ -353,7 +680,7 @@ Common lease methods:
 - `lease:release(req)`
 - `lease:attach(req, body)`
 - `lease:list_attachments()`
-- `lease:get_attachment(req, dest)`
+- `lease:get_attachment(req, sink)` and `lease:read_attachment(req)`
 - `lease:delete_attachment(selector)`
 - `lease:delete_all_attachments()`
 
@@ -371,8 +698,8 @@ Common message methods:
 - `message:extend(req)`
 - `message:state()`
 - `message:rewind_payload()`
-- `message:payload(dest)`
-- `message:payload_json()`
+- `message:write_payload(sink)`
+- `message:read_payload()` / `message:read_payload_json()`
 
 ## JSON helpers
 
@@ -382,11 +709,11 @@ Use:
 
 - `lockdc.encode_json(value)`
 - `lockdc.decode_json(payload)`
-- `lease:get_json()`
+- `lease:read_json()`
 - `lease:update_json(value, req)`
-- `message:payload_json()`
+- `message:read_payload_json()`
 
-These helpers are for idiomatic Lua workflow code. They do not replace the
+These helpers are for idiomatic Lua outbox code. They do not replace the
 mapped `lonejson` APIs in the C SDK; those C APIs use caller-defined
 `LONEJSON_FIELD_*` maps for typed state load/save. The Lua helpers sit on top
 of the public `liblockdc` JSON transport surface and use the `lonejson`
@@ -398,26 +725,52 @@ JSON `null` payloads distinct from the binding's existing `nil, err` and
 
 ## Consumer model
 
-The Lua consumer API is intentionally blocking and single-threaded.
+`client:subscribe(req, handler)` and `client:subscribe_with_state(req, handler)`
+are direct bindings to the C streaming subscription operations. Their handlers
+run synchronously on the calling Lua state and receive the normal public
+`Message` and optional `Lease` receivers, not raw native userdata. A subscription handler must
+explicitly `ack()` or `nack()` its borrowed message before returning; returning
+`false, message`, `nil, message`, or raising stops the subscription with a
+structured error. A message (and the optional state lease) is invalid once its
+handler returns, even if Lua retains the wrapper. The client remains usable in
+the handler, matching C subscription semantics, but it cannot be closed until
+the native callback returns.
 
-- handlers run on the calling Lua state
-- one message is processed at a time
-- after the handler completes, the next dequeue happens
-- the binding does not expose native threaded callback dispatch into a shared
-  Lua VM
+`client:watch_queue(req, handler)` is likewise a direct C queue watch, not a
+polling loop. The handler receives a borrowed event table; return `false` to
+stop cleanly, return `nil, message` or `false, message` to fail, and otherwise
+return normally to continue.
 
-This is deliberate. Native worker threads calling back into the same Lua state
-would require a separate synchronization and dispatch model.
+`client:new_consumer_service(config)` is the Lua-specific threadless managed
+consumer adaptation. Native `lc_consumer_service` workers cannot invoke a Lua
+state from their private threads, so this surface deliberately supports one
+blocking consumer at a time:
 
-The supported Lua consumer paths are:
+```lua
+local service = assert(client:new_consumer_service({
+  name = "orders-worker",
+  request = { namespace = "orders", queue = "events", owner = "orders-worker" },
+  with_state = true,
+  handle = function(message, state)
+    -- Return normally to acknowledge. Return nil, err (or false, err) to nack.
+    return nil
+  end,
+}))
+assert(service:run())
+```
 
-- `client:start_consumer(...)`
-- `client:new_consumer_service(...):run()`
-- `client:new_consumer_service(...):start()`
-
-`Service:start()` is a blocking alias for `run()`.
-Each blocking Lua consumer service supports exactly one consumer config. Start
-separate blocking consumers if you need to consume separate queues from Lua.
+It uses the C-shaped `name`, `request`, and `with_state` configuration fields.
+`handle` is the necessary Lua callback spelling. `run()` blocks; `stop()` is
+safe from that handler and `wait()` reports after `run()` returns, whether it
+succeeded or failed. There is no Lua
+`start()` or `start_consumer()` alias and no multi-worker/multi-config service
+because neither can safely call one Lua VM concurrently. Start separate Lua
+states or processes when concurrency is needed. A normal handler return
+acknowledges an open message. A handler that has already acknowledged,
+negatively acknowledged, or closed its message may also return normally; the
+service does not apply a second terminal operation. `nil, err`, `false, err`,
+or a raised error nacks a still-open message and returns that failure from
+`run()`; a failed nack is returned instead.
 
 ## Examples
 

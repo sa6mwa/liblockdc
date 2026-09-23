@@ -37,9 +37,29 @@ package.preload['lonejson'] = function()
 end
 
 local core_stub = {
+  OK = 0,
   ERR_INVALID = 42,
+  ERR_NOMEM = 43,
+  ERR_TRANSPORT = 44,
+  ERR_PROTOCOL = 45,
+  ERR_SERVER = 46,
+  ERR_TIMEOUT = 47,
+  NACK_FAILURE = 48,
+  NACK_DEFER = 49,
   version_string = function()
     return 'test-version'
+  end,
+  xid_new = function()
+    return '0123456789abcdefghijkl'
+  end,
+  pouch_crypto_generate_key = function()
+    return 'lc-pouch-key-v1:test-key'
+  end,
+  pouch_crypto_default_key_file = function()
+    return '/tmp/lockdc/pouch.key'
+  end,
+  pouch_crypto_generate_key_file = function(path, overwrite)
+    return path .. ':' .. tostring(overwrite)
   end,
 }
 
@@ -63,6 +83,17 @@ end
 
 local function test_json_helpers()
   assert_eq(lockdc.version_string(), 'test-version', 'version_string should delegate to core')
+  assert_eq(lockdc.xid_new(), '0123456789abcdefghijkl', 'xid_new should delegate to core')
+  assert_eq(lockdc.ERR_INVALID, core_stub.ERR_INVALID,
+      'public facade should expose C status constants without exposing core')
+  assert_eq(lockdc.ERR_TIMEOUT, core_stub.ERR_TIMEOUT,
+      'public facade should expose the timeout status constant')
+  assert_eq(lockdc.pouch_crypto_generate_key(), 'lc-pouch-key-v1:test-key',
+      'Pouch key generation should delegate to the C helper')
+  assert_eq(lockdc.pouch_crypto_default_key_file(), '/tmp/lockdc/pouch.key',
+      'Pouch default key-file lookup should delegate to the C helper')
+  assert_eq(lockdc.pouch_crypto_generate_key_file('/tmp/key', true),
+      '/tmp/key:true', 'Pouch key-file generation should delegate to the C helper')
   assert_eq(lockdc.encode_json('123'), '123', 'encode_json should strip wrapper envelope')
   assert_eq(lockdc.encode_json(nil), 'null', 'encode_json should preserve legacy top-level nil null')
   assert_eq(lockdc.decode_json('{"k":1}'), '{"k":1}', 'decode_json should unwrap envelope payload')
@@ -71,7 +102,7 @@ end
 
 local function test_request_flattening_and_default_content_type()
   local lease_info = {
-    namespace_name = 'default',
+    namespace = 'default',
     key = 'lease-key',
     owner = 'lease-owner',
   }
@@ -120,7 +151,7 @@ local function test_request_flattening_and_default_content_type()
   local ok = client:update_json({ lease = lease, if_match = 'etag-1' }, '17')
   assert_truthy(ok, 'update_json should return underlying success')
   assert_eq(captured.update_body, '17', 'update_json should encode JSON body')
-  assert_eq(captured.update_req.namespace_name, 'default', 'update_json should flatten lease namespace')
+  assert_eq(captured.update_req.namespace, 'default', 'update_json should flatten lease namespace')
   assert_eq(captured.update_req.key, 'lease-key', 'update_json should flatten lease key')
   assert_eq(captured.update_req.owner, 'lease-owner', 'update_json should flatten lease owner')
   assert_eq(captured.update_req.if_match, 'etag-1', 'update_json should preserve explicit request fields')
@@ -130,7 +161,7 @@ local function test_request_flattening_and_default_content_type()
   message_core = {
     info = function()
       return {
-        namespace_name = 'default',
+        namespace = 'default',
         queue = 'jobs',
         message_id = 'msg-1',
       }
@@ -140,7 +171,7 @@ local function test_request_flattening_and_default_content_type()
   local wrapped_message = assert(client:dequeue({ queue = 'jobs' }))
 
   client:queue_nack({ message = wrapped_message, intent = 'failure' })
-  assert_eq(captured.queue_nack_req.namespace_name, 'default', 'queue_nack should flatten message namespace')
+  assert_eq(captured.queue_nack_req.namespace, 'default', 'queue_nack should flatten message namespace')
   assert_eq(captured.queue_nack_req.queue, 'jobs', 'queue_nack should flatten message queue')
   assert_eq(captured.queue_nack_req.message_id, 'msg-1', 'queue_nack should flatten message id')
   assert_eq(captured.queue_nack_req.intent, 'failure', 'queue_nack should preserve explicit intent')
@@ -165,105 +196,182 @@ local function test_pouch_open_config_passthrough()
 
   local client = assert(lockdc.open({
     endpoints = { 'pouch:///var/lib/lockdc-lua-unit' },
-    pouch_crypto_key = 'lc-pouch-key-v1:test-key',
-    pouch_crypto_key_file = '/var/lib/lockdc-lua-unit/root.key',
-    pouch_crypto_generate_key_file = true,
-    pouch_compression = 'zlib',
+    pouch = {
+      crypto_key = 'lc-pouch-key-v1:test-key',
+      crypto_key_file = '/var/lib/lockdc-lua-unit/root.key',
+      crypto_generate_key_file = true,
+      compression = 'zlib',
+      query_indexing = false,
+      query_engine = 'scan',
+      indexer_flush_docs = 64,
+    },
   }))
 
   assert_eq(captured.config.endpoints[1], 'pouch:///var/lib/lockdc-lua-unit', 'pouch endpoint should pass through')
-  assert_eq(captured.config.pouch_crypto_key, 'lc-pouch-key-v1:test-key', 'pouch_crypto_key should pass through')
-  assert_eq(captured.config.pouch_crypto_key_file, '/var/lib/lockdc-lua-unit/root.key', 'pouch_crypto_key_file should pass through')
-  assert_eq(captured.config.pouch_crypto_generate_key_file, true, 'pouch key-file generation should pass through')
-  assert_eq(captured.config.pouch_compression, 'zlib', 'pouch compression should pass through')
+  assert_eq(captured.config.pouch.crypto_key, 'lc-pouch-key-v1:test-key', 'typed pouch crypto key should pass through')
+  assert_eq(captured.config.pouch.crypto_key_file, '/var/lib/lockdc-lua-unit/root.key', 'typed pouch key file should pass through')
+  assert_eq(captured.config.pouch.crypto_generate_key_file, true, 'typed pouch key-file generation should pass through')
+  assert_eq(captured.config.pouch.compression, 'zlib', 'typed pouch compression should pass through')
+  assert_eq(captured.config.pouch.query_indexing, false, 'typed pouch false should pass through')
+  assert_eq(captured.config.pouch.query_engine, 'scan', 'typed pouch engine should pass through')
+  assert_eq(captured.config.pouch.indexer_flush_docs, 64, 'typed pouch numeric setting should pass through')
+  client:close()
+end
+
+local function test_xa_and_transaction_coordinator_forwarding()
+  local captured = {}
+  local client_core = {
+    close = function() end,
+  }
+  local methods = {
+    'query_keys', 'txn_replay', 'txn_prepare', 'txn_commit', 'txn_rollback',
+    'tc_lease_acquire', 'tc_lease_renew', 'tc_lease_release',
+    'tc_cluster_announce', 'tc_rm_register', 'tc_rm_unregister',
+  }
+
+  for _, name in ipairs(methods) do
+    client_core[name] = function(_, req)
+      captured[name] = req
+      return { method = name }
+    end
+  end
+  client_core.tc_leader = function()
+    captured.tc_leader = true
+    return { method = 'tc_leader' }
+  end
+  client_core.tc_cluster_leave = function()
+    captured.tc_cluster_leave = true
+    return { method = 'tc_cluster_leave' }
+  end
+  client_core.tc_cluster_list = function()
+    captured.tc_cluster_list = true
+    return { method = 'tc_cluster_list' }
+  end
+  client_core.tc_rm_list = function()
+    captured.tc_rm_list = true
+    return { method = 'tc_rm_list' }
+  end
+  core_stub.open = function()
+    return client_core
+  end
+
+  local client = assert(lockdc.open({}))
+  assert_eq(lockdc.core, nil,
+      "the native implementation must not be re-exported as public facade API")
+  local decision = {
+    txn_id = '00000000000000000001',
+    participants = { { namespace = 'orders', key = 'order-1' } },
+    tc_term = 1,
+  }
+
+  assert_eq(client:txn_replay({ txn_id = decision.txn_id }).method, 'txn_replay',
+            'txn_replay should delegate to core')
+  assert_eq(client:txn_prepare(decision).method, 'txn_prepare',
+            'txn_prepare should delegate to core')
+  assert_eq(client:txn_commit(decision).method, 'txn_commit',
+            'txn_commit should delegate to core')
+  assert_eq(client:txn_rollback(decision).method, 'txn_rollback',
+            'txn_rollback should delegate to core')
+  assert_eq(captured.txn_commit, decision,
+            'raw transaction decisions should preserve the request table')
+  assert_eq(client:query_keys({ selector_json = '{"kind":"order"}' }, function() end).method,
+            'query_keys', 'query_keys should delegate to core')
+  assert_eq(client:tc_lease_acquire({ candidate_id = 'node-a' }).method,
+            'tc_lease_acquire', 'TC lease acquire should delegate to core')
+  assert_eq(client:tc_lease_renew({ leader_id = 'node-a' }).method,
+            'tc_lease_renew', 'TC lease renew should delegate to core')
+  assert_eq(client:tc_lease_release({ leader_id = 'node-a' }).method,
+            'tc_lease_release', 'TC lease release should delegate to core')
+  assert_eq(client:tc_leader().method, 'tc_leader',
+            'TC leader should delegate to core')
+  assert_eq(client:tc_cluster_announce({ self_endpoint = 'pouch://node-a' }).method,
+            'tc_cluster_announce', 'TC cluster announce should delegate to core')
+  assert_eq(client:tc_cluster_leave().method, 'tc_cluster_leave',
+            'TC cluster leave should delegate to core')
+  assert_eq(client:tc_cluster_list().method, 'tc_cluster_list',
+            'TC cluster list should delegate to core')
+  assert_eq(client:tc_rm_register({ backend_hash = 'backend-a' }).method,
+            'tc_rm_register', 'TC RM register should delegate to core')
+  assert_eq(client:tc_rm_unregister({ backend_hash = 'backend-a' }).method,
+            'tc_rm_unregister', 'TC RM unregister should delegate to core')
+  assert_eq(client:tc_rm_list().method, 'tc_rm_list',
+            'TC RM list should delegate to core')
   client:close()
 end
 
 local function test_subscribe_ack_and_error_paths()
-  local function new_message()
-    local msg = {
-      closed = false,
-      ack_count = 0,
-      nack_count = 0,
-    }
-
-    function msg:ack()
-      self.ack_count = self.ack_count + 1
-      self.closed = true
+  local captured = {}
+  local message_core = {
+    info = function()
+      return { message_id = 'message-1' }
+    end,
+    payload = function()
+      return '{"source":"subscription"}', 25
+    end,
+    ack = function()
       return true
-    end
-
-    function msg:nack(req)
-      self.nack_count = self.nack_count + 1
-      self.last_nack_req = req
-      self.closed = true
+    end,
+    close = function() end,
+  }
+  local state_core = {
+    info = function()
+      return { lease_id = 'lease-1' }
+    end,
+    close = function() end,
+  }
+  local client_core = {
+    close = function() end,
+    subscribe = function(_, req, handler)
+      captured.subscribe_req = req
+      captured.subscribe_handler = handler
       return true
+    end,
+    subscribe_with_state = function(_, req, handler)
+      captured.subscribe_with_state_req = req
+      captured.subscribe_with_state_handler = handler
+      return true
+    end,
+  }
+  local handler_calls = 0
+  local retained_message
+  local retained_state
+  local handler = function(message, state)
+    handler_calls = handler_calls + 1
+    retained_message = message
+    retained_state = state
+    assert_eq(message:read_payload(), '{"source":"subscription"}',
+        'subscription should expose the public Message payload helper')
+    if state ~= nil then
+      assert_eq(state:info().lease_id, 'lease-1',
+          'state subscription should expose the public Lease wrapper')
     end
-
-    function msg:close()
-      self.closed = true
-    end
-
-    function msg:state()
-      return nil
-    end
-
-    return msg
   end
 
-  local function open_client_for_messages(messages)
-local client_core = {
-      close = function() end,
-    }
-
-    client_core.dequeue = function()
-      local next_value = table.remove(messages, 1)
-      if next_value == nil then
-        return nil, { message = 'queue drained' }
-      end
-      return next_value
-    end
-
-    core_stub.open = function()
-      return client_core
-    end
-
-    return assert(lockdc.open({}))
+  core_stub.open = function()
+    return client_core
   end
 
-  local success_message = new_message()
-  local client = open_client_for_messages({ success_message })
-  local ok, err = client:subscribe({ queue = 'jobs' }, function(message)
-    assert_truthy(message:is_open(), 'message should be open before implicit ack')
-    return nil
-  end)
-  assert_eq(ok, nil, 'subscribe should stop on empty queue after success')
-  assert_eq(err.message, 'queue drained', 'subscribe should surface empty queue after draining in this unit stub')
-  assert_eq(success_message.ack_count, 1, 'successful handler should trigger implicit ack')
-  assert_eq(success_message.nack_count, 0, 'successful handler should not nack')
-
-  local explicit_ack_message = new_message()
-  client = open_client_for_messages({ explicit_ack_message })
-  ok, err = client:subscribe({ queue = 'jobs' }, function(message)
-    local ack_ok = message:ack()
-    assert_truthy(ack_ok, 'explicit ack inside handler should succeed')
-    return nil
-  end)
-  assert_eq(ok, nil, 'subscribe should stop on empty queue after explicit ack success')
-  assert_eq(err.message, 'queue drained', 'explicit ack path should drain queue in this unit stub')
-  assert_eq(explicit_ack_message.ack_count, 1, 'explicit ack should not be repeated implicitly')
-  assert_eq(explicit_ack_message.nack_count, 0, 'explicit ack success should not nack')
-
-  local failure_message = new_message()
-  client = open_client_for_messages({ failure_message })
-  ok, err = client:subscribe({ queue = 'jobs' }, function(_message)
-    error('handler exploded')
-  end)
-  assert_eq(ok, nil, 'handler exception should fail subscribe')
-  assert_truthy(type(err) == 'string' and err:match('handler exploded'), 'handler exception should surface pcall error string')
-  assert_eq(failure_message.ack_count, 0, 'failed handler should not ack')
-  assert_eq(failure_message.nack_count, 1, 'failed handler should nack once')
-  assert_eq(failure_message.last_nack_req.intent, 'failure', 'failed handler should nack with failure intent')
+  local client = assert(lockdc.open({}))
+  assert_truthy(client:subscribe({ queue = 'jobs' }, handler),
+      'subscribe should delegate to the native C streaming operation')
+  assert_eq(captured.subscribe_req.queue, 'jobs',
+      'subscribe should preserve the C dequeue request')
+  captured.subscribe_handler(message_core)
+  assert_eq(handler_calls, 1,
+      'subscribe should invoke the application handler through the public facade')
+  assert_truthy(not retained_message:is_open(),
+      'borrowed subscription Message wrapper should close after its callback')
+  assert_truthy(client:subscribe_with_state({ queue = 'state-jobs' }, handler),
+      'subscribe_with_state should delegate to the native C streaming operation')
+  assert_eq(captured.subscribe_with_state_req.queue, 'state-jobs',
+      'subscribe_with_state should preserve the C dequeue request')
+  captured.subscribe_with_state_handler(message_core, state_core)
+  assert_eq(handler_calls, 2,
+      'subscribe_with_state should invoke the application handler through the public facade')
+  assert_truthy(not retained_message:is_open(),
+      'borrowed state subscription Message wrapper should close after its callback')
+  assert_truthy(retained_state._closed,
+      'borrowed state subscription Lease wrapper should close after its callback')
 end
 
 local function test_acquire_for_update_propagates_sdk_failure_shape()
@@ -316,63 +424,6 @@ local function test_acquire_for_update_propagates_sdk_failure_shape()
 end
 
 local function test_subscribe_with_state_and_service_lifecycle()
-  local state_lease = {
-    closed = false,
-    info = function()
-      return { namespace_name = 'default', key = 'state-key' }
-    end,
-    close = function(self)
-      self.closed = true
-    end,
-  }
-  local message = {
-    closed = false,
-    ack_count = 0,
-  }
-  function message:ack()
-    self.ack_count = self.ack_count + 1
-    self.closed = true
-    return true
-  end
-  function message:nack(req)
-    self.closed = true
-    self.last_nack_req = req
-    return true
-  end
-  function message:close()
-    self.closed = true
-  end
-  function message:state()
-    return state_lease
-  end
-
-  local dequeue_calls = 0
-  local client_core = {
-    dequeue_with_state = function()
-      dequeue_calls = dequeue_calls + 1
-      if dequeue_calls == 1 then
-        return message
-      end
-      return nil, { message = 'unexpected extra dequeue' }
-    end,
-    close = function() end,
-  }
-  core_stub.open = function()
-    return client_core
-  end
-
-  local client = assert(lockdc.open({}))
-  local seen_state
-  local ok, err = client:subscribe_with_state({ queue = 'jobs' }, function(_message, state)
-    seen_state = state
-    return nil
-  end)
-  assert_eq(ok, nil, 'subscribe_with_state should stop on empty queue in this unit stub')
-  assert_eq(err.message, 'unexpected extra dequeue', 'subscribe_with_state should surface empty queue after draining in this unit stub')
-  assert_truthy(seen_state ~= nil, 'subscribe_with_state should pass wrapped state lease')
-  assert_eq(seen_state:info().key, 'state-key', 'wrapped state lease should expose info')
-  assert_eq(message.ack_count, 1, 'subscribe_with_state success should ack message')
-
   local service_message = {
     closed = false,
     ack_count = 0,
@@ -395,6 +446,7 @@ local function test_subscribe_with_state_and_service_lifecycle()
   end
 
   local service_dequeues = 0
+  local client_core = { close = function() end }
   client_core.dequeue = function()
     service_dequeues = service_dequeues + 1
     if service_dequeues == 1 then
@@ -403,14 +455,18 @@ local function test_subscribe_with_state_and_service_lifecycle()
     return nil, { message = 'service should stop before another dequeue' }
   end
 
+  core_stub.open = function()
+    return client_core
+  end
+  local client = assert(lockdc.open({}))
   local service
   service = client:new_consumer_service({
-    Name = 'worker-1',
-    Queue = 'jobs',
-    Options = {
-      namespace_name = 'default',
+    name = 'worker-1',
+    request = {
+      namespace = 'default',
+      queue = 'jobs',
     },
-    MessageHandler = function(msg)
+    handle = function(msg)
       assert_truthy(msg:is_open(), 'service handler should receive open message')
       service:stop()
       return nil
@@ -421,51 +477,115 @@ local function test_subscribe_with_state_and_service_lifecycle()
   assert_eq(wait_ok, nil, 'wait before run should fail')
   assert_eq(wait_err.code, core_stub.ERR_INVALID, 'wait before run should return ERR_INVALID')
 
-  ok, err = service:start()
-  assert_truthy(ok, 'service:start should alias run and succeed')
-  assert_eq(err, nil, 'service:start success should not return error')
+  local ok, err = service:run()
+  assert_truthy(ok, 'service:run should succeed')
+  assert_eq(err, nil, 'service:run success should not return error')
   assert_eq(service_message.ack_count, 1, 'service handler success should ack message')
   assert_truthy(service:wait(), 'wait after completed run should succeed')
 
-  local multi_service = client:new_consumer_service({
-    Name = 'worker-1',
-    Queue = 'jobs-a',
-    MessageHandler = function()
-      error('first multi-config handler should not run')
-    end,
-  }, {
-    Name = 'worker-2',
-    Queue = 'jobs-b',
-    MessageHandler = function()
-      error('second multi-config handler should not run')
+  local explicitly_acked_message = {
+    closed = false,
+    ack_count = 0,
+  }
+  function explicitly_acked_message:ack()
+    self.ack_count = self.ack_count + 1
+    self.closed = true
+    return true
+  end
+  function explicitly_acked_message:nack(req)
+    self.closed = true
+    self.last_nack_req = req
+    return true
+  end
+  function explicitly_acked_message:close()
+    self.closed = true
+  end
+  function explicitly_acked_message:state()
+    return nil
+  end
+
+  client_core.dequeue = function()
+    return explicitly_acked_message
+  end
+  local explicitly_acking_service
+  explicitly_acking_service = client:new_consumer_service({
+    name = 'explicitly-acking-worker',
+    request = { namespace = 'default', queue = 'explicitly-acked-jobs' },
+    handle = function(message)
+      assert_truthy(message:ack(), 'handler should be able to acknowledge directly')
+      explicitly_acking_service:stop()
+      return nil
     end,
   })
+  ok, err = explicitly_acking_service:run()
+  assert_truthy(ok,
+      'a normally returning handler that terminalized its message must not fail the service')
+  assert_eq(err, nil,
+      'a normally returning handler that terminalized its message should not report failure')
+  assert_eq(explicitly_acked_message.ack_count, 1,
+      'a handler-owned acknowledgement must not be repeated by the service')
 
-  ok, err = multi_service:start()
-  assert_eq(ok, nil, 'service:start should reject multiple blocking consumer configs')
-  assert_eq(err.code, core_stub.ERR_INVALID, 'multiple consumer configs should return ERR_INVALID')
-  assert_truthy(
-    err.message:match('exactly one consumer config'),
-    'multiple consumer configs should return actionable error'
-  )
+  local failed_message = {
+    closed = false,
+    ack_count = 0,
+    nack_count = 0,
+  }
+  function failed_message:ack()
+    self.ack_count = self.ack_count + 1
+    self.closed = true
+    return true
+  end
+  function failed_message:nack(req)
+    self.nack_count = self.nack_count + 1
+    self.last_nack_req = req
+    self.closed = true
+    return true
+  end
+  function failed_message:close()
+    self.closed = true
+  end
+  function failed_message:state()
+    return nil
+  end
+
+  client_core.dequeue = function()
+    return failed_message
+  end
+  local failing_service = client:new_consumer_service({
+    name = 'failing-worker',
+    request = { namespace = 'default', queue = 'failed-jobs' },
+    handle = function()
+      return nil, { message = 'expected handler failure' }
+    end,
+  })
+  ok, err = failing_service:run()
+  assert_eq(ok, nil, 'nil, err handler result should stop the service')
+  assert_eq(err.message, 'expected handler failure',
+      'service should preserve the handler failure')
+  assert_eq(failed_message.ack_count, 0,
+      'failed service handler must not acknowledge its message')
+  assert_eq(failed_message.nack_count, 1,
+      'failed service handler should nack exactly once')
+  assert_eq(failed_message.last_nack_req.intent, 'failure',
+      'failed service handler should use the failure nack intent')
+  assert_truthy(failing_service:wait(),
+      'wait after a failed synchronous run should observe completion')
+
+  local invalid_service = client:new_consumer_service({ request = {} })
+  ok, err = invalid_service:run()
+  assert_eq(ok, nil, 'service:run should require a Lua handler')
+  assert_eq(err.code, core_stub.ERR_INVALID, 'missing handler should return ERR_INVALID')
+  assert_truthy(err.message:match('requires handle'),
+      'missing handler should return actionable error')
 end
 
 local function test_watch_queue_change_detection()
-  local queue_stats_plan = {
-    { available = 0, head_message_id = 'a', correlation_id = 'one' },
-    { available = 0, head_message_id = 'a', correlation_id = 'two' },
-    { available = 1, head_message_id = 'b', correlation_id = 'two' },
-  }
-  local captured_events = {}
-  local sleep_calls = 0
-  local original_execute = os.execute
+  local captured = {}
   local client_core = {
-    queue_stats = function()
-      local next_stats = table.remove(queue_stats_plan, 1)
-      if next_stats == nil then
-        return nil, { message = 'done' }
-      end
-      return next_stats
+    watch_queue = function(_, req, handler)
+      captured.request = req
+      captured.handler = handler
+      return true
     end,
     close = function() end,
   }
@@ -473,32 +593,17 @@ local function test_watch_queue_change_detection()
     return client_core
   end
 
-  os.execute = function(cmd)
-    sleep_calls = sleep_calls + 1
-    assert_truthy(cmd:match('^sleep '), 'watch_queue should sleep between polls')
-    return true
-  end
-
   local client = assert(lockdc.open({}))
+  local handler = function() end
   local ok, err = client:watch_queue({
-    namespace_name = 'default',
+    namespace = 'default',
     queue = 'jobs',
-    poll_interval_seconds = 0.01,
-  }, function(event)
-    captured_events[#captured_events + 1] = event
-    if #captured_events == 2 then
-      error('stop after second event')
-    end
-  end)
+  }, handler)
 
-  os.execute = original_execute
-
-  assert_eq(ok, nil, 'watch_queue callback error should fail watch')
-  assert_truthy(type(err) == 'string' and err:match('stop after second event'), 'watch_queue should surface callback failure')
-  assert_eq(#captured_events, 2, 'watch_queue should emit only when queue signature changes')
-  assert_eq(captured_events[1].available, 0, 'watch_queue should emit initial state')
-  assert_eq(captured_events[2].available, 1, 'watch_queue should emit changed state')
-  assert_truthy(sleep_calls >= 1, 'watch_queue should sleep between polls')
+  assert_truthy(ok, 'watch_queue should delegate to the native C streaming watch')
+  assert_eq(err, nil, 'watch_queue success should not return an error')
+  assert_eq(captured.request.queue, 'jobs', 'watch_queue should preserve the C request')
+  assert_eq(captured.handler, handler, 'watch_queue should preserve the Lua callback identity')
 end
 
 local function test_json_null_roundtrip_helpers()
@@ -510,7 +615,7 @@ local function test_json_null_roundtrip_helpers()
       return {
         info = function()
           return {
-            namespace_name = 'default',
+            namespace = 'default',
             queue = 'jobs',
             message_id = 'msg-1',
           }
@@ -529,17 +634,66 @@ local function test_json_null_roundtrip_helpers()
   end
 
   local client = assert(lockdc.open({}))
-  local value, meta = client:get_json({ key = 'state-key' })
-  assert_eq(value, lockdc.json_null, 'client:get_json should preserve top-level JSON null')
-  assert_eq(meta.etag, 'etag-1', 'client:get_json should still return metadata')
+  local value, meta = client:read_json({ key = 'state-key' })
+  assert_eq(value, lockdc.json_null, 'client:read_json should preserve top-level JSON null')
+  assert_eq(meta.etag, 'etag-1', 'client:read_json should still return metadata')
 
   local message = assert(client:dequeue({ queue = 'jobs' }))
-  local payload, written = message:payload_json()
-  assert_eq(payload, lockdc.json_null, 'message:payload_json should preserve top-level JSON null')
-  assert_eq(written, 4, 'message:payload_json should preserve byte count')
+  local payload, written = message:read_payload_json()
+  assert_eq(payload, lockdc.json_null, 'message:read_payload_json should preserve top-level JSON null')
+  assert_eq(written, 4, 'message:read_payload_json should preserve byte count')
 end
 
-local function test_workflow_facade_lifecycle()
+local function test_streaming_surface_requires_sink_and_materializers_are_named()
+  local calls = {}
+  local client_core = {
+    get = function(_, req, sink)
+      calls.get_req = req
+      calls.get_sink = sink
+      if sink == nil then
+        return "state", { etag = "etag-1" }
+      end
+      return nil, 5
+    end,
+    query = function(_, req, sink)
+      calls.query_sink = sink
+      return nil, 2
+    end,
+    close = function() end,
+  }
+
+  core_stub.open = function()
+    return client_core
+  end
+
+  local client = assert(lockdc.open({}))
+  local ok, err = pcall(function()
+    client:get({ key = "state" })
+  end)
+  assert_eq(ok, false, "client:get must require a sink")
+  assert_truthy(tostring(err):find("client:read", 1, true),
+      "missing sink error should name the materializer")
+  assert_eq(client.get_raw, nil, "legacy get_raw alias must not remain public")
+  assert_eq(client.get_json, nil, "legacy get_json alias must not remain public")
+  assert_eq(client:read({ key = "state" }), "state",
+      "client:read should be the explicit materializer")
+  assert_eq(client:read({ namespace = "component", key = "state" }), "state",
+      "client:read should support explicit namespaces")
+  assert_eq(calls.get_req.namespace, "component",
+      "client:read should preserve the explicit namespace for the native binding")
+  local sink = { write = function() end }
+  assert_eq(client:get({ key = "state" }, sink), nil,
+      "client:get should preserve streaming output semantics")
+  assert_eq(calls.get_sink, sink, "client:get should pass the supplied sink through")
+  assert_eq(client:query({ engine = "scan" }, sink), nil,
+      "client:query should preserve streaming output semantics")
+  assert_eq(calls.query_sink, sink,
+      "client:query should pass the supplied sink through")
+  assert_truthy(type(client.read_query) == "function",
+      "client:read_query should be public")
+end
+
+local function test_outbox_facade_lifecycle()
   local captured = {}
   local participant_core = {
     info = function()
@@ -587,7 +741,7 @@ local function test_workflow_facade_lifecycle()
       captured.acquire_req = req
       return participant_core
     end,
-    append_outbox = function(_, entry, payload)
+    append = function(_, entry, payload)
       captured.later_entry = entry
       captured.later_payload = payload
       return { outbox_key = 'later-key', duplicate = false }
@@ -622,6 +776,10 @@ local function test_workflow_facade_lifecycle()
       captured.payload_dest = dest
       return 'null', 4
     end,
+    state = function(self)
+      captured.state_requested = true
+      return self.stateful and participant_core or nil
+    end,
     renew = function(_, ttl)
       captured.renew_ttl = ttl
       return { lease_expires_at_unix = 99 }
@@ -641,7 +799,7 @@ local function test_workflow_facade_lifecycle()
     end,
     close = function(self) self.closed = true end,
   }
-  local workflow_core = {
+  local outbox_core = {
     accept_command = function(_, request)
       captured.command_request = request
       return transaction_core, { command_id = 'cmd-1', state = 1, duplicate = false }
@@ -650,16 +808,29 @@ local function test_workflow_facade_lifecycle()
       captured.command_identity = identity
       return { command_id = 'cmd-1', state = 2, result_code = 'created' }
     end,
+    get_command_receipt_by_id = function(_, command_id)
+      captured.command_id = command_id
+      return { command_id = command_id, state = 2, result_code = 'created' }
+    end,
+    wait_command = function(_, command_id, timeout_ms)
+      captured.wait_command_id = command_id
+      captured.wait_timeout_ms = timeout_ms
+      return { command_id = command_id, state = 2, result_code = 'created' }
+    end,
     write_command_result = function(_, identity, destination)
       captured.command_result_identity = identity
       captured.command_result_destination = destination
-      return 'result-bytes', 12
+      return nil, 12
     end,
     resume_command = function(_, identity)
       captured.resume_identity = identity
       return nil, { command_id = 'cmd-1', state = 2, duplicate = true }
     end,
-    append_outbox = function(_, entry, payload)
+    resume_command_by_id = function(_, command_id)
+      captured.resume_command_id = command_id
+      return nil, { command_id = command_id, state = 2, duplicate = true }
+    end,
+    append = function(_, entry, payload)
       captured.first_entry = entry
       captured.first_payload = payload
       return transaction_core, { outbox_key = 'first-key', duplicate = false }
@@ -668,8 +839,20 @@ local function test_workflow_facade_lifecycle()
       captured.inbox_message = message
       return nil, { accepted = false, duplicate = true }
     end,
+    dispatcher = function(self)
+      return self
+    end,
+    _binding_id = function()
+      return 1
+    end,
     next = function(_, timeout)
       captured.next_timeout = timeout
+      job_core.stateful = false
+      return job_core
+    end,
+    next_with_state = function(_, timeout)
+      captured.next_with_state_timeout = timeout
+      job_core.stateful = true
       return job_core
     end,
     stats = function()
@@ -687,17 +870,25 @@ local function test_workflow_facade_lifecycle()
       self.deleted_key = key
       return true
     end,
+    pump = function(_, options)
+      captured.pump_options = options
+      return 0
+    end,
+    run = function(_, options)
+      captured.run_options = options
+      return true
+    end,
     export_dead_letters = function(_, options, dest)
       captured.export_options = options
       captured.export_dest = dest
-      return '[{"dispatch_state":"dead_letter"}]', { exported = 1 }
+      return nil, { exported = 1 }
     end,
     close = function(self) self.closed = true end,
   }
   local client_core = {
-    new_workflow = function(_, config)
-      captured.workflow_config = config
-      return workflow_core
+    new_outbox = function(_, config)
+      captured.outbox_config = config
+      return outbox_core
     end,
     close = function() end,
   }
@@ -707,41 +898,40 @@ local function test_workflow_facade_lifecycle()
   end
 
   local client = assert(lockdc.open({}))
-  local workflow = assert(client:new_workflow({
-    namespace = 'workflow-ns',
+  local outbox = assert(client:new_outbox({
+    namespace = 'outbox-ns',
     owner = 'lua-worker',
     recovery_interval_seconds = 7,
     shutdown_timeout_ms = 1234,
     replay_dead_letters_on_startup = true,
   }))
-  local txn, receipt = assert(workflow:append_outbox({
+  local txn, receipt = assert(outbox:append({
     operation_id = 'op-1',
     effect_id = 'charge',
     effect_key = 'charge:order-1',
     payload_digest = 'sha256:payload',
     kind = 'http',
     destination = 'https://billing.test/charge',
-    headers = 'header-json',
+    headers_json = 'header-json',
   }, 'payload'))
 
-  assert_eq(captured.workflow_config.namespace, 'workflow-ns', 'new_workflow should pass config through')
-  assert_eq(captured.workflow_config.shutdown_timeout_ms, 1234,
-      'workflow shutdown timeout should pass through')
-  assert_eq(captured.workflow_config.replay_dead_letters_on_startup, true,
-      'workflow startup replay option should pass through')
-  assert_eq(captured.first_entry.headers_json, 'header-json', 'workflow should encode headers into headers_json')
-  assert_eq(captured.first_entry.headers, nil, 'workflow should not pass façade-only headers')
+  assert_eq(captured.outbox_config.namespace, 'outbox-ns', 'new_outbox should pass config through')
+  assert_eq(captured.outbox_config.shutdown_timeout_ms, 1234,
+      'outbox shutdown timeout should pass through')
+  assert_eq(captured.outbox_config.replay_dead_letters_on_startup, true,
+      'outbox startup replay option should pass through')
+  assert_eq(captured.first_entry.headers_json, 'header-json', 'outbox should preserve headers_json')
   assert_eq(captured.first_entry.payload_digest, 'sha256:payload',
-      'workflow should preserve the immutable payload digest')
-  assert_eq(captured.first_payload, 'payload', 'workflow should preserve arbitrary payload source')
-  assert_eq(receipt.outbox_key, 'first-key', 'workflow should return the durable receipt')
+      'outbox should preserve the immutable payload digest')
+  assert_eq(captured.first_payload, 'payload', 'outbox should preserve arbitrary payload source')
+  assert_eq(receipt.outbox_key, 'first-key', 'outbox should return the durable receipt')
 
-  local participant = assert(txn:acquire({ namespace_name = 'orders', key = 'order-1' }))
+  local participant = assert(txn:acquire({ namespace = 'orders', key = 'order-1' }))
   participant:update_json(nil, { if_version = 1 })
   assert_eq(captured.acquire_req.key, 'order-1', 'transaction acquire should pass request through')
   assert_eq(captured.update_body, 'null', 'participant update_json should encode nil as JSON null')
   assert_eq(captured.update_opts.content_type, 'application/json', 'participant update_json should default content type')
-  assert_eq(participant:get_json(), lockdc.json_null, 'participant get_json should decode JSON null')
+  assert_eq(participant:read_json(), lockdc.json_null, 'participant read_json should decode JSON null')
   participant:metadata({ query_hidden = true })
   assert_eq(captured.metadata_req.query_hidden, true, 'participant metadata should delegate')
   participant:mutate({ mutations = { '/revision++' } })
@@ -759,7 +949,7 @@ local function test_workflow_facade_lifecycle()
   assert_truthy(transaction_core.closed,
       'transaction close must release the native transaction after commit')
 
-  local duplicate_txn, duplicate = workflow:accept_inbox({
+  local duplicate_txn, duplicate = outbox:accept_inbox({
     consumer_id = 'billing',
     source_kind = 'http',
     source_id = 'orders',
@@ -769,7 +959,7 @@ local function test_workflow_facade_lifecycle()
   assert_eq(duplicate.duplicate, true, 'duplicate inbox should retain the result')
   assert_eq(captured.inbox_message.message_id, 'message-1', 'inbox identity should pass through')
 
-  local command_txn, command_receipt = assert(workflow:accept_command({
+  local command_txn, command_receipt = assert(outbox:accept_command({
     scope = 'tenant-a', command_type = 'orders.create.v1',
     idempotency_key = 'request-1', request_digest = 'digest-1',
   }))
@@ -782,24 +972,54 @@ local function test_workflow_facade_lifecycle()
       'command result should pass through')
   assert_truthy(command_txn:fail_command({ failure_code = 'declined' }),
       'command failure should delegate')
-  local status = assert(workflow:command_receipt({
+  local status = assert(outbox:get_command_receipt({
     scope = 'tenant-a', command_type = 'orders.create.v1', idempotency_key = 'request-1',
   }))
   assert_eq(status.result_code, 'created', 'command status should delegate')
-  local result_bytes, result_written = assert(workflow:write_command_result({
+  local status_by_id = assert(outbox:get_command_receipt_by_id('cmd-1'))
+  assert_eq(status_by_id.command_id, 'cmd-1',
+      'command status by id should delegate')
+  assert_eq(captured.command_id, 'cmd-1',
+      'command status by id should preserve the component id')
+  local waited = assert(outbox:wait_command('cmd-1', 250))
+  assert_eq(waited.command_id, 'cmd-1', 'command wait should delegate')
+  assert_eq(captured.wait_command_id, 'cmd-1',
+      'command wait should preserve the component id')
+  assert_eq(captured.wait_timeout_ms, 250,
+      'command wait should preserve the timeout')
+  local result_bytes, result_written = outbox:write_command_result({
     scope = 'tenant-a', command_type = 'orders.create.v1', idempotency_key = 'request-1',
-  }, { path = '/tmp/command-result' }))
-  assert_eq(result_bytes, 'result-bytes', 'command result should preserve streamed output')
+  }, { path = '/tmp/command-result' })
+  assert_eq(result_bytes, nil, 'command result should not materialize streamed output')
   assert_eq(result_written, 12, 'command result should preserve byte count')
-  local resumed_txn, resumed = workflow:resume_command({
+  local resumed_txn, resumed = outbox:resume_command({
     scope = 'tenant-a', command_type = 'orders.create.v1', idempotency_key = 'request-1',
   })
   assert_eq(resumed_txn, nil, 'terminal command resume should not expose a transaction')
   assert_eq(resumed.duplicate, true, 'terminal command resume should return receipt')
+  local resumed_by_id_txn, resumed_by_id = outbox:resume_command_by_id('cmd-1')
+  assert_eq(resumed_by_id_txn, nil,
+      'terminal command resume by id should not expose a transaction')
+  assert_eq(resumed_by_id.duplicate, true,
+      'terminal command resume by id should return its receipt')
+  assert_eq(captured.resume_command_id, 'cmd-1',
+      'command resume by id should preserve the component id')
 
-  local job = assert(workflow:next(123))
-  assert_eq(captured.next_timeout, 123, 'workflow next should pass its timeout')
-  assert_eq(job:payload_json(), lockdc.json_null, 'job payload_json should decode JSON null')
+  local dispatcher = assert(outbox:dispatcher())
+  local stateful_job = assert(dispatcher:next_with_state(124))
+  assert_eq(captured.next_with_state_timeout, 124,
+      'dispatcher next_with_state should pass its timeout')
+  local stateful_lease = assert(stateful_job:state())
+  stateful_lease:update('checkpoint')
+  assert_truthy(captured.state_requested,
+      'stateful job should expose the paired lease facade')
+  assert_eq(captured.update_body, 'checkpoint',
+      'stateful job lease should retain ordinary streaming update behavior')
+  local job = assert(dispatcher:next(123))
+  assert_eq(captured.next_timeout, 123, 'dispatcher next should pass its timeout')
+  assert_eq(job:state(), nil,
+      'stateless job should not expose a checkpoint facade')
+  assert_eq(job:read_payload_json(), lockdc.json_null, 'job read_payload_json should decode JSON null')
   assert_truthy(job:renew(90), 'job renewal should delegate')
   assert_eq(captured.renew_ttl, 90, 'job renewal should preserve TTL')
   assert_truthy(job:complete({ delivery_reference = 'provider-1' }),
@@ -810,45 +1030,152 @@ local function test_workflow_facade_lifecycle()
   job:close()
   assert_eq(job_core.closed, nil,
       'terminal completion must consume the native job before close')
+  assert_eq(dispatcher:pump({ with_state = true }), 0,
+      'dispatcher pump should retain its native result')
+  assert_eq(captured.pump_options.with_state, true,
+      'dispatcher pump should forward stateful delivery selection')
+  assert_truthy(dispatcher:run({ with_state = true }),
+      'dispatcher run should retain its native result')
+  assert_eq(captured.run_options.with_state, true,
+      'dispatcher run should forward stateful delivery selection')
 
-  local stats = assert(workflow:stats())
-  assert_eq(stats.recovery_queries, 3, 'workflow stats should delegate')
-  assert_truthy(workflow:reconcile(), 'workflow reconciliation should delegate')
-  assert_truthy(workflow_core.reconciled, 'workflow core should reconcile')
-  assert_truthy(workflow:replay_dead_letter('dead-key'),
+  local stats = assert(dispatcher:stats())
+  assert_eq(stats.recovery_queries, 3, 'dispatcher stats should delegate')
+  assert_truthy(dispatcher:reconcile(), 'dispatcher reconciliation should delegate')
+  assert_truthy(outbox_core.reconciled, 'outbox core should reconcile')
+  assert_truthy(dispatcher:replay_dead_letter('dead-key'),
       'dead-letter replay should delegate')
-  assert_eq(workflow_core.replayed_key, 'dead-key',
+  assert_eq(outbox_core.replayed_key, 'dead-key',
       'dead-letter replay key should pass through')
-  assert_truthy(workflow:delete_dead_letter('dead-key'),
+  assert_truthy(dispatcher:delete_dead_letter('dead-key'),
       'dead-letter delete should delegate')
-  assert_eq(workflow_core.deleted_key, 'dead-key',
+  assert_eq(outbox_core.deleted_key, 'dead-key',
       'dead-letter delete key should pass through')
-  local exported, export_result = assert(workflow:export_dead_letters(
-      { format = 'jsonl', limit = 10 }, { path = '/tmp/dead-letter.jsonl' }))
+  local exported, export_result = dispatcher:export_dead_letters(
+      { format = 'jsonl', limit = 10 }, { path = '/tmp/dead-letter.jsonl' })
   assert_eq(export_result.exported, 1, 'dead-letter export result should delegate')
   assert_eq(captured.export_options.format, 'jsonl',
       'dead-letter export options should pass through')
   assert_eq(captured.export_dest.path, '/tmp/dead-letter.jsonl',
       'dead-letter export destination should pass through')
-  assert_truthy(exported:find('dead_letter', 1, true),
-      'dead-letter export should return the core output')
-  assert(workflow:export_dead_letters('/tmp/dead-letter.json'))
-  assert_eq(captured.export_options, nil,
-      'dead-letter export should allow a destination without options')
-  assert_eq(captured.export_dest, '/tmp/dead-letter.json',
-      'dead-letter export destination shorthand should pass through')
+  assert_eq(exported, nil,
+      'dead-letter export should not materialize streamed output')
+  local missing_sink, missing_sink_err = pcall(function()
+    dispatcher:export_dead_letters({ format = 'jsonl' })
+  end)
+  assert_eq(missing_sink, false,
+      'dead-letter export must require an explicit sink')
+  assert_truthy(tostring(missing_sink_err):find('read_dead_letters', 1, true),
+      'dead-letter export should point callers to its materializer')
 
-  workflow:close()
-  assert_truthy(workflow_core.closed, 'workflow close should close the core receiver')
+  dispatcher:close()
+  assert_truthy(outbox_core.closed, 'dispatcher close should close the core receiver')
+  outbox:close()
+  assert_truthy(outbox_core.closed, 'outbox close should close the core receiver')
+  client:close()
+end
+
+local function test_dispatcher_handler_cache_follows_native_activation()
+  local calls = {}
+  local binding_id = 1
+  local dispatcher_core = {
+    _binding_id = function()
+      return binding_id
+    end,
+    pump = function(_, options)
+      if options.max_jobs == 0 then
+        error('dispatcher pump limits are invalid')
+      end
+      if calls.bound_handlers == nil then
+        calls.bound_handlers = options.handlers
+      else
+        assert_eq(options.handlers, calls.bound_handlers,
+            'a handler reentry must reuse the native immutable map')
+      end
+      options._lockdc_facade_handlers_bound = true
+      if options.reentrant then
+        calls.reentrant = (calls.reentrant or 0) + 1
+        return 0
+      end
+      options.handlers.http({})
+      return 1
+    end,
+    close = function() end,
+  }
+  local outbox_core = {
+    dispatcher = function()
+      return dispatcher_core
+    end,
+    close = function() end,
+  }
+  local client_core = {
+    new_outbox = function()
+      return outbox_core
+    end,
+    close = function() end,
+  }
+
+  core_stub.open = function()
+    return client_core
+  end
+
+  local client = assert(lockdc.open({}))
+  local outbox = assert(client:new_outbox({}))
+  local dispatcher = assert(outbox:dispatcher())
+  local alias = assert(outbox:dispatcher())
+  local handlers = {
+    http = function()
+      calls.old = (calls.old or 0) + 1
+    end,
+  }
+  local ok, err = pcall(function()
+    dispatcher:pump({ handlers = handlers, max_jobs = 0 })
+  end)
+  assert_eq(ok, false,
+      'a rejected native pump option must not activate Lua handlers')
+  assert_truthy(tostring(err):find('pump limits are invalid', 1, true),
+      'the native pump validation error should be preserved')
+  handlers.http = function()
+    calls.new = (calls.new or 0) + 1
+    assert_eq(alias:pump({ handlers = handlers, max_jobs = 1, reentrant = true }),
+        0, 'a handler should reuse its map during the first activation')
+  end
+  assert_eq(dispatcher:pump({ handlers = handlers, max_jobs = 1 }), 1,
+      'a corrected handler map should activate successfully')
+  assert_eq(calls.old, nil,
+      'a rejected activation must not retain stale handler functions')
+  assert_eq(calls.new, 1,
+      'the successful retry must invoke the corrected handler function')
+  assert_eq(calls.reentrant, 1,
+      'the first handler invocation must expose its map to dispatcher aliases')
+  dispatcher:close()
+  assert_eq(alias:pump({ handlers = handlers, max_jobs = 1, reentrant = true }),
+      0, 'a surviving alias must retain the activated handler map')
+  alias:close()
+  handlers.http = function()
+    calls.rebound = (calls.rebound or 0) + 1
+  end
+  binding_id = 2
+  calls.bound_handlers = nil
+  local rebound = assert(outbox:dispatcher())
+  assert_eq(rebound:pump({ handlers = handlers, max_jobs = 1 }), 1,
+      'a replacement native binding must build a fresh handler adapter')
+  assert_eq(calls.rebound, 1,
+      'a retired binding must not retain the prior handler function')
+  rebound:close()
+  outbox:close()
   client:close()
 end
 
 test_json_helpers()
 test_request_flattening_and_default_content_type()
 test_pouch_open_config_passthrough()
+test_xa_and_transaction_coordinator_forwarding()
 test_subscribe_ack_and_error_paths()
 test_acquire_for_update_propagates_sdk_failure_shape()
 test_subscribe_with_state_and_service_lifecycle()
 test_watch_queue_change_detection()
 test_json_null_roundtrip_helpers()
-test_workflow_facade_lifecycle()
+test_streaming_surface_requires_sink_and_materializers_are_named()
+test_outbox_facade_lifecycle()
+test_dispatcher_handler_cache_follows_native_activation()

@@ -356,6 +356,198 @@ static void mock_message_close(lc_message *self) {
   mock->close_calls += 1;
 }
 
+static int mock_outbox_participant_describe(lc_outbox_participant *self,
+                                            lc_error *error) {
+  lc_public_mock_outbox_participant *mock;
+
+  mock = (lc_public_mock_outbox_participant *)self;
+  lc_public_mock_record(&mock->describe_call, self, error, NULL, NULL, NULL,
+                        NULL);
+  return mock->rc;
+}
+
+static int mock_outbox_participant_get(lc_outbox_participant *self,
+                                       lc_sink *dst, const lc_get_opts *opts,
+                                       lc_get_res *out, lc_error *error) {
+  lc_public_mock_outbox_participant *mock;
+
+  mock = (lc_public_mock_outbox_participant *)self;
+  lc_public_mock_record(&mock->get_call, self, dst, opts, out, error, NULL);
+  return mock->rc;
+}
+
+static int mock_outbox_participant_update(lc_outbox_participant *self,
+                                          lc_source *src,
+                                          const lc_update_opts *opts,
+                                          lc_error *error) {
+  lc_public_mock_outbox_participant *mock;
+
+  mock = (lc_public_mock_outbox_participant *)self;
+  lc_public_mock_record(&mock->update_call, self, src, opts, error, NULL, NULL);
+  return mock->rc;
+}
+
+static int mock_outbox_participant_mutate(lc_outbox_participant *self,
+                                          const lc_mutate_req *req,
+                                          lc_error *error) {
+  lc_public_mock_outbox_participant *mock;
+
+  mock = (lc_public_mock_outbox_participant *)self;
+  lc_public_mock_record(&mock->mutate_call, self, req, error, NULL, NULL, NULL);
+  return mock->rc;
+}
+
+static int mock_outbox_participant_mutate_local(lc_outbox_participant *self,
+                                                const lc_mutate_local_req *req,
+                                                lc_error *error) {
+  lc_public_mock_outbox_participant *mock;
+
+  mock = (lc_public_mock_outbox_participant *)self;
+  lc_public_mock_record(&mock->mutate_local_call, self, req, error, NULL, NULL,
+                        NULL);
+  return mock->rc;
+}
+
+static int mock_outbox_participant_metadata(lc_outbox_participant *self,
+                                            const lc_metadata_req *req,
+                                            lc_error *error) {
+  lc_public_mock_outbox_participant *mock;
+
+  mock = (lc_public_mock_outbox_participant *)self;
+  lc_public_mock_record(&mock->metadata_call, self, req, error, NULL, NULL,
+                        NULL);
+  return mock->rc;
+}
+
+static int mock_outbox_participant_remove(lc_outbox_participant *self,
+                                          const lc_remove_req *req,
+                                          lc_error *error) {
+  lc_public_mock_outbox_participant *mock;
+
+  mock = (lc_public_mock_outbox_participant *)self;
+  lc_public_mock_record(&mock->remove_call, self, req, error, NULL, NULL, NULL);
+  return mock->rc;
+}
+
+static int mock_outbox_participant_keepalive(lc_outbox_participant *self,
+                                             const lc_keepalive_req *req,
+                                             lc_error *error) {
+  lc_public_mock_outbox_participant *mock;
+
+  mock = (lc_public_mock_outbox_participant *)self;
+  lc_public_mock_record(&mock->keepalive_call, self, req, error, NULL, NULL,
+                        NULL);
+  return mock->rc;
+}
+
+static int mock_outbox_participant_attach(lc_outbox_participant *self,
+                                          const lc_attach_req *req,
+                                          lc_source *src, lc_attach_res *out,
+                                          lc_error *error) {
+  lc_public_mock_outbox_participant *mock;
+
+  mock = (lc_public_mock_outbox_participant *)self;
+  lc_public_mock_record(&mock->attach_call, self, req, src, out, error, NULL);
+  return mock->rc;
+}
+
+static int mock_outbox_participant_list_attachments(lc_outbox_participant *self,
+                                                    lc_attachment_list *out,
+                                                    lc_error *error) {
+  lc_public_mock_outbox_participant *mock;
+
+  mock = (lc_public_mock_outbox_participant *)self;
+  lc_public_mock_record(&mock->list_attachments_call, self, out, error, NULL,
+                        NULL, NULL);
+  return mock->rc;
+}
+
+static int mock_outbox_participant_get_attachment(
+    lc_outbox_participant *self, const lc_attachment_get_req *req, lc_sink *dst,
+    lc_attachment_get_res *out, lc_error *error) {
+  lc_public_mock_outbox_participant *mock;
+
+  mock = (lc_public_mock_outbox_participant *)self;
+  lc_public_mock_record(&mock->get_attachment_call, self, req, dst, out, error,
+                        NULL);
+  return mock->rc;
+}
+
+static int mock_outbox_participant_delete_attachment(
+    lc_outbox_participant *self, const lc_attachment_selector *selector,
+    int *deleted, lc_error *error) {
+  lc_public_mock_outbox_participant *mock;
+
+  mock = (lc_public_mock_outbox_participant *)self;
+  lc_public_mock_record(&mock->delete_attachment_call, self, selector, deleted,
+                        error, NULL, NULL);
+  if (deleted != NULL) {
+    *deleted = mock->deleted_value;
+  }
+  return mock->rc;
+}
+
+static int mock_outbox_participant_delete_all_attachments(
+    lc_outbox_participant *self, int *deleted_count, lc_error *error) {
+  lc_public_mock_outbox_participant *mock;
+
+  mock = (lc_public_mock_outbox_participant *)self;
+  lc_public_mock_record(&mock->delete_all_attachments_call, self, deleted_count,
+                        error, NULL, NULL, NULL);
+  if (deleted_count != NULL) {
+    *deleted_count = mock->deleted_count_value;
+  }
+  return mock->rc;
+}
+
+static void mock_outbox_participant_close(lc_outbox_participant *self) {
+  lc_public_mock_outbox_participant *mock;
+
+  mock = (lc_public_mock_outbox_participant *)self;
+  mock->close_calls += 1;
+}
+
+static int mock_history_consumer_position(lc_history_consumer *self,
+                                          lc_history_consumer_position *out,
+                                          lc_error *error) {
+  lc_public_mock_history_consumer *mock;
+
+  mock = (lc_public_mock_history_consumer *)self;
+  lc_public_mock_record(&mock->position_call, self, out, error, NULL, NULL,
+                        NULL);
+  return mock->rc;
+}
+
+static int mock_history_consumer_advance(lc_history_consumer *self,
+                                         lc_index_seq acknowledged_index_seq,
+                                         lc_history_consumer_position *out,
+                                         lc_error *error) {
+  lc_public_mock_history_consumer *mock;
+
+  mock = (lc_public_mock_history_consumer *)self;
+  mock->acknowledged_index_seq = acknowledged_index_seq;
+  lc_public_mock_record(&mock->advance_call, self, out, error, NULL, NULL,
+                        NULL);
+  return mock->rc;
+}
+
+static int mock_history_consumer_unregister(lc_history_consumer *self,
+                                            lc_error *error) {
+  lc_public_mock_history_consumer *mock;
+
+  mock = (lc_public_mock_history_consumer *)self;
+  lc_public_mock_record(&mock->unregister_call, self, error, NULL, NULL, NULL,
+                        NULL);
+  return mock->rc;
+}
+
+static void mock_history_consumer_close(lc_history_consumer *self) {
+  lc_public_mock_history_consumer *mock;
+
+  mock = (lc_public_mock_history_consumer *)self;
+  mock->close_calls += 1;
+}
+
 static int mock_client_acquire(lc_client *self, const lc_acquire_req *req,
                                lc_lease **out, lc_error *error) {
   lc_public_mock_client *mock;
@@ -365,6 +557,19 @@ static int mock_client_acquire(lc_client *self, const lc_acquire_req *req,
   if (out != NULL) {
     *out = mock->lease_to_return;
   }
+  return mock->rc;
+}
+
+static int
+mock_client_acquire_for_update(lc_client *self, const lc_acquire_req *req,
+                               lc_acquire_for_update_handler_fn handler,
+                               void *handler_context, lc_error *error) {
+  lc_public_mock_client *mock;
+
+  mock = (lc_public_mock_client *)self;
+  lc_public_mock_record(&mock->acquire_for_update_call, self, req, NULL,
+                        handler_context, error, NULL);
+  (void)handler;
   return mock->rc;
 }
 
@@ -388,6 +593,19 @@ static int mock_client_get(lc_client *self, const char *key,
   return mock->rc;
 }
 
+static int mock_client_get_in_namespace(lc_client *self, const char *ns,
+                                        const char *key,
+                                        const lc_get_opts *opts, lc_sink *dst,
+                                        lc_get_res *out, lc_error *error) {
+  lc_public_mock_client *mock;
+
+  mock = (lc_public_mock_client *)self;
+  lc_public_mock_record(&mock->get_in_namespace_call, self, ns, key, opts, dst,
+                        out);
+  (void)error;
+  return mock->rc;
+}
+
 static int mock_client_load(lc_client *self, const char *key,
                             const lonejson_map *map, void *dst,
                             const lc_get_opts *opts, lc_get_res *out,
@@ -400,8 +618,7 @@ static int mock_client_load(lc_client *self, const char *key,
   return mock->rc;
 }
 
-static int mock_client_load_in_namespace(lc_client *self,
-                                         const char *namespace_name,
+static int mock_client_load_in_namespace(lc_client *self, const char *ns,
                                          const char *key,
                                          const lonejson_map *map, void *dst,
                                          const lc_get_opts *opts,
@@ -409,8 +626,8 @@ static int mock_client_load_in_namespace(lc_client *self,
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
-  lc_public_mock_record(&mock->load_in_namespace_call, self, namespace_name,
-                        key, map, dst, opts);
+  lc_public_mock_record(&mock->load_in_namespace_call, self, ns, key, map, dst,
+                        opts);
   mock->load_in_namespace_call.arg6 = out;
   (void)error;
   return mock->rc;
@@ -869,6 +1086,49 @@ mock_client_new_consumer_service(lc_client *self,
   return mock->rc;
 }
 
+static int mock_client_new_outbox(lc_client *self,
+                                  const lc_outbox_config *config,
+                                  lc_outbox **out, lc_error *error) {
+  lc_public_mock_client *mock;
+
+  mock = (lc_public_mock_client *)self;
+  lc_public_mock_record(&mock->new_outbox_call, self, config, out, error, NULL,
+                        NULL);
+  if (out != NULL) {
+    *out = NULL;
+  }
+  return mock->rc;
+}
+
+static int mock_client_new_outbox_with_dispatcher(
+    lc_client *self, const lc_outbox_config *config,
+    lc_outbox_dispatcher *dispatcher, lc_outbox **out, lc_error *error) {
+  lc_public_mock_client *mock;
+
+  mock = (lc_public_mock_client *)self;
+  lc_public_mock_record(&mock->new_outbox_with_dispatcher_call, self, config,
+                        dispatcher, out, error, NULL);
+  if (out != NULL) {
+    *out = NULL;
+  }
+  return mock->rc;
+}
+
+static int
+mock_client_new_history_consumer(lc_client *self,
+                                 const lc_history_consumer_config *config,
+                                 lc_history_consumer **out, lc_error *error) {
+  lc_public_mock_client *mock;
+
+  mock = (lc_public_mock_client *)self;
+  lc_public_mock_record(&mock->new_history_consumer_call, self, config, out,
+                        error, NULL, NULL);
+  if (out != NULL) {
+    *out = NULL;
+  }
+  return mock->rc;
+}
+
 static int mock_client_watch_queue(lc_client *self,
                                    const lc_watch_queue_req *req,
                                    const lc_watch_handler *handler,
@@ -907,8 +1167,10 @@ void lc_public_mock_client_init(lc_public_mock_client *mock) {
   mock->deleted_value = 1;
   mock->deleted_count_value = 2;
   mock->pub.acquire = mock_client_acquire;
+  mock->pub.acquire_for_update = mock_client_acquire_for_update;
   mock->pub.describe = mock_client_describe;
   mock->pub.get = mock_client_get;
+  mock->pub.get_in_namespace = mock_client_get_in_namespace;
   mock->pub.load = mock_client_load;
   mock->pub.load_in_namespace = mock_client_load_in_namespace;
   mock->pub.update = mock_client_update;
@@ -952,6 +1214,9 @@ void lc_public_mock_client_init(lc_public_mock_client *mock) {
   mock->pub.subscribe = mock_client_subscribe;
   mock->pub.subscribe_with_state = mock_client_subscribe_with_state;
   mock->pub.new_consumer_service = mock_client_new_consumer_service;
+  mock->pub.new_outbox = mock_client_new_outbox;
+  mock->pub.new_outbox_with_dispatcher = mock_client_new_outbox_with_dispatcher;
+  mock->pub.new_history_consumer = mock_client_new_history_consumer;
   mock->pub.watch_queue = mock_client_watch_queue;
   mock->pub.close = mock_client_close;
 }
@@ -992,6 +1257,39 @@ void lc_public_mock_message_init(lc_public_mock_message *mock) {
   mock->pub.rewind_payload = mock_message_rewind_payload;
   mock->pub.write_payload = mock_message_write_payload;
   mock->pub.close = mock_message_close;
+}
+
+void lc_public_mock_outbox_participant_init(
+    lc_public_mock_outbox_participant *mock) {
+  memset(mock, 0, sizeof(*mock));
+  mock->rc = LC_OK;
+  mock->deleted_value = 1;
+  mock->deleted_count_value = 2;
+  mock->pub.describe = mock_outbox_participant_describe;
+  mock->pub.get = mock_outbox_participant_get;
+  mock->pub.update = mock_outbox_participant_update;
+  mock->pub.mutate = mock_outbox_participant_mutate;
+  mock->pub.mutate_local = mock_outbox_participant_mutate_local;
+  mock->pub.metadata = mock_outbox_participant_metadata;
+  mock->pub.remove = mock_outbox_participant_remove;
+  mock->pub.keepalive = mock_outbox_participant_keepalive;
+  mock->pub.attach = mock_outbox_participant_attach;
+  mock->pub.list_attachments = mock_outbox_participant_list_attachments;
+  mock->pub.get_attachment = mock_outbox_participant_get_attachment;
+  mock->pub.delete_attachment = mock_outbox_participant_delete_attachment;
+  mock->pub.delete_all_attachments =
+      mock_outbox_participant_delete_all_attachments;
+  mock->pub.close = mock_outbox_participant_close;
+}
+
+void lc_public_mock_history_consumer_init(
+    lc_public_mock_history_consumer *mock) {
+  memset(mock, 0, sizeof(*mock));
+  mock->rc = LC_OK;
+  mock->pub.position = mock_history_consumer_position;
+  mock->pub.advance = mock_history_consumer_advance;
+  mock->pub.unregister = mock_history_consumer_unregister;
+  mock->pub.close = mock_history_consumer_close;
 }
 
 void lc_public_mock_consumer_service_init(

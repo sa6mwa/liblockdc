@@ -219,7 +219,7 @@ typedef struct lc_pouch_index_term_posting_table {
 } lc_pouch_index_term_posting_table;
 
 typedef struct lc_pouch_index_term_generation {
-  char *namespace_name;
+  char *ns;
   uint64_t index_seq;
   unsigned long row_count;
   unsigned long row_hash;

@@ -3,14 +3,14 @@ local lockdc = require('lockdc')
 local endpoint = os.getenv('LOCKDC_URL') or 'https://localhost:19441'
 local client_pem = os.getenv('LOCKDC_CLIENT_PEM')
   or './devenv/volumes/lockd-disk-a-config/client.pem'
-local namespace_name = os.getenv('LOCKDC_NAMESPACE') or 'default'
+local namespace = os.getenv('LOCKDC_NAMESPACE') or 'default'
 local queue = os.getenv('LOCKDC_QUEUE') or 'tests-lua-consumer-handler-error'
 local owner = os.getenv('LOCKDC_OWNER') or 'tests-lua-consumer-handler-error'
 
 local client, err = lockdc.open({
   endpoints = { endpoint },
   client_bundle_source = { path = client_pem },
-  default_namespace = namespace_name,
+  default_namespace = namespace,
 })
 
 if client == nil then
@@ -33,23 +33,23 @@ if enqueued == nil then
 end
 
 local service = client:new_consumer_service({
-  Name = owner,
-  Queue = queue,
-  Options = {
-    namespace_name = namespace_name,
+  name = owner,
+  request = {
+    namespace = namespace,
+    queue = queue,
     owner = owner,
     visibility_timeout_seconds = 30,
     wait_seconds = 5,
   },
-  MessageHandler = function(_message)
-    return { message = 'expected consumer failure' }
+  handle = function(_message)
+    return nil, { message = 'expected consumer failure' }
   end,
 })
 
-local ok, service_err = service:start()
+local ok, service_err = service:run()
 if ok ~= nil then
   client:close()
-  error('service:start unexpectedly succeeded for failing handler')
+  error('service:run unexpectedly succeeded for failing handler')
 end
 if type(service_err) ~= 'table' or service_err.message ~= 'expected consumer failure' then
   client:close()
@@ -57,7 +57,7 @@ if type(service_err) ~= 'table' or service_err.message ~= 'expected consumer fai
 end
 
 local message, dequeue_err = client:dequeue({
-  namespace_name = namespace_name,
+  namespace = namespace,
   queue = queue,
   owner = owner .. '-probe',
   visibility_timeout_seconds = 30,
@@ -69,11 +69,11 @@ if message == nil then
   error(('expected redelivery after handler failure, dequeue failed: %s'):format(dequeue_err and dequeue_err.message or tostring(dequeue_err)))
 end
 
-local payload, payload_err = message:payload_json()
+local payload, payload_err = message:read_payload_json()
 if payload == nil then
   message:close()
   client:close()
-  error(('message:payload_json failed: %s'):format(payload_err and payload_err.message or tostring(payload_err)))
+  error(('message:read_payload_json failed: %s'):format(payload_err and payload_err.message or tostring(payload_err)))
 end
 if type(payload) ~= 'table' or payload.kind ~= 'lua-consumer-handler-error' or payload.attempt ~= 1 then
   message:close()

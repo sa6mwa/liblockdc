@@ -378,7 +378,7 @@ Go disk queue relative keys are:
 - queue base: `q/<queue>`;
 - message metadata: `q/<queue>/msg/<id>.pb`;
 - message payload: `q/<queue>/msg/<id>.bin`;
-- workflow state: `q/<queue>/state/<id>.json`;
+- outbox state: `q/<queue>/state/<id>.json`;
 - DLQ metadata: `q/<queue>/dlq/msg/<id>.pb`;
 - DLQ payload: `q/<queue>/dlq/msg/<id>.bin`;
 - DLQ state: `q/<queue>/dlq/state/<id>.json`.
@@ -386,11 +386,11 @@ Go disk queue relative keys are:
 Go queue lease keys use relative keys without file extensions:
 
 - message lease: `q/<queue>/msg/<id>`;
-- workflow state lease: `q/<queue>/state/<id>`.
+- outbox state lease: `q/<queue>/state/<id>`.
 
 Pouch must use the same namespace-local layout family. Because Pouch does not
 use protobuf, the C-native queue metadata object key is
-`q/<queue>/msg/<id>.meta` instead of Go's `.pb`. Payload and workflow state
+`q/<queue>/msg/<id>.meta` instead of Go's `.pb`. Payload and outbox state
 keys stay Go-shaped: `q/<queue>/msg/<id>.bin` and
 `q/<queue>/state/<id>.json`. Message and state lease metadata keys remain
 extensionless: `q/<queue>/msg/<id>` and `q/<queue>/state/<id>`.
@@ -406,7 +406,7 @@ that changes participant semantics.
 Queue message leases are target-key metadata. The message document may carry
 delivery fields for API responses and CAS validation, but the authoritative
 lease, fencing token, transaction id, and lease expiry are stored and mutated on
-metadata key `q/<queue>/msg/<id>`. Workflow state leases use metadata key
+metadata key `q/<queue>/msg/<id>`. Outbox state leases use metadata key
 `q/<queue>/state/<id>`. Transaction commit/rollback must validate and clear
 those metadata leases the way Go disk does; scanning staged queue rows is not a
 substitute for participant semantics.
@@ -418,7 +418,7 @@ carries that token for ack, nack, extend, and transaction validation.
 
 Pouch transaction application routes queue participants by exact lease-key
 shape. `q/<queue>/msg/<id>` applies the staged `.meta` queue message decision
-and clears message lease metadata. `q/<queue>/state/<id>` applies workflow
+and clears message lease metadata. `q/<queue>/state/<id>` applies outbox
 state cleanup against `q/<queue>/state/<id>.json` and clears state lease
 metadata. A `.meta`, `.bin`, `.json`, staging, or scan-discovered key is not a
 queue transaction participant.
@@ -747,7 +747,7 @@ the public API or durable format.
 - Queue DLQ timing:
   Go queue moves max-attempt messages to DLQ when the ready cache observes a
   descriptor. Pouch has no Go ready-cache worker, so non-transactional terminal
-  failure nacks synchronously move message metadata, payload, and workflow
+  failure nacks synchronously move message metadata, payload, and outbox
   state to the DLQ keys. Reason: this preserves the same durable DLQ end state
   without adding a background cache layer; callers observe the terminal message
   removed from the live queue immediately.
@@ -776,7 +776,8 @@ the public API or durable format.
   with an actionable error and must not silently use shared-root behavior.
   `lc_pouch_abort` stops Pouch-owned workers and releases the process-bound
   root lock as a crash would. Before that release it closes resident append and
-  source descriptors and clears derived query state, while retaining the
+  source descriptors, bounded authenticated body-cache entries, and clears
+  derived query state, while retaining the
   durable heartbeat marker as takeover evidence until it expires. An explicit
   shared-root abort can reopen immediately and replays the last finalized
   record; an exclusive-root abort instead requires clean handoff or heartbeat
@@ -814,8 +815,10 @@ the public API or durable format.
   recovery/takeover. Pouch deliberately does not add a second durable writer
   epoch as data authority. This is a supported Pouch extension, not the
   default Go-disk-aligned performance path.
-  Direct callers set `single_writer_set=1` and `single_writer=0`; endpoint
-  callers use `?single_writer=false`.
+  Direct internal callers set `single_writer_set=1` and `single_writer=0`;
+  public clients select the same policy with
+  `LC_POUCH_SETTING_SINGLE_WRITER` or the compatible
+  `?single_writer=false` endpoint option.
 
 - Mode transitions are lifecycle transitions. Pouch takes a writer-mode
   transition barrier that stops new append-capable operations and waits for
@@ -842,10 +845,10 @@ the public API or durable format.
   by Go disk's default `failover` mode. Finalized records are immediately
   visible and replay-safe in either policy. `durable_sync=1` enables Pouch's
   stronger root-scoped `fdatasync` group-commit policy. In that mode,
-  `fsync_batch_max_ops` is a `uint64_t` Pouch open option and a
+  `fsync_batch_max_ops` is a `uint64_t` Pouch open setting and a compatible
   `pouch://...?fsync_batch_max_ops=<u64>` endpoint option; zero is unbounded,
-  matching Go's `LogstoreCommitMaxOps`. `durable_sync` is available as both a
-  direct open option and `pouch://...?durable_sync=true`. The batcher collects
+  matching Go's `LogstoreCommitMaxOps`. `durable_sync` is available through
+  `lc_pouch_settings` and `pouch://...?durable_sync=true`. The batcher collects
   eligible requests for at most two milliseconds, or until
   `fsync_batch_max_ops` is reached, matching Go disk's bounded group-commit
   schedule. One root has one batcher: when multiple durable-sync handles are
@@ -883,6 +886,14 @@ the public API or durable format.
   no handle owns the complete local mutation stream. Index-artifact failure is
   recoverable worker work and never changes the success of an already durable
   state mutation.
+
+- Non-query roots:
+  `query_indexing=false` is a root-open setting for append-heavy Pouch roots
+  that do not need derived query indexes. It prevents index warming, indexer
+  startup, and write-side index extraction or publication. Implicit queries
+  use scans even if a namespace's durable preference is `index`; an explicit
+  `engine=index` request and `flush_index` fail clearly. The setting is local
+  to the Pouch endpoint and does not modify durable namespace configuration.
   Deployments that tune Go disk's index writer may set comparable bounds on
   Pouch, for example
   `pouch://...?indexer_flush_docs=64&indexer_flush_interval_seconds=1`.
@@ -893,8 +904,8 @@ the public API or durable format.
   retains its active append descriptor; a shared writer retains descriptors
   only while its ownership/cursor remains valid. Rotation, recovery, takeover,
   maintenance, mode transition, close, and abort invalidate them. The
-  `queue_watch` option and
-  `pouch://...?queue_watch=true` enable Linux inotify wake-ups only on a known
+  `queue_watch` setting and compatible `pouch://...?queue_watch=true` enable
+  Linux inotify wake-ups only on a known
   non-NFS filesystem; unsupported or unknown filesystems report polling and
   retain the 100 ms polling fallback.
 
@@ -912,29 +923,109 @@ the public API or durable format.
   reclaim threshold, a 15-minute deletion grace, and an 8 MiB/s throttle.
   `background_compaction_enabled_set` distinguishes an explicit disable from
   the default, and `compaction_throttling_disabled` explicitly selects an
-  unlimited throttle. Endpoint options expose the enable/throttle choices;
-  direct Pouch open options retain the full tuning surface.
+  unlimited throttle. Typed client settings expose the public enable/throttle
+  choices; endpoint options remain a compatibility input and direct Pouch open
+  options retain the internal full tuning surface.
 
 - Background compaction scheduling:
-  Go disk runs a pass at open and then on a fixed periodic timer. Pouch
-  deliberately uses idle-debounced scheduling instead: it does not compact at
-  open, and each successful mutation starts a fresh full interval. A pass runs
-  only after that interval has remained mutation-free, then repeats once per
-  interval while the root remains idle. Continuous successful mutation can
-  therefore defer automatic compaction indefinitely. This is intentional: it
-  keeps background maintenance out of Pouch's write hot path and prevents an
-  open-time worker from interleaving with application recovery or integrity
-  inspection. It does not affect replay or durability; it only delays space
-  reclamation. Callers that require reclamation under continuous writes must
-  invoke explicit namespace maintenance, which runs immediately.
+  Go disk runs a pass at open and then on a fixed periodic timer. Pouch does
+  not compact at open. A successful mutation only coalesces its namespace in a
+  fixed-size, root-local work queue; it does not reset a global idle timer or
+  perform maintenance I/O. The worker makes one namespace-local attempt per
+  configured interval. Continuous successful mutation can therefore add work,
+  but cannot postpone an already scheduled turn indefinitely. If the bounded
+  queue is full, ordinary compaction work is dropped; terminal work falls back
+  to a durable marker for a later turn. This does not affect replay or
+  durability; it only delays space reclamation. Callers that require immediate
+  reclamation can invoke explicit namespace maintenance.
 
-- Retention lifecycle:
-  `retention_seconds` enables one root-local pthread janitor;
-  `janitor_interval_seconds` defaults to one hour. Successful state mutations
-  signal the janitor only after their commit and namespace lock release. The
-  worker coalesces those signals, performs the existing retention sweep after
-  the configured interval, and joins on close or abort. It never forks or runs
-  before a completed mutation.
+- Terminal retention and reclamation:
+  A completed lease, released queue delivery, deleted state, and resolved
+  transaction must disappear from the live logical projection immediately.
+  Their physical records remain available until an immutable checkpoint covers
+  the resulting projection and Pouch can reclaim its obsolete segments.
+
+  `lc_client_new_history_consumer()` adds an explicit durable retention pin for
+  a Pouch namespace. Its `(ns, consumer_id)` identity and
+  acknowledgement are stored under `.lockd/history-consumers/`; acknowledge
+  positions are monotonic and bounded by the current namespace sequence.
+  Cursor replacements stage beneath that namespace's private `.staging/`
+  directory and become registered only after an atomic rename into the final
+  consumer-record directory. A later cursor operation or compaction attempt
+  removes abandoned staged writes under the same namespace lock; staging files
+  never act as retention pins and cannot corrupt a registered record.
+  `LC_HISTORY_CONSUMER_START_AT_CURRENT` registers only future retention.
+  The public C receiver has matching `lc_history_consumer_get_position()`,
+  `lc_history_consumer_advance()`, `lc_history_consumer_unregister()`, and
+  `lc_history_consumer_close()` forms. Closing a local handle preserves its
+  pin; only `unregister()` removes it.
+  This is the retention substrate for a watcher-resume, replication, backup,
+  or PITR implementation, but it intentionally does **not** itself expose a
+  chronological history reader or make a remote lockd promise.
+
+  The initial implementation is conservative: while any registered consumer
+  is behind the namespace's durable current sequence, compaction does not
+  replace that namespace's candidate segments. Once all pins are current (or
+  have been unregistered), ordinary compaction can proceed. This is a safe
+  whole-compaction barrier, not a fine-grained segment-prefix collector; a
+  deliberately slow consumer therefore grows retained disk history. It does
+  not introduce a history scan, replay allocation, or consumer-directory I/O
+  on normal Pouch open, read, query, or mutation paths. Consumer records are
+  inspected only inside the already-selected namespace compaction attempt.
+
+  A consumer must be registered before it relies on historical recovery:
+  Pouch cannot recreate data compacted before a pin existed. Corrupt or
+  unreadable consumer control records fail that namespace's compaction rather
+  than weakening retention.
+
+  Checkpoints retain the monotonic fencing high-water mark even after a lease
+  terminal record is reclaimed, so no future acquire can reuse a fencing token.
+  Unresolved XA decisions are retained indefinitely. Resolved decisions,
+  queue terminal records, outbox receipts, and idempotency records retain
+  their existing compaction semantics; a history pin conservatively prevents
+  the selected namespace compaction while it is behind. Fine-grained consumer
+  boundaries for those individual record families remain future work.
+
+  Pouch implements this through terminal-reclaim work markers and compaction,
+  not a TTL sweeper. Once a terminal transition commits, its namespace is
+  coalesced in the bounded worker queue outside the mutation authority. Before
+  the worker starts its terminal compaction attempt, it records a best-effort
+  durable work marker. The marker is only a liveness hint: losing it cannot
+  resurrect a record, weaken a fence, or make an incomplete XA decision
+  reclaimable. A later terminal transition recreates it, and an operator can
+  always request namespace maintenance explicitly.
+
+  The root-local worker takes at most one queued namespace or marker per pass.
+  It never enumerates the root's namespaces, visits every state key, or
+  allocates a root-wide namespace snapshot. When the marked namespace has
+  accumulated at least the
+  configured terminal-reclaim byte threshold in its active segment, the worker
+  seals that segment, builds and fsyncs an immutable snapshot, installs the
+  snapshot in the manifest, and only then consumes the work marker. A marker
+  that finds too little work is likewise consumed; a later terminal transition
+  schedules the next bounded attempt. The snapshot contains the current
+  logical projection and the durable high-water values;
+  terminal tombstones therefore disappear from the new snapshot while their
+  fencing and ordering facts remain available. Superseded segment and snapshot
+  files still obey `compaction_delete_grace_seconds` before physical unlink.
+
+  This makes work bounded at the root scheduler level: one namespace and one
+  compaction attempt per worker turn. Snapshot construction remains bounded by
+  the selected segment/snapshot range rather than the root, and its byte
+  threshold prevents tiny terminal transitions from causing rewrite churn.
+  Continuous application writes do not restart a global idle timer or defer an
+  already queued terminal reclaim forever. Normal non-terminal compaction is
+  scheduled only for namespaces touched by the current handle and is discarded
+  from its in-memory queue after an attempt; it is never reconstructed by an
+  open-time namespace scan.
+
+  `retention_seconds` and `janitor_interval_seconds` are not automatic Pouch
+  endpoint controls. The explicit
+  `lc_pouch_maintenance_options.retention_updated_before_unix` operation
+  remains the deliberate whole-document TTL deletion tool for callers that
+  need that distinct policy. It is intentionally opt-in, namespace-scoped, and
+  may scan that named namespace; it is not used by normal Pouch initialization
+  or background maintenance.
 
 ### Remaining Operational And Public API Differences
 
@@ -1043,7 +1134,7 @@ caller namespace:
 
 - queue message metadata and payload records live under the caller namespace
   with `q/<queue>/msg/<id>`-style keys;
-- queue workflow state lives under the caller namespace with
+- queue outbox state lives under the caller namespace with
   `q/<queue>/state/<id>`-style keys;
 - attachments live under the caller namespace with
   `state/<key>/attachments/<id>` and staged attachment keys under
@@ -1172,7 +1263,7 @@ Higher-level Pouch features map onto those families:
 - queue message metadata and payloads are object records in the caller
   namespace under `q/<queue>/msg/<id>`-style keys, with documented Pouch
   extension choices if C-native records do not use `.pb`/`.bin`;
-- queue workflow state is an object record or metadata-backed queue state
+- queue outbox state is an object record or metadata-backed queue state
   record in the caller namespace under `q/<queue>/state/<id>`-style keys;
 - lease state is target-key metadata in the caller namespace;
 - transaction decisions, participants, retention markers, tombstones, and
@@ -1593,7 +1684,15 @@ durability or projection visibility.
 
 Reads open bounded sources over segment/snapshot payload spans. The read path
 uses an LRU cache for open segment/snapshot file descriptors and dup-backed
-bounded sources for independent reader lifetimes.
+bounded sources for independent reader lifetimes. Projection creation,
+metadata-only reads, and writes never open, decrypt, decompress, or
+materialize a live payload merely to prefill the body cache. A requested body
+source streams directly from its payload span on its first consumption while a
+bounded tee copies delivered plaintext into a provisional cache entry. Only a
+source that reaches successful authenticated EOF publishes its entry; partial,
+failed, and tampered reads never become cache hits. The cache is capped at 16
+MiB per resident namespace, and cached entries preserve an already-returned
+source across concurrent projection invalidation.
 
 Required behavior:
 
@@ -1602,9 +1701,10 @@ Required behavior:
 - expose payload readers that stream transforms in the correct order;
 - return metadata from projections without opening payload bytes;
 - when a public copy operation needs a payload, capture its result metadata and
-  a dup-backed segment source or retained bounded body-cache source while
-  coordinated, then release namespace coordination before copying into the
-  caller sink. A slow or blocked caller sink must not serialize another read;
+  a dup-backed segment source or retained, authenticated bounded body-cache
+  source while coordinated, then release namespace coordination before copying
+  into the caller sink. A slow or blocked caller sink must not serialize
+  another read;
 - avoid opening hidden, staged, reserved, and internal-prefix rows for scan
   summaries;
 - keep public state, private state, attachment/object, queue, and transaction
@@ -1684,6 +1784,14 @@ Indexed query requirements:
 - a successful manifest sequence read records per-client manifest trust for
   that namespace/index sequence. A later non-validating ensure-current call may
   skip rereading the manifest when the state index sequence is unchanged;
+- shared-writer compaction replaces canonical-state topology under the
+  namespace write authority and first retires its derived query manifest. The
+  next foreground `flush_index` (including the outbox recovery `wait`
+  boundary) rebuilds from the installed snapshot, publishes its replacement
+  atomically, and reclaims the now-unreferenced artifacts.
+  This is a cold maintenance boundary for peer-owned asynchronous publication;
+  exclusive-writer compaction retains its complete in-memory index capture and
+  does not add a query rebuild to its normal compaction path;
 - indexed document queries with a discard sink may bulk-count exact candidates
   only when there is no input cursor and all matches fit below the requested
   limit, so cursor behavior and candidate verification semantics remain
@@ -1858,8 +1966,9 @@ The installed C header is part of this public contract. Doxygen comments for
 public Pouch-facing configuration and APIs must document the same behavior
 described here: `pouch://` uses one absolute local root, exclusive single-writer
 mode is the default, explicit shared-root writing requires
-`single_writer=false`, endpoint option values are
-copied at open, public `long` fields are range-checked before narrowing on
+`LC_POUCH_SETTING_SINGLE_WRITER` with zero (or compatible
+`single_writer=false`), typed and endpoint values are copied at open, public
+`long` fields are range-checked before narrowing on
 32-bit targets, and state bodies, queue payloads, attachments, scan output,
 query-document output, crypto, and compression remain real streaming paths
 unless the caller explicitly chooses a memory-backed source or sink.
@@ -1923,7 +2032,11 @@ Benchmarks must include realistic and abusive workloads:
 - staged state promotion;
 - compaction over many default-sized segments;
 - reopen and multi-segment replay;
-- overcapacity patterns with churn, deletes, updates, and stale history.
+- overcapacity patterns with churn, deletes, updates, and stale history;
+- shared-root single-segment terminal reclaim and forced multi-segment
+  compaction while an outbox dispatcher holds a real claim, followed by
+  retention cleanup, reopen, exact survivor assertions, and cold outbox
+  recovery after a forced multi-segment compaction.
 
 Document-returning production query metrics measure steady-state public API
 throughput. The benchmark first runs the same document query once outside the
@@ -1980,7 +2093,7 @@ shared-root contention. The soak has fixed workload and timeout controls in
 the root Makefile; it is deliberate release hardening, not an unbounded burn-in
 or a normal release prerequisite.
 
-The same lane also runs the bounded workflow reconciliation hardening suite:
+The same lane also runs the bounded outbox reconciliation hardening suite:
 preflushed and persisted indexes, a forced-compaction reopen, and shared-root
 dispatchers before and after compaction. Its cases are serial and use two
 shared-root dispatchers by default, so it exercises recovery correctness

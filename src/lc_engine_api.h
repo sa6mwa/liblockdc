@@ -13,6 +13,7 @@
 
 #include <pslog.h>
 #include <stddef.h>
+#include <time.h>
 
 typedef struct lc_engine_client lc_engine_client;
 typedef struct lc_engine_error lc_engine_error;
@@ -73,7 +74,7 @@ struct lc_engine_error {
 };
 
 typedef struct lc_engine_acquire_request {
-  const char *namespace_name;
+  const char *ns;
   const char *key;
   const char *owner;
   lonejson_int64 ttl_seconds;
@@ -83,7 +84,7 @@ typedef struct lc_engine_acquire_request {
 } lc_engine_acquire_request;
 
 typedef struct lc_engine_acquire_response {
-  char *namespace_name;
+  char *ns;
   char *key;
   char *owner;
   char *lease_id;
@@ -96,7 +97,7 @@ typedef struct lc_engine_acquire_response {
 } lc_engine_acquire_response;
 
 typedef struct lc_engine_get_request {
-  const char *namespace_name;
+  const char *ns;
   const char *key;
   const char *lease_id;
   lonejson_int64 fencing_token;
@@ -124,7 +125,7 @@ typedef struct lc_engine_get_stream_response {
 } lc_engine_get_stream_response;
 
 typedef struct lc_engine_keepalive_request {
-  const char *namespace_name;
+  const char *ns;
   const char *key;
   const char *lease_id;
   const char *txn_id;
@@ -140,7 +141,7 @@ typedef struct lc_engine_keepalive_response {
 } lc_engine_keepalive_response;
 
 typedef struct lc_engine_release_request {
-  const char *namespace_name;
+  const char *ns;
   const char *key;
   const char *lease_id;
   const char *txn_id;
@@ -154,7 +155,7 @@ typedef struct lc_engine_release_response {
 } lc_engine_release_response;
 
 typedef struct lc_engine_update_request {
-  const char *namespace_name;
+  const char *ns;
   const char *key;
   const char *lease_id;
   const char *txn_id;
@@ -175,7 +176,7 @@ typedef struct lc_engine_update_response {
 } lc_engine_update_response;
 
 typedef struct lc_engine_mutate_request {
-  const char *namespace_name;
+  const char *ns;
   const char *key;
   const char *lease_id;
   const char *txn_id;
@@ -195,7 +196,7 @@ typedef struct lc_engine_mutate_response {
 } lc_engine_mutate_response;
 
 typedef struct lc_engine_metadata_request {
-  const char *namespace_name;
+  const char *ns;
   const char *key;
   const char *lease_id;
   const char *txn_id;
@@ -207,7 +208,7 @@ typedef struct lc_engine_metadata_request {
 } lc_engine_metadata_request;
 
 typedef struct lc_engine_metadata_response {
-  char *namespace_name;
+  char *ns;
   char *key;
   lonejson_int64 version;
   int has_query_hidden;
@@ -216,7 +217,7 @@ typedef struct lc_engine_metadata_response {
 } lc_engine_metadata_response;
 
 typedef struct lc_engine_remove_request {
-  const char *namespace_name;
+  const char *ns;
   const char *key;
   const char *lease_id;
   const char *txn_id;
@@ -233,12 +234,12 @@ typedef struct lc_engine_remove_response {
 } lc_engine_remove_response;
 
 typedef struct lc_engine_describe_request {
-  const char *namespace_name;
+  const char *ns;
   const char *key;
 } lc_engine_describe_request;
 
 typedef struct lc_engine_describe_response {
-  char *namespace_name;
+  char *ns;
   char *key;
   char *owner;
   char *lease_id;
@@ -252,7 +253,7 @@ typedef struct lc_engine_describe_response {
 } lc_engine_describe_response;
 
 typedef struct lc_engine_query_request {
-  const char *namespace_name;
+  const char *ns;
   const char *selector_json;
   lonejson_int64 limit;
   const char *cursor;
@@ -286,7 +287,7 @@ typedef struct lc_engine_query_key_handler {
 } lc_engine_query_key_handler;
 
 typedef struct lc_engine_enqueue_request {
-  const char *namespace_name;
+  const char *ns;
   const char *queue;
   lonejson_int64 delay_seconds;
   lonejson_int64 visibility_timeout_seconds;
@@ -296,7 +297,7 @@ typedef struct lc_engine_enqueue_request {
 } lc_engine_enqueue_request;
 
 typedef struct lc_engine_enqueue_response {
-  char *namespace_name;
+  char *ns;
   char *queue;
   char *message_id;
   int attempts;
@@ -309,7 +310,7 @@ typedef struct lc_engine_enqueue_response {
 } lc_engine_enqueue_response;
 
 typedef struct lc_engine_dequeue_request {
-  const char *namespace_name;
+  const char *ns;
   const char *queue;
   const char *owner;
   const char *txn_id;
@@ -320,7 +321,7 @@ typedef struct lc_engine_dequeue_request {
 } lc_engine_dequeue_request;
 
 typedef struct lc_engine_dequeue_response {
-  char *namespace_name;
+  char *ns;
   char *queue;
   char *message_id;
   int attempts;
@@ -346,12 +347,12 @@ typedef struct lc_engine_dequeue_response {
 } lc_engine_dequeue_response;
 
 typedef struct lc_engine_queue_stats_request {
-  const char *namespace_name;
+  const char *ns;
   const char *queue;
 } lc_engine_queue_stats_request;
 
 typedef struct lc_engine_queue_stats_response {
-  char *namespace_name;
+  char *ns;
   char *queue;
   int waiting_consumers;
   int pending_candidates;
@@ -366,7 +367,7 @@ typedef struct lc_engine_queue_stats_response {
 } lc_engine_queue_stats_response;
 
 typedef struct lc_engine_queue_ack_request {
-  const char *namespace_name;
+  const char *ns;
   const char *queue;
   const char *message_id;
   const char *lease_id;
@@ -384,7 +385,7 @@ typedef struct lc_engine_queue_ack_response {
 } lc_engine_queue_ack_response;
 
 typedef struct lc_engine_queue_nack_request {
-  const char *namespace_name;
+  const char *ns;
   const char *queue;
   const char *message_id;
   const char *lease_id;
@@ -406,7 +407,7 @@ typedef struct lc_engine_queue_nack_response {
 } lc_engine_queue_nack_response;
 
 typedef struct lc_engine_queue_extend_request {
-  const char *namespace_name;
+  const char *ns;
   const char *queue;
   const char *message_id;
   const char *lease_id;
@@ -442,7 +443,7 @@ typedef struct lc_engine_attachment_info {
 } lc_engine_attachment_info;
 
 typedef struct lc_engine_attach_request {
-  const char *namespace_name;
+  const char *ns;
   const char *key;
   const char *lease_id;
   const char *txn_id;
@@ -462,7 +463,7 @@ typedef struct lc_engine_attach_response {
 } lc_engine_attach_response;
 
 typedef struct lc_engine_list_attachments_request {
-  const char *namespace_name;
+  const char *ns;
   const char *key;
   const char *lease_id;
   const char *txn_id;
@@ -471,7 +472,7 @@ typedef struct lc_engine_list_attachments_request {
 } lc_engine_list_attachments_request;
 
 typedef struct lc_engine_list_attachments_response {
-  char *namespace_name;
+  char *ns;
   char *key;
   lc_engine_attachment_info *attachments;
   size_t attachment_count;
@@ -479,7 +480,7 @@ typedef struct lc_engine_list_attachments_response {
 } lc_engine_list_attachments_response;
 
 typedef struct lc_engine_get_attachment_request {
-  const char *namespace_name;
+  const char *ns;
   const char *key;
   const char *lease_id;
   const char *txn_id;
@@ -494,7 +495,7 @@ typedef struct lc_engine_get_attachment_response {
 } lc_engine_get_attachment_response;
 
 typedef struct lc_engine_delete_attachment_request {
-  const char *namespace_name;
+  const char *ns;
   const char *key;
   const char *lease_id;
   const char *txn_id;
@@ -509,7 +510,7 @@ typedef struct lc_engine_delete_attachment_response {
 } lc_engine_delete_attachment_response;
 
 typedef struct lc_engine_delete_all_attachments_request {
-  const char *namespace_name;
+  const char *ns;
   const char *key;
   const char *lease_id;
   const char *txn_id;
@@ -523,12 +524,12 @@ typedef struct lc_engine_delete_all_attachments_response {
 } lc_engine_delete_all_attachments_response;
 
 typedef struct lc_engine_watch_queue_request {
-  const char *namespace_name;
+  const char *ns;
   const char *queue;
 } lc_engine_watch_queue_request;
 
 typedef struct lc_engine_queue_watch_event {
-  char *namespace_name;
+  char *ns;
   char *queue;
   int available;
   char *head_message_id;
@@ -563,14 +564,14 @@ typedef struct lc_engine_string_array {
 } lc_engine_string_array;
 
 typedef struct lc_engine_namespace_config_request {
-  const char *namespace_name;
+  const char *ns;
   const char *preferred_engine;
   const char *fallback_engine;
   const char *if_etag;
 } lc_engine_namespace_config_request;
 
 typedef struct lc_engine_namespace_config_response {
-  char *namespace_name;
+  char *ns;
   char *preferred_engine;
   char *fallback_engine;
   char *etag;
@@ -578,12 +579,12 @@ typedef struct lc_engine_namespace_config_response {
 } lc_engine_namespace_config_response;
 
 typedef struct lc_engine_index_flush_request {
-  const char *namespace_name;
+  const char *ns;
   const char *mode;
 } lc_engine_index_flush_request;
 
 typedef struct lc_engine_index_flush_response {
-  char *namespace_name;
+  char *ns;
   char *mode;
   char *flush_id;
   int accepted;
@@ -594,7 +595,7 @@ typedef struct lc_engine_index_flush_response {
 } lc_engine_index_flush_response;
 
 typedef struct lc_engine_txn_participant {
-  const char *namespace_name;
+  const char *ns;
   const char *key;
   const char *backend_hash;
 } lc_engine_txn_participant;
@@ -726,6 +727,10 @@ const char *lc_engine_version_string(void);
 void lc_engine_client_config_init(lc_engine_client_config *config);
 void lc_engine_error_init(lc_engine_error *error);
 void lc_engine_error_cleanup(lc_engine_error *error);
+/* Applies one absolute monotonic deadline to every endpoint attempt made by
+ * this private, one-shot client. A NULL value clears that constraint. */
+void lc_engine_client_set_request_deadline(lc_engine_client *client,
+                                           const struct timespec *deadline);
 void lc_engine_allocator_init(lc_engine_allocator *allocator);
 int lc_engine_client_open(const lc_engine_client_config *config,
                           lc_engine_client **out_client,
@@ -941,7 +946,7 @@ int lc_engine_client_subscribe_with_state(
     const lc_engine_queue_stream_handler *handler, void *handler_context,
     lc_engine_error *error);
 int lc_engine_client_get_namespace_config(
-    lc_engine_client *client, const char *namespace_name,
+    lc_engine_client *client, const char *ns,
     lc_engine_namespace_config_response *response, lc_engine_error *error);
 int lc_engine_client_update_namespace_config(
     lc_engine_client *client, const lc_engine_namespace_config_request *request,

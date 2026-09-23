@@ -116,7 +116,7 @@ ctest --preset debug
 ctest --preset e2e
 ```
 
-The normal Make and CMake workflows provision the pinned Bootlin compiler
+The normal Make and CMake outboxes provision the pinned Bootlin compiler
 collection and matching dependency roots automatically. Linux builds never
 fall back to host or distro compilers. Toolchains and verified dependency
 archives are shared outside the checkout under `CPKT_TOOLCHAIN_CACHE` and

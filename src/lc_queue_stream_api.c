@@ -15,7 +15,7 @@
 #define LC_ENGINE_SUBSCRIBE_META_BODY_LIMIT (4U * 1024U)
 
 typedef struct lc_engine_watch_event_json {
-  char *namespace_name;
+  char *ns;
   char *queue;
   bool available;
   char *head_message_id;
@@ -24,7 +24,7 @@ typedef struct lc_engine_watch_event_json {
 } lc_engine_watch_event_json;
 
 typedef struct lc_engine_subscribe_message_json {
-  char *namespace_name;
+  char *ns;
   char *queue;
   char *message_id;
   lonejson_int64 attempts;
@@ -53,8 +53,7 @@ typedef struct lc_engine_subscribe_meta_json {
 } lc_engine_subscribe_meta_json;
 
 static const lonejson_field lc_engine_watch_event_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_watch_event_json, namespace_name,
-                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_watch_event_json, ns, "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_watch_event_json, queue, "queue"),
     LONEJSON_FIELD_BOOL(lc_engine_watch_event_json, available, "available"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_watch_event_json, head_message_id,
@@ -68,8 +67,8 @@ LONEJSON_MAP_DEFINE(lc_engine_watch_event_map, lc_engine_watch_event_json,
                     lc_engine_watch_event_fields);
 
 static const lonejson_field lc_engine_subscribe_message_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json,
-                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json, ns,
+                                "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json, queue,
                                 "queue"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_subscribe_message_json, message_id,
@@ -141,13 +140,11 @@ static const char *const lc_engine_watch_sse_event_names[] = {"",
   LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT
 
 static const lonejson_field lc_engine_watch_queue_request_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_watch_queue_request, namespace_name,
-                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_watch_queue_request, ns, "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_watch_queue_request, queue, "queue")};
 
 static const lonejson_field lc_engine_subscribe_request_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_dequeue_request, namespace_name,
-                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_dequeue_request, ns, "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_dequeue_request, queue, "queue"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_dequeue_request, owner, "owner"),
     LONEJSON_FIELD_I64(lc_engine_dequeue_request, visibility_timeout_seconds,
@@ -462,7 +459,7 @@ void lc_engine_queue_watch_event_cleanup(lc_engine_queue_watch_event *event) {
   if (event == NULL) {
     return;
   }
-  lc_engine_free_string(&event->namespace_name);
+  lc_engine_free_string(&event->ns);
   lc_engine_free_string(&event->queue);
   lc_engine_free_string(&event->head_message_id);
   lc_engine_free_string(&event->correlation_id);
@@ -487,11 +484,11 @@ lc_engine_watch_sse_json_event(void *user, const lonejson_sse_event *sse_event,
   runtime = lc_engine_lonejson_runtime(state->client);
 
   memset(&event, 0, sizeof(event));
-  event.namespace_name = lc_engine_strdup_local(parsed->namespace_name);
+  event.ns = lc_engine_strdup_local(parsed->ns);
   event.queue = lc_engine_strdup_local(parsed->queue);
   event.available = parsed->available ? 1 : 0;
   event.head_message_id = lc_engine_strdup_local(parsed->head_message_id);
-  if ((parsed->namespace_name != NULL && event.namespace_name == NULL) ||
+  if ((parsed->ns != NULL && event.ns == NULL) ||
       (parsed->queue != NULL && event.queue == NULL) ||
       (parsed->head_message_id != NULL && event.head_message_id == NULL)) {
     lc_engine_queue_watch_event_cleanup(&event);
@@ -778,8 +775,8 @@ int lc_engine_parse_subscribe_meta_json(const char *json,
   }
 
   message = &parsed.message;
-  response->namespace_name = lc_engine_strdup_local(message->namespace_name);
-  if (message->namespace_name != NULL && response->namespace_name == NULL) {
+  response->ns = lc_engine_strdup_local(message->ns);
+  if (message->ns != NULL && response->ns == NULL) {
     rc = LC_ENGINE_ERROR_NO_MEMORY;
   }
   if (rc == LC_ENGINE_OK) {
@@ -1175,7 +1172,7 @@ int lc_engine_client_watch_queue(lc_engine_client *client,
   lc_engine_watch_queue_request body_src;
   lonejson_field body_fields[2];
   lonejson_map body_map;
-  const char *namespace_name;
+  const char *ns;
   struct curl_slist *headers;
   size_t endpoint_index;
   size_t body_field_count;
@@ -1187,13 +1184,12 @@ int lc_engine_client_watch_queue(lc_engine_client *client,
         "watch_queue requires client, request, handler, error, and queue");
   }
 
-  namespace_name =
-      lc_engine_effective_namespace(client, request->namespace_name);
+  ns = lc_engine_effective_namespace(client, request->ns);
   memset(&body_src, 0, sizeof(body_src));
-  body_src.namespace_name = namespace_name;
+  body_src.ns = ns;
   body_src.queue = request->queue;
   body_field_count = 0U;
-  if (namespace_name != NULL && namespace_name[0] != '\0') {
+  if (ns != NULL && ns[0] != '\0') {
     body_fields[body_field_count++] = lc_engine_watch_queue_request_fields[0];
   }
   body_fields[body_field_count++] = lc_engine_watch_queue_request_fields[1];
@@ -1357,7 +1353,7 @@ static int lc_engine_client_subscribe_internal(
   lc_engine_dequeue_request body_src;
   lonejson_field body_fields[7];
   lonejson_map body_map;
-  const char *namespace_name;
+  const char *ns;
   struct curl_slist *headers;
   long wait_seconds;
   int page_size;
@@ -1372,8 +1368,7 @@ static int lc_engine_client_subscribe_internal(
                                       "chunk handler, error, queue, and owner");
   }
 
-  namespace_name =
-      lc_engine_effective_namespace(client, request->namespace_name);
+  ns = lc_engine_effective_namespace(client, request->ns);
   wait_seconds = request->wait_seconds;
   if (wait_seconds < 0L) {
     wait_seconds = -1L;
@@ -1384,7 +1379,7 @@ static int lc_engine_client_subscribe_internal(
   }
 
   memset(&body_src, 0, sizeof(body_src));
-  body_src.namespace_name = namespace_name;
+  body_src.ns = ns;
   body_src.queue = request->queue;
   body_src.owner = request->owner;
   body_src.visibility_timeout_seconds = request->visibility_timeout_seconds;
@@ -1392,7 +1387,7 @@ static int lc_engine_client_subscribe_internal(
   body_src.page_size = page_size;
   body_src.start_after = request->start_after;
   body_field_count = 0U;
-  if (namespace_name != NULL && namespace_name[0] != '\0') {
+  if (ns != NULL && ns[0] != '\0') {
     body_fields[body_field_count++] = lc_engine_subscribe_request_fields[0];
   }
   body_fields[body_field_count++] = lc_engine_subscribe_request_fields[1];

@@ -49,6 +49,25 @@ add_test(NAME public_api_boundary
     -P "${CMAKE_SOURCE_DIR}/tests/public_api_boundary_test.cmake"
 )
 
+if(TARGET lc_shared)
+  set(lockdc_lua_module_arg)
+  if(TARGET lockdc_lua_core)
+    set(lockdc_lua_module_arg
+      -DLOCKDC_LUA_MODULE=$<TARGET_FILE:lockdc_lua_core>
+    )
+  endif()
+  add_test(NAME shared_public_symbol_boundary
+    COMMAND "${CMAKE_COMMAND}"
+      -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+      -DLOCKDC_SHARED_LIBRARY=$<TARGET_FILE:lc_shared>
+      -DLOCKDC_NM=${CMAKE_NM}
+      -DLOCKDC_SYSTEM_NAME=${CMAKE_SYSTEM_NAME}
+      ${lockdc_lua_module_arg}
+      -P "${CMAKE_SOURCE_DIR}/tests/shared_public_symbol_boundary_test.cmake"
+  )
+  set_tests_properties(shared_public_symbol_boundary PROPERTIES RUN_SERIAL TRUE)
+endif()
+
 add_test(NAME example_receiver_style
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
@@ -77,6 +96,17 @@ set_tests_properties(benchmark_go_timeout_contract_test PROPERTIES
   TIMEOUT 10
 )
 
+add_test(NAME run_timed_log_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/run_timed_log_test.cmake"
+)
+set_tests_properties(run_timed_log_test PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 10
+)
+
 add_test(NAME lua_binding_source_layout_test
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
@@ -84,10 +114,10 @@ add_test(NAME lua_binding_source_layout_test
     -P "${CMAKE_SOURCE_DIR}/tests/lua_binding_source_layout_test.cmake"
 )
 
-add_test(NAME lua_workflow_numeric_contract_test
+add_test(NAME lua_outbox_numeric_contract_test
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
-    -P "${CMAKE_SOURCE_DIR}/tests/lua_workflow_numeric_contract_test.cmake"
+    -P "${CMAKE_SOURCE_DIR}/tests/lua_outbox_numeric_contract_test.cmake"
 )
 
 add_test(NAME lua_external_sdk_contract_test
@@ -162,6 +192,18 @@ set_tests_properties(bootlin_toolchain_contract_test PROPERTIES
   TIMEOUT 10
 )
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_test(NAME bootlin_development_runtime_contract_test
+    COMMAND "${CMAKE_COMMAND}"
+      -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+      -P "${CMAKE_SOURCE_DIR}/tests/bootlin_development_runtime_contract_test.cmake"
+  )
+  set_tests_properties(bootlin_development_runtime_contract_test PROPERTIES
+    LABELS "unit;local"
+    TIMEOUT 10
+  )
+endif()
+
 add_test(NAME pouch_storage_allocator_contract_test
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
@@ -202,28 +244,20 @@ add_test(NAME lonejson_upload_rewind_transport_test
     -P "${CMAKE_SOURCE_DIR}/tests/lonejson_upload_rewind_transport_test.cmake"
 )
 
-set(LOCKDC_LUA_TEST_ENV_COMMON "")
-set(lockdc_lua_test_sanitizer_flags "${CMAKE_C_FLAGS}")
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  string(APPEND lockdc_lua_test_sanitizer_flags " ${CMAKE_C_FLAGS_DEBUG}")
-endif()
-if(lockdc_lua_test_sanitizer_flags MATCHES "(^|[ \t])-fsanitize=([^ \t,]+,)*address([, ][^ \t,]+)*($|[ \t])")
-  execute_process(
-    COMMAND "${CMAKE_C_COMPILER}" -print-file-name=libasan.so
-    OUTPUT_VARIABLE lockdc_lua_asan_runtime
-    RESULT_VARIABLE lockdc_lua_asan_runtime_result
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-  )
-  if(lockdc_lua_asan_runtime_result EQUAL 0
-     AND NOT lockdc_lua_asan_runtime STREQUAL ""
-     AND NOT lockdc_lua_asan_runtime STREQUAL "libasan.so")
-    list(APPEND LOCKDC_LUA_TEST_ENV_COMMON "LD_PRELOAD=${lockdc_lua_asan_runtime}")
-    list(APPEND LOCKDC_LUA_TEST_ENV_COMMON "ASAN_OPTIONS=detect_leaks=0")
-  endif()
+set(LOCKDC_LUA_TEST_ENV_COMMON "ASAN_OPTIONS=detect_leaks=0")
+set(LOCKDC_LUA_RUNNABLE OFF)
+if(TARGET lockdc_lua_runner
+   AND CMAKE_SYSTEM_NAME STREQUAL CMAKE_HOST_SYSTEM_NAME
+   AND CMAKE_SYSTEM_PROCESSOR STREQUAL CMAKE_HOST_SYSTEM_PROCESSOR)
+  set(LOCKDC_LUA_BIN "$<TARGET_FILE:lockdc_lua_runner>")
+  set(LOCKDC_LUA_RUNNABLE ON)
 endif()
 
-find_program(LOCKDC_LUA_BIN NAMES lua5.5)
-if(LOCKDC_LUA_BIN)
+if(LOCKDC_LUA_RUNNABLE)
+  add_test(NAME lua_runner_search_path_test
+    COMMAND "${CMAKE_COMMAND}" "-DLOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}"
+      -P "${CMAKE_SOURCE_DIR}/tests/lua_runner_search_path_test.cmake"
+  )
   add_test(NAME lua_facade_unit_test
     COMMAND "${LOCKDC_LUA_BIN}" "${CMAKE_SOURCE_DIR}/tests/lua/test_lockdc_facade_unit.lua"
   )
@@ -231,7 +265,7 @@ if(LOCKDC_LUA_BIN)
     ENVIRONMENT "LOCKDC_ROOT=${CMAKE_SOURCE_DIR}"
   )
 endif()
-if(TARGET lockdc_lua_core AND LOCKDC_LUA_BIN AND NOT CMAKE_CROSSCOMPILING AND NOT LOCKDC_TARGET_LIBC STREQUAL "musl")
+if(TARGET lockdc_lua_core AND LOCKDC_LUA_RUNNABLE)
   add_test(NAME lua_binding_core_smoke_test
     COMMAND "${LOCKDC_LUA_BIN}" "${CMAKE_SOURCE_DIR}/tests/lua/test_lockdc_core_smoke.lua"
   )
@@ -239,11 +273,6 @@ if(TARGET lockdc_lua_core AND LOCKDC_LUA_BIN AND NOT CMAKE_CROSSCOMPILING AND NO
     "LOCKDC_LUA_CORE_DIR=${CMAKE_BINARY_DIR}/lua"
     ${LOCKDC_LUA_TEST_ENV_COMMON}
   )
-  if(UNIX AND NOT APPLE)
-    list(APPEND lockdc_lua_core_smoke_env
-      "LD_LIBRARY_PATH=${LOCKDC_EXTERNAL_ROOT}/curl/install/lib:${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib:${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib:${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib:${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib:${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib:${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib:${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib"
-    )
-  endif()
   set_tests_properties(lua_binding_core_smoke_test PROPERTIES
     ENVIRONMENT "${lockdc_lua_core_smoke_env}"
   )
@@ -270,7 +299,7 @@ if(TARGET lockdc_pouch_replay_probe
         --keys 1 --updates 256 --shared --unclean --live-staged
         --segment-bytes 65536 ${replay_args})
     set_tests_properties(pouch_replay_${replay_transform} PROPERTIES
-      LABELS "integration;offline;pouch;e2e"
+      LABELS "integration;offline;pouch;replay"
       RUN_SERIAL TRUE TIMEOUT 60
       WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
   endforeach()

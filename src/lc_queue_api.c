@@ -11,7 +11,7 @@ typedef enum lc_engine_queue_parse_kind {
 } lc_engine_queue_parse_kind;
 
 typedef struct lc_engine_queue_stats_response_json {
-  char *namespace_name;
+  char *ns;
   char *queue;
   lonejson_int64 waiting_consumers;
   lonejson_int64 pending_candidates;
@@ -40,7 +40,7 @@ typedef struct lc_engine_queue_extend_response_json {
   lonejson_int64 state_lease_expires_at_unix;
 } lc_engine_queue_extend_response_json;
 typedef struct lc_engine_queue_nack_body_json {
-  char *namespace_name;
+  char *ns;
   char *queue;
   char *message_id;
   char *lease_id;
@@ -56,8 +56,8 @@ typedef struct lc_engine_queue_nack_body_json {
 } lc_engine_queue_nack_body_json;
 
 static const lonejson_field lc_engine_queue_stats_response_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_stats_response_json,
-                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_stats_response_json, ns,
+                                "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_stats_response_json, queue,
                                 "queue"),
     LONEJSON_FIELD_I64(lc_engine_queue_stats_response_json, waiting_consumers,
@@ -101,12 +101,10 @@ static const lonejson_field lc_engine_queue_extend_response_fields[] = {
                        state_lease_expires_at_unix,
                        "state_lease_expires_at_unix")};
 static const lonejson_field lc_engine_queue_stats_body_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_stats_request, namespace_name,
-                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_stats_request, ns, "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_stats_request, queue, "queue")};
 static const lonejson_field lc_engine_queue_ack_body_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_ack_request, namespace_name,
-                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_ack_request, ns, "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_ack_request, queue, "queue"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_ack_request, message_id,
                                 "message_id"),
@@ -124,7 +122,7 @@ static const lonejson_field lc_engine_queue_ack_body_fields[] = {
     LONEJSON_FIELD_I64(lc_engine_queue_ack_request, state_fencing_token,
                        "state_fencing_token")};
 static const lonejson_field lc_engine_queue_extend_body_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_extend_request, namespace_name,
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_extend_request, ns,
                                 "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_extend_request, queue, "queue"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_extend_request, message_id,
@@ -144,7 +142,7 @@ static const lonejson_field lc_engine_queue_extend_body_fields[] = {
     LONEJSON_FIELD_I64(lc_engine_queue_extend_request, state_fencing_token,
                        "state_fencing_token")};
 static const lonejson_field lc_engine_queue_nack_body_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, namespace_name,
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, ns,
                                 "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, queue, "queue"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_queue_nack_body_json, message_id,
@@ -304,13 +302,11 @@ static int lc_engine_queue_parse_response_json(
     stats_response->total_consumers = value;
     stats_response->has_active_watcher = parsed->has_active_watcher ? 1 : 0;
     stats_response->available = parsed->available ? 1 : 0;
-    stats_response->namespace_name =
-        lc_engine_strdup_local(parsed->namespace_name);
+    stats_response->ns = lc_engine_strdup_local(parsed->ns);
     stats_response->queue = lc_engine_strdup_local(parsed->queue);
     stats_response->head_message_id =
         lc_engine_strdup_local(parsed->head_message_id);
-    if ((parsed->namespace_name != NULL &&
-         stats_response->namespace_name == NULL) ||
+    if ((parsed->ns != NULL && stats_response->ns == NULL) ||
         (parsed->queue != NULL && stats_response->queue == NULL) ||
         (parsed->head_message_id != NULL &&
          stats_response->head_message_id == NULL)) {
@@ -336,7 +332,7 @@ void lc_engine_queue_stats_response_cleanup(
   if (response == NULL) {
     return;
   }
-  lc_engine_free_string(&response->namespace_name);
+  lc_engine_free_string(&response->ns);
   lc_engine_free_string(&response->queue);
   lc_engine_free_string(&response->head_message_id);
   lc_engine_free_string(&response->correlation_id);
@@ -398,10 +394,9 @@ int lc_engine_client_queue_stats(lc_engine_client *client,
   runtime = lc_engine_lonejson_runtime(client);
   lc_engine_queue_request_headers(&headers, &header_count);
   body_src = *request;
-  body_src.namespace_name =
-      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  body_src.ns = (char *)lc_engine_effective_namespace(client, request->ns);
   body_field_count = 0U;
-  if (body_src.namespace_name != NULL && body_src.namespace_name[0] != '\0') {
+  if (body_src.ns != NULL && body_src.ns[0] != '\0') {
     body_fields[body_field_count++] = lc_engine_queue_stats_body_fields[0];
   }
   body_fields[body_field_count++] = lc_engine_queue_stats_body_fields[1];
@@ -467,10 +462,9 @@ int lc_engine_client_queue_ack(lc_engine_client *client,
   runtime = lc_engine_lonejson_runtime(client);
   lc_engine_queue_request_headers(&headers, &header_count);
   body_src = *request;
-  body_src.namespace_name =
-      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  body_src.ns = (char *)lc_engine_effective_namespace(client, request->ns);
   body_field_count = 0U;
-  if (body_src.namespace_name != NULL && body_src.namespace_name[0] != '\0') {
+  if (body_src.ns != NULL && body_src.ns[0] != '\0') {
     body_fields[body_field_count++] = lc_engine_queue_ack_body_fields[0];
   }
   body_fields[body_field_count++] = lc_engine_queue_ack_body_fields[1];
@@ -556,8 +550,7 @@ int lc_engine_client_queue_nack(lc_engine_client *client,
   runtime = lc_engine_lonejson_runtime(client);
   lc_engine_queue_request_headers(&headers, &header_count);
   memset(&body_src, 0, sizeof(body_src));
-  body_src.namespace_name =
-      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  body_src.ns = (char *)lc_engine_effective_namespace(client, request->ns);
   body_src.queue = (char *)request->queue;
   body_src.message_id = (char *)request->message_id;
   body_src.lease_id = (char *)request->lease_id;
@@ -570,7 +563,7 @@ int lc_engine_client_queue_nack(lc_engine_client *client,
   body_src.state_lease_id = (char *)request->state_lease_id;
   body_src.state_fencing_token = request->state_fencing_token;
   body_field_count = 0U;
-  if (body_src.namespace_name != NULL && body_src.namespace_name[0] != '\0') {
+  if (body_src.ns != NULL && body_src.ns[0] != '\0') {
     body_fields[body_field_count++] = lc_engine_queue_nack_body_fields[0];
   }
   body_fields[body_field_count++] = lc_engine_queue_nack_body_fields[1];
@@ -683,10 +676,9 @@ int lc_engine_client_queue_extend(lc_engine_client *client,
   runtime = lc_engine_lonejson_runtime(client);
   lc_engine_queue_request_headers(&headers, &header_count);
   body_src = *request;
-  body_src.namespace_name =
-      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  body_src.ns = (char *)lc_engine_effective_namespace(client, request->ns);
   body_field_count = 0U;
-  if (body_src.namespace_name != NULL && body_src.namespace_name[0] != '\0') {
+  if (body_src.ns != NULL && body_src.ns[0] != '\0') {
     body_fields[body_field_count++] = lc_engine_queue_extend_body_fields[0];
   }
   body_fields[body_field_count++] = lc_engine_queue_extend_body_fields[1];

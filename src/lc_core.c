@@ -915,7 +915,7 @@ int lc_engine_write_bridge(void *context, const void *bytes, size_t count,
   return rc;
 }
 
-lc_lease *lc_lease_new(lc_client_handle *client, const char *namespace_name,
+lc_lease *lc_lease_new(lc_client_handle *client, const char *ns,
                        const char *key, const char *owner, const char *lease_id,
                        const char *txn_id, long fencing_token,
                        lc_version version, const char *state_etag,
@@ -926,6 +926,10 @@ lc_lease *lc_lease_new(lc_client_handle *client, const char *namespace_name,
   if (lease == NULL) {
     return NULL;
   }
+  /* A lease is independently closable and allocates through its parent
+   * client. Keep that concrete owner alive after public client close until the
+   * lease has released all of its fields. */
+  lc_client_handle_retain(client);
   lease->pub.describe = lc_lease_describe_method;
   lease->pub.get = lc_lease_get_method;
   lease->pub.load = lc_lease_load_method;
@@ -944,7 +948,7 @@ lc_lease *lc_lease_new(lc_client_handle *client, const char *namespace_name,
   lease->pub.delete_all_attachments = lc_lease_delete_all_attachments_method;
   lease->pub.close = lc_lease_close_method;
   lease->client = client;
-  lease->namespace_name = lc_client_strdup(client, namespace_name);
+  lease->ns = lc_client_strdup(client, ns);
   lease->key = lc_client_strdup(client, key);
   lease->owner = lc_client_strdup(client, owner);
   lease->lease_id = lc_client_strdup(client, lease_id);
@@ -956,7 +960,7 @@ lc_lease *lc_lease_new(lc_client_handle *client, const char *namespace_name,
   lease->queue_state_etag = lc_client_strdup(client, queue_state_etag);
   lease->has_query_hidden = 0;
   lease->query_hidden = 0;
-  lease->pub.namespace_name = lease->namespace_name;
+  lease->pub.ns = lease->ns;
   lease->pub.key = lease->key;
   lease->pub.owner = lease->owner;
   lease->pub.lease_id = lease->lease_id;
@@ -968,6 +972,85 @@ lc_lease *lc_lease_new(lc_client_handle *client, const char *namespace_name,
   lease->pub.has_query_hidden = lease->has_query_hidden;
   lease->pub.query_hidden = lease->query_hidden;
   return &lease->pub;
+}
+
+lc_lease *lc_lease_clone(const lc_lease *source) {
+  const lc_lease_handle *source_handle;
+  lc_lease_handle *copy_handle;
+  lc_lease *copy;
+
+  if (source == NULL) {
+    return NULL;
+  }
+  source_handle = (const lc_lease_handle *)source;
+  /* A staged lease carries callback-local mutation state.  Giving that state
+   * an independently closable handle would sever the commit boundary, so Lua
+   * exposes it only as a scoped borrowed view. */
+  if (source_handle->pouch_stage_active) {
+    return NULL;
+  }
+  copy = lc_lease_new(source_handle->client, source->ns, source->key,
+                      source->owner, source->lease_id, source->txn_id,
+                      source->fencing_token, source->version,
+                      source->state_etag, source_handle->queue_state_etag);
+  if (copy == NULL) {
+    return NULL;
+  }
+  copy_handle = (lc_lease_handle *)copy;
+  if ((source->ns != NULL && copy_handle->ns == NULL) ||
+      (source->key != NULL && copy_handle->key == NULL) ||
+      (source->owner != NULL && copy_handle->owner == NULL) ||
+      (source->lease_id != NULL && copy_handle->lease_id == NULL) ||
+      (source->txn_id != NULL && copy_handle->txn_id == NULL) ||
+      (source->state_etag != NULL && copy_handle->state_etag == NULL) ||
+      (source_handle->queue_state_etag != NULL &&
+       copy_handle->queue_state_etag == NULL)) {
+    lc_lease_close_method(copy);
+    return NULL;
+  }
+  copy_handle->lease_expires_at_unix = source_handle->lease_expires_at_unix;
+  copy_handle->has_query_hidden = source_handle->has_query_hidden;
+  copy_handle->query_hidden = source_handle->query_hidden;
+  copy_handle->pouch_commit_immediately =
+      source_handle->pouch_commit_immediately;
+  copy_handle->pouch_state_removed = source_handle->pouch_state_removed;
+  if (source_handle->pouch_state_key != NULL) {
+    copy_handle->pouch_state_key =
+        lc_client_strdup(copy_handle->client, source_handle->pouch_state_key);
+  }
+  if (source_handle->pouch_stage_etag != NULL) {
+    copy_handle->pouch_stage_etag =
+        lc_client_strdup(copy_handle->client, source_handle->pouch_stage_etag);
+  }
+  if ((source_handle->pouch_state_key != NULL &&
+       copy_handle->pouch_state_key == NULL) ||
+      (source_handle->pouch_stage_etag != NULL &&
+       copy_handle->pouch_stage_etag == NULL)) {
+    lc_lease_close_method(copy);
+    return NULL;
+  }
+
+  copy->describe = source->describe;
+  copy->get = source->get;
+  copy->load = source->load;
+  copy->save = source->save;
+  copy->update = source->update;
+  copy->mutate = source->mutate;
+  copy->mutate_local = source->mutate_local;
+  copy->metadata = source->metadata;
+  copy->remove = source->remove;
+  copy->keepalive = source->keepalive;
+  copy->release = source->release;
+  copy->attach = source->attach;
+  copy->list_attachments = source->list_attachments;
+  copy->get_attachment = source->get_attachment;
+  copy->delete_attachment = source->delete_attachment;
+  copy->delete_all_attachments = source->delete_all_attachments;
+  copy->close = source->close;
+  copy->lease_expires_at_unix = copy_handle->lease_expires_at_unix;
+  copy->has_query_hidden = copy_handle->has_query_hidden;
+  copy->query_hidden = copy_handle->query_hidden;
+  return copy;
 }
 
 static char *lc_queue_state_key_new(lc_client_handle *client, const char *queue,
@@ -1003,6 +1086,9 @@ lc_message *lc_message_new(lc_client_handle *client,
   if (message == NULL) {
     return NULL;
   }
+  /* Like leases, delivered messages own client-allocated fields and may
+   * outlive a caller's public client receiver. */
+  lc_client_handle_retain(client);
   message->pub.ack = lc_message_ack_method;
   message->pub.nack = lc_message_nack_method;
   message->pub.extend = lc_message_extend_method;
@@ -1017,7 +1103,7 @@ lc_message *lc_message_new(lc_client_handle *client,
   message->pub.write_payload = lc_message_write_payload_method;
   message->pub.close = lc_message_close_method;
   message->client = client;
-  message->namespace_name = lc_client_strdup(client, engine->namespace_name);
+  message->ns = lc_client_strdup(client, engine->ns);
   message->queue = lc_client_strdup(client, engine->queue);
   message->message_id = lc_client_strdup(client, engine->message_id);
   message->attempts = engine->attempts;
@@ -1046,12 +1132,12 @@ lc_message *lc_message_new(lc_client_handle *client,
     state_key =
         lc_queue_state_key_new(client, engine->queue, engine->message_id);
     message->state_lease =
-        lc_lease_new(client, engine->namespace_name, state_key, NULL,
+        lc_lease_new(client, engine->ns, state_key, NULL,
                      engine->state_lease_id, engine->state_txn_id,
                      engine->state_fencing_token, 0L, NULL, engine->state_etag);
     lc_client_free(client, state_key);
   }
-  message->pub.namespace_name = message->namespace_name;
+  message->pub.ns = message->ns;
   message->pub.queue = message->queue;
   message->pub.message_id = message->message_id;
   message->pub.attempts = message->attempts;
@@ -1100,6 +1186,8 @@ typedef struct lc_pouch_endpoint_options {
   char *root_path;
   char *query_engine;
   char *query_fallback_engine;
+  int query_indexing_enabled;
+  int query_indexing_enabled_set;
   char *crypto_key;
   char *crypto_key_file;
   char *compression;
@@ -1115,8 +1203,7 @@ typedef struct lc_pouch_endpoint_options {
   int background_compaction_enabled;
   int background_compaction_enabled_set;
   int compaction_throttling_disabled;
-  uint64_t retention_seconds;
-  uint64_t janitor_interval_seconds;
+  uint64_t terminal_reclaim_min_bytes;
 } lc_pouch_endpoint_options;
 
 static void
@@ -1419,6 +1506,16 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     lc_free_with_allocator(allocator, decoded_key);
     return rc;
   }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "query_indexing")) {
+    rc = lc_pouch_endpoint_parse_boolean(
+        allocator, value, value_len, "query_indexing",
+        &options->query_indexing_enabled, error);
+    if (rc == LC_OK) {
+      options->query_indexing_enabled_set = 1;
+    }
+    lc_free_with_allocator(allocator, decoded_key);
+    return rc;
+  }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
                           "segment_target_bytes")) {
     rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
@@ -1463,18 +1560,10 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "retention_seconds")) {
-    rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
-                                     "retention_seconds",
-                                     &options->retention_seconds, error);
-    lc_free_with_allocator(allocator, decoded_key);
-    return rc;
-  }
-  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "janitor_interval_seconds")) {
-    rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
-                                     "janitor_interval_seconds",
-                                     &options->janitor_interval_seconds, error);
+                          "terminal_reclaim_min_bytes")) {
+    rc = lc_pouch_endpoint_parse_u64(
+        allocator, value, value_len, "terminal_reclaim_min_bytes",
+        &options->terminal_reclaim_min_bytes, error);
     lc_free_with_allocator(allocator, decoded_key);
     return rc;
   }
@@ -1913,6 +2002,12 @@ void lc_client_config_init(lc_client_config *config) {
   config->http_json_response_limit_bytes = 0U;
 }
 
+void lc_pouch_settings_init(lc_pouch_settings *settings) {
+  if (settings != NULL) {
+    memset(settings, 0, sizeof(*settings));
+  }
+}
+
 #define LC_INIT_STRUCT_FUNC(type_name, func_name)                              \
   void func_name(type_name *value) {                                           \
     if (value != NULL) {                                                       \
@@ -1960,7 +2055,9 @@ LC_INIT_STRUCT_FUNC(lc_watch_queue_req, lc_watch_queue_req_init)
 LC_INIT_STRUCT_FUNC(lc_watch_handler, lc_watch_handler_init)
 LC_INIT_STRUCT_FUNC(lc_consumer, lc_consumer_init)
 LC_INIT_STRUCT_FUNC(lc_consumer_service_config, lc_consumer_service_config_init)
-LC_INIT_STRUCT_FUNC(lc_workflow_config, lc_workflow_config_init)
+LC_INIT_STRUCT_FUNC(lc_history_consumer_config, lc_history_consumer_config_init)
+LC_INIT_STRUCT_FUNC(lc_outbox_config, lc_outbox_config_init)
+LC_INIT_STRUCT_FUNC(lc_outbox_commit_result, lc_outbox_commit_result_init)
 void lc_dead_letter_export_opts_init(lc_dead_letter_export_opts *options) {
   if (options == NULL)
     return;
@@ -1968,7 +2065,7 @@ void lc_dead_letter_export_opts_init(lc_dead_letter_export_opts *options) {
   options->format = LC_DEAD_LETTER_EXPORT_JSON;
 }
 LC_INIT_STRUCT_FUNC(lc_dead_letter_export_res, lc_dead_letter_export_res_init)
-LC_INIT_STRUCT_FUNC(lc_workflow_stats, lc_workflow_stats_init)
+LC_INIT_STRUCT_FUNC(lc_outbox_stats, lc_outbox_stats_init)
 LC_INIT_STRUCT_FUNC(lc_outbox_entry, lc_outbox_entry_init)
 LC_INIT_STRUCT_FUNC(lc_inbox_message, lc_inbox_message_init)
 LC_INIT_STRUCT_FUNC(lc_command_identity, lc_command_identity_init)
@@ -1977,8 +2074,8 @@ LC_INIT_STRUCT_FUNC(lc_command_result, lc_command_result_init)
 LC_INIT_STRUCT_FUNC(lc_command_receipt, lc_command_receipt_init)
 LC_INIT_STRUCT_FUNC(lc_outbox_completion, lc_outbox_completion_init)
 LC_INIT_STRUCT_FUNC(lc_outbox_retry, lc_outbox_retry_init)
-LC_INIT_STRUCT_FUNC(lc_workflow_participant_request,
-                    lc_workflow_participant_request_init)
+LC_INIT_STRUCT_FUNC(lc_outbox_participant_request,
+                    lc_outbox_participant_request_init)
 LC_INIT_STRUCT_FUNC(lc_outbox_receipt, lc_outbox_receipt_init)
 LC_INIT_STRUCT_FUNC(lc_attachment_selector, lc_attachment_selector_init)
 LC_INIT_STRUCT_FUNC(lc_attach_req, lc_attach_req_init)
@@ -2001,6 +2098,17 @@ void lc_outbox_receipt_cleanup(lc_outbox_receipt *receipt) {
   memset(receipt, 0, sizeof(*receipt));
 }
 
+void lc_outbox_commit_result_cleanup(lc_outbox_commit_result *result) {
+  size_t i;
+
+  if (result == NULL)
+    return;
+  for (i = 0U; i < result->outbox_receipt_count; ++i)
+    lc_outbox_receipt_cleanup(&result->outbox_receipts[i]);
+  free(result->outbox_receipts);
+  memset(result, 0, sizeof(*result));
+}
+
 void lc_command_receipt_cleanup(lc_command_receipt *receipt) {
   if (receipt == NULL) {
     return;
@@ -2017,7 +2125,7 @@ void lc_command_receipt_cleanup(lc_command_receipt *receipt) {
   memset(receipt, 0, sizeof(*receipt));
 }
 
-void lc_workflow_stats_cleanup(lc_workflow_stats *stats) {
+void lc_outbox_stats_cleanup(lc_outbox_stats *stats) {
   if (stats == NULL) {
     return;
   }
@@ -2080,6 +2188,154 @@ void lc_consumer_config_init(lc_consumer_config *config) {
   lc_consumer_restart_policy_init(&config->restart_policy);
 }
 
+#define LC_POUCH_SETTINGS_KNOWN_MASK                                           \
+  (LC_POUCH_SETTING_SINGLE_WRITER | LC_POUCH_SETTING_DURABLE_SYNC |            \
+   LC_POUCH_SETTING_FSYNC_BATCH_MAX_OPS |                                      \
+   LC_POUCH_SETTING_SEGMENT_TARGET_BYTES |                                     \
+   LC_POUCH_SETTING_INDEXER_FLUSH_DOCS |                                       \
+   LC_POUCH_SETTING_INDEXER_FLUSH_INTERVAL_SECONDS |                           \
+   LC_POUCH_SETTING_BACKGROUND_COMPACTION |                                    \
+   LC_POUCH_SETTING_DISABLE_COMPACTION_THROTTLING |                            \
+   LC_POUCH_SETTING_TERMINAL_RECLAIM_MIN_BYTES |                               \
+   LC_POUCH_SETTING_QUEUE_WATCH | LC_POUCH_SETTING_QUERY_ENGINE |              \
+   LC_POUCH_SETTING_QUERY_FALLBACK_ENGINE | LC_POUCH_SETTING_QUERY_INDEXING |  \
+   LC_POUCH_SETTING_CRYPTO_KEY | LC_POUCH_SETTING_CRYPTO_KEY_FILE |            \
+   LC_POUCH_SETTING_CRYPTO_GENERATE_KEY_FILE | LC_POUCH_SETTING_COMPRESSION)
+
+static int lc_pouch_settings_boolean_valid(int value) {
+  return value == 0 || value == 1;
+}
+
+static int lc_pouch_settings_engine_valid(const char *value) {
+  return value != NULL && value[0] != '\0' &&
+         (strcmp(value, "index") == 0 || strcmp(value, "scan") == 0);
+}
+
+static int lc_pouch_settings_string_valid(const char *value) {
+  return value != NULL && value[0] != '\0';
+}
+
+static int lc_pouch_settings_validate(const lc_pouch_settings *settings,
+                                      int is_pouch, lc_error *error) {
+  uint64_t mask;
+
+  if (settings == NULL || settings->set_mask == 0U) {
+    return LC_OK;
+  }
+  mask = settings->set_mask;
+  if ((mask & ~LC_POUCH_SETTINGS_KNOWN_MASK) != 0U) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch settings contain an unknown set_mask bit", NULL,
+                        NULL, "pouch");
+  }
+  if (!is_pouch) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch settings require exactly one pouch endpoint",
+                        NULL, NULL, "pouch");
+  }
+  if (((mask & LC_POUCH_SETTING_SINGLE_WRITER) != 0U &&
+       !lc_pouch_settings_boolean_valid(settings->single_writer)) ||
+      ((mask & LC_POUCH_SETTING_DURABLE_SYNC) != 0U &&
+       !lc_pouch_settings_boolean_valid(settings->durable_sync)) ||
+      ((mask & LC_POUCH_SETTING_BACKGROUND_COMPACTION) != 0U &&
+       !lc_pouch_settings_boolean_valid(
+           settings->background_compaction_enabled)) ||
+      ((mask & LC_POUCH_SETTING_DISABLE_COMPACTION_THROTTLING) != 0U &&
+       !lc_pouch_settings_boolean_valid(
+           settings->compaction_throttling_disabled)) ||
+      ((mask & LC_POUCH_SETTING_QUEUE_WATCH) != 0U &&
+       !lc_pouch_settings_boolean_valid(settings->queue_watch)) ||
+      ((mask & LC_POUCH_SETTING_QUERY_INDEXING) != 0U &&
+       !lc_pouch_settings_boolean_valid(settings->query_indexing_enabled)) ||
+      ((mask & LC_POUCH_SETTING_CRYPTO_GENERATE_KEY_FILE) != 0U &&
+       !lc_pouch_settings_boolean_valid(settings->crypto_generate_key_file))) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch settings boolean fields must be zero or one",
+                        NULL, NULL, "pouch");
+  }
+  if (((mask & LC_POUCH_SETTING_QUERY_ENGINE) != 0U &&
+       !lc_pouch_settings_engine_valid(settings->query_engine)) ||
+      ((mask & LC_POUCH_SETTING_QUERY_FALLBACK_ENGINE) != 0U &&
+       !lc_pouch_settings_engine_valid(settings->query_fallback_engine))) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch settings query engines must be index or scan",
+                        NULL, NULL, "pouch");
+  }
+  if ((mask & LC_POUCH_SETTING_COMPRESSION) != 0U &&
+      (!lc_pouch_settings_string_valid(settings->compression) ||
+       (strcmp(settings->compression, "none") != 0 &&
+        strcmp(settings->compression, "zlib") != 0))) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch settings compression must be none or zlib", NULL,
+                        NULL, "pouch");
+  }
+  if (((mask & LC_POUCH_SETTING_CRYPTO_KEY) != 0U &&
+       !lc_pouch_settings_string_valid(settings->crypto_key)) ||
+      ((mask & LC_POUCH_SETTING_CRYPTO_KEY_FILE) != 0U &&
+       !lc_pouch_settings_string_valid(settings->crypto_key_file))) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "selected pouch settings strings must be non-empty",
+                        NULL, NULL, "pouch");
+  }
+  return LC_OK;
+}
+
+static void
+lc_pouch_open_options_apply_settings(lc_pouch_open_options *options,
+                                     const lc_pouch_settings *settings) {
+  uint64_t mask;
+
+  if (options == NULL || settings == NULL || settings->set_mask == 0U) {
+    return;
+  }
+  mask = settings->set_mask;
+  if ((mask & LC_POUCH_SETTING_SINGLE_WRITER) != 0U) {
+    options->single_writer_set = 1;
+    options->single_writer = settings->single_writer;
+  }
+  if ((mask & LC_POUCH_SETTING_DURABLE_SYNC) != 0U)
+    options->durable_sync = settings->durable_sync;
+  if ((mask & LC_POUCH_SETTING_FSYNC_BATCH_MAX_OPS) != 0U)
+    options->fsync_batch_max_ops = settings->fsync_batch_max_ops;
+  if ((mask & LC_POUCH_SETTING_SEGMENT_TARGET_BYTES) != 0U)
+    options->segment_target_bytes = settings->segment_target_bytes;
+  if ((mask & LC_POUCH_SETTING_INDEXER_FLUSH_DOCS) != 0U)
+    options->indexer_flush_docs = settings->indexer_flush_docs;
+  if ((mask & LC_POUCH_SETTING_INDEXER_FLUSH_INTERVAL_SECONDS) != 0U)
+    options->indexer_flush_interval_seconds =
+        settings->indexer_flush_interval_seconds;
+  if ((mask & LC_POUCH_SETTING_BACKGROUND_COMPACTION) != 0U) {
+    options->background_compaction_enabled_set = 1;
+    options->background_compaction_enabled =
+        settings->background_compaction_enabled;
+  }
+  if ((mask & LC_POUCH_SETTING_DISABLE_COMPACTION_THROTTLING) != 0U)
+    options->compaction_throttling_disabled =
+        settings->compaction_throttling_disabled;
+  if ((mask & LC_POUCH_SETTING_TERMINAL_RECLAIM_MIN_BYTES) != 0U)
+    options->terminal_reclaim_min_bytes = settings->terminal_reclaim_min_bytes;
+  if ((mask & LC_POUCH_SETTING_QUEUE_WATCH) != 0U)
+    options->queue_watch = settings->queue_watch;
+  if ((mask & LC_POUCH_SETTING_QUERY_ENGINE) != 0U)
+    options->query_engine = settings->query_engine;
+  if ((mask & LC_POUCH_SETTING_QUERY_FALLBACK_ENGINE) != 0U)
+    options->query_fallback_engine = settings->query_fallback_engine;
+  if ((mask & LC_POUCH_SETTING_QUERY_INDEXING) != 0U) {
+    options->query_indexing_enabled_set = 1;
+    options->query_indexing_enabled = settings->query_indexing_enabled;
+  }
+  if ((mask & LC_POUCH_SETTING_CRYPTO_KEY) != 0U)
+    options->crypto_key = settings->crypto_key;
+  if ((mask & LC_POUCH_SETTING_CRYPTO_KEY_FILE) != 0U)
+    options->crypto_key_file = settings->crypto_key_file;
+  if ((mask & LC_POUCH_SETTING_CRYPTO_GENERATE_KEY_FILE) != 0U)
+    options->crypto_generate_key_file = settings->crypto_generate_key_file;
+  if ((mask & LC_POUCH_SETTING_COMPRESSION) != 0U)
+    options->compression = settings->compression;
+}
+
+#undef LC_POUCH_SETTINGS_KNOWN_MASK
+
 int lc_client_open(const lc_client_config *config, lc_client **out,
                    lc_error *error) {
   lc_engine_client_config engine_config;
@@ -2120,6 +2376,10 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
                         NULL);
   }
   is_pouch = pouch_endpoint_count == 1U;
+  rc = lc_pouch_settings_validate(config->pouch_settings, is_pouch, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   if (!config->disable_mtls && config->client_bundle_source != NULL) {
     bundle_capture.inner = config->client_bundle_source;
     bundle_capture.allocator = &config->allocator;
@@ -2235,13 +2495,15 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
         pouch_endpoint_options.background_compaction_enabled_set;
     pouch_open_options.compaction_throttling_disabled =
         pouch_endpoint_options.compaction_throttling_disabled;
-    pouch_open_options.retention_seconds =
-        pouch_endpoint_options.retention_seconds;
-    pouch_open_options.janitor_interval_seconds =
-        pouch_endpoint_options.janitor_interval_seconds;
+    pouch_open_options.terminal_reclaim_min_bytes =
+        pouch_endpoint_options.terminal_reclaim_min_bytes;
     pouch_open_options.query_engine = pouch_endpoint_options.query_engine;
     pouch_open_options.query_fallback_engine =
         pouch_endpoint_options.query_fallback_engine;
+    pouch_open_options.query_indexing_enabled =
+        pouch_endpoint_options.query_indexing_enabled;
+    pouch_open_options.query_indexing_enabled_set =
+        pouch_endpoint_options.query_indexing_enabled_set;
     pouch_open_options.crypto_key = config->pouch_crypto_key != NULL
                                         ? config->pouch_crypto_key
                                         : pouch_endpoint_options.crypto_key;
@@ -2257,6 +2519,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     pouch_open_options.compression = config->pouch_compression != NULL
                                          ? config->pouch_compression
                                          : pouch_endpoint_options.compression;
+    lc_pouch_open_options_apply_settings(&pouch_open_options,
+                                         config->pouch_settings);
     pouch_open_options.logger = client->base_logger;
     rc = lc_pouch_open(pouch_endpoint_options.root_path, &config->allocator,
                        &pouch_open_options, &client->pouch, error);
@@ -2376,6 +2640,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->pub.acquire_for_update = lc_client_acquire_for_update_method;
   client->pub.describe = lc_client_describe_method;
   client->pub.get = lc_client_get_method;
+  client->pub.get_in_namespace = lc_client_get_in_namespace_method;
   client->pub.load = lc_client_load_method;
   client->pub.load_in_namespace = lc_client_load_in_namespace_method;
   client->pub.update = lc_client_update_method;
@@ -2420,7 +2685,10 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->pub.subscribe = lc_client_subscribe_method;
   client->pub.subscribe_with_state = lc_client_subscribe_with_state_method;
   client->pub.new_consumer_service = lc_client_new_consumer_service_method;
-  client->pub.new_workflow = lc_client_new_workflow_method;
+  client->pub.new_outbox = lc_client_new_outbox_method;
+  client->pub.new_outbox_with_dispatcher =
+      lc_client_new_outbox_with_dispatcher_method;
+  client->pub.new_history_consumer = lc_client_new_history_consumer_method;
   client->pub.watch_queue = lc_client_watch_queue_method;
   client->pub.close = lc_client_close_method;
   if (client->is_pouch) {
@@ -2428,6 +2696,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     client->pub.acquire_for_update = lc_pouch_client_acquire_for_update_method;
     client->pub.describe = lc_pouch_client_describe_method;
     client->pub.get = lc_pouch_client_get_method;
+    client->pub.get_in_namespace = lc_pouch_client_get_in_namespace;
     client->pub.load = lc_pouch_client_load_method;
     client->pub.load_in_namespace = lc_pouch_client_load_in_namespace;
     client->pub.update = lc_pouch_client_update_method;
@@ -2476,6 +2745,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     client->pub.tc_rm_register = lc_pouch_client_tc_rm_register_method;
     client->pub.tc_rm_unregister = lc_pouch_client_tc_rm_unregister_method;
     client->pub.tc_rm_list = lc_pouch_client_tc_rm_list_method;
+    client->pub.new_history_consumer =
+        lc_pouch_client_new_history_consumer_method;
     rc = lc_pouch_client_recover_transactions(&client->pub, error);
     if (rc != LC_OK) {
       lc_client_close_method(&client->pub);
@@ -2780,7 +3051,7 @@ void lc_describe_res_cleanup(lc_describe_res *response) {
   if (response == NULL) {
     return;
   }
-  free(response->namespace_name);
+  free(response->ns);
   free(response->key);
   free(response->owner);
   free(response->lease_id);
@@ -2823,7 +3094,7 @@ void lc_metadata_res_cleanup(lc_metadata_res *response) {
   if (response == NULL) {
     return;
   }
-  free(response->namespace_name);
+  free(response->ns);
   free(response->key);
   free(response->correlation_id);
   memset(response, 0, sizeof(*response));
@@ -2882,7 +3153,7 @@ void lc_namespace_config_res_cleanup(lc_namespace_config_res *response) {
   if (response == NULL) {
     return;
   }
-  free(response->namespace_name);
+  free(response->ns);
   free(response->preferred_engine);
   free(response->fallback_engine);
   free(response->etag);
@@ -2894,7 +3165,7 @@ void lc_index_flush_res_cleanup(lc_index_flush_res *response) {
   if (response == NULL) {
     return;
   }
-  free(response->namespace_name);
+  free(response->ns);
   free(response->mode);
   free(response->flush_id);
   free(response->correlation_id);
@@ -2997,7 +3268,7 @@ void lc_enqueue_res_cleanup(lc_enqueue_res *response) {
   if (response == NULL) {
     return;
   }
-  free(response->namespace_name);
+  free(response->ns);
   free(response->queue);
   free(response->message_id);
   free(response->correlation_id);
@@ -3008,7 +3279,7 @@ void lc_queue_stats_res_cleanup(lc_queue_stats_res *response) {
   if (response == NULL) {
     return;
   }
-  free(response->namespace_name);
+  free(response->ns);
   free(response->queue);
   free(response->head_message_id);
   free(response->correlation_id);
@@ -3057,7 +3328,7 @@ void lc_watch_event_cleanup(lc_watch_event *event) {
   if (event == NULL) {
     return;
   }
-  free(event->namespace_name);
+  free(event->ns);
   free(event->queue);
   free(event->head_message_id);
   free(event->correlation_id);

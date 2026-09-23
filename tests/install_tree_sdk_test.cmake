@@ -6,6 +6,9 @@ if(NOT DEFINED LOCKDC_ROOT)
     message(FATAL_ERROR "LOCKDC_ROOT is required")
 endif()
 
+include("${LOCKDC_ROOT}/tests/bootlin_runtime_test_support.cmake")
+lockdc_import_cmake_cache_value("${LOCKDC_BINARY_DIR}" CMAKE_SYSROOT)
+
 if(EXISTS "${LOCKDC_BINARY_DIR}/package-metadata.cmake")
     include("${LOCKDC_BINARY_DIR}/package-metadata.cmake")
 endif()
@@ -51,6 +54,14 @@ foreach(required_path
         message(FATAL_ERROR "installed SDK is missing required artifact: ${required_path}")
     endif()
 endforeach()
+
+lockdc_resolve_bootlin_runtime("${CMAKE_SYSROOT}" "${LOCKDC_EXTERNAL_ROOT}"
+    "${install_prefix}/lib" lockdc_bootlin_runtime_loader
+    lockdc_bootlin_runtime_dirs)
+string(REPLACE ";" "\\;" lockdc_bootlin_runtime_dirs_arg
+    "${lockdc_bootlin_runtime_dirs}")
+lockdc_bootlin_runtime_link_flags("${lockdc_bootlin_runtime_loader}"
+    "${lockdc_bootlin_runtime_dirs}" lockdc_bootlin_direct_link_flags)
 
 foreach(forbidden_path
     "${install_prefix}/include/lonejson.h"
@@ -197,6 +208,16 @@ file(WRITE "${consumer_src_dir}/CMakeLists.txt" [=[
 cmake_minimum_required(VERSION 3.21)
 project(lockdc_install_tree_consumer C)
 
+if(NOT "${LOCKDC_BOOTLIN_RUNTIME_LOADER}" STREQUAL "")
+    set(CMAKE_SKIP_BUILD_RPATH TRUE)
+    add_link_options(
+        "LINKER:--dynamic-linker,${LOCKDC_BOOTLIN_RUNTIME_LOADER}"
+        "LINKER:--disable-new-dtags")
+    foreach(lockdc_runtime_dir IN LISTS LOCKDC_BOOTLIN_RUNTIME_DIRS)
+        add_link_options("LINKER:-rpath,${lockdc_runtime_dir}")
+    endforeach()
+endif()
+
 find_package(lockdc CONFIG REQUIRED)
 
 function(lockdc_assert_no_raw_dependency_links target_name)
@@ -312,6 +333,8 @@ set(lockdc_consumer_configure_command
     "-Dpslog_DIR=${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/cmake/pslog"
     "-Dlonejson_DIR=${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/cmake/lonejson"
     "-Dliblql_DIR=${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib/cmake/liblql"
+    "-DLOCKDC_BOOTLIN_RUNTIME_LOADER=${lockdc_bootlin_runtime_loader}"
+    "-DLOCKDC_BOOTLIN_RUNTIME_DIRS=${lockdc_bootlin_runtime_dirs_arg}"
 )
 if(DEFINED LOCKDC_BUILD_TYPE AND NOT LOCKDC_BUILD_TYPE STREQUAL "")
     list(APPEND lockdc_consumer_configure_command
@@ -430,6 +453,7 @@ execute_process(
         "${consumer_src_dir}/pkgconfig_shared_main.c"
         -Wl,-rpath,${install_prefix}/lib
         -o "${lockdc_pkgconfig_shared_consumer}"
+        ${lockdc_bootlin_direct_link_flags}
         ${lockdc_pkgconfig_shared_libs_list}
     RESULT_VARIABLE lockdc_pkgconfig_shared_build_result
     OUTPUT_VARIABLE lockdc_pkgconfig_shared_build_stdout

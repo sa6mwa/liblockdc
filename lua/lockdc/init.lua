@@ -1,7 +1,7 @@
 local core = require("lockdc.core")
 local lonejson = require("lonejson")
 
-local M = { core = core }
+local M = {}
 
 local Client = {}
 Client.__index = Client
@@ -12,22 +12,37 @@ Lease.__index = Lease
 local Message = {}
 Message.__index = Message
 
-local Workflow = {}
-Workflow.__index = Workflow
+local Outbox = {}
+Outbox.__index = Outbox
 
-local WorkflowTransaction = {}
-WorkflowTransaction.__index = WorkflowTransaction
+local OutboxDispatcher = {}
+OutboxDispatcher.__index = OutboxDispatcher
 
-local WorkflowParticipant = {}
-WorkflowParticipant.__index = WorkflowParticipant
+local OutboxTransaction = {}
+OutboxTransaction.__index = OutboxTransaction
+
+local OutboxParticipant = {}
+OutboxParticipant.__index = OutboxParticipant
 
 local OutboxJob = {}
 OutboxJob.__index = OutboxJob
+
+local HistoryConsumer = {}
+HistoryConsumer.__index = HistoryConsumer
 
 local Service = {}
 Service.__index = Service
 
 local JSON_NULL = lonejson.json_null
+-- Native dispatcher bindings are shared by aliases. The state is weakly held
+-- by the native binding id and strongly held by live facade wrappers, so an
+-- adapter cannot survive the binding that accepted it.
+local dispatcher_binding_states = setmetatable({}, { __mode = "v" })
+
+local function release_dispatcher_handler_map(self)
+  self._handler_core_map = nil
+  self._handler_binding_state = nil
+end
 
 local function wrap_client(core_client)
   return setmetatable({ _core = core_client }, Client)
@@ -41,20 +56,35 @@ local function wrap_message(core_message)
   return setmetatable({ _core = core_message, _closed = false }, Message)
 end
 
-local function wrap_workflow(core_workflow)
-  return setmetatable({ _core = core_workflow, _closed = false }, Workflow)
+local function wrap_outbox(core_outbox)
+  return setmetatable({ _core = core_outbox, _closed = false }, Outbox)
 end
 
-local function wrap_workflow_transaction(core_transaction)
+local function wrap_outbox_dispatcher(core_dispatcher)
+  local binding_id = core_dispatcher:_binding_id()
+  local state = dispatcher_binding_states[binding_id]
+
+  if state == nil then
+    state = {}
+    dispatcher_binding_states[binding_id] = state
+  end
+  return setmetatable({
+    _core = core_dispatcher,
+    _closed = false,
+    _handler_binding_state = state,
+  }, OutboxDispatcher)
+end
+
+local function wrap_outbox_transaction(core_transaction)
   return setmetatable({
     _core = core_transaction,
     _closed = false,
     _terminal = false,
-  }, WorkflowTransaction)
+  }, OutboxTransaction)
 end
 
-local function wrap_workflow_participant(core_participant)
-  return setmetatable({ _core = core_participant, _closed = false }, WorkflowParticipant)
+local function wrap_outbox_participant(core_participant)
+  return setmetatable({ _core = core_participant, _closed = false }, OutboxParticipant)
 end
 
 local function wrap_outbox_job(core_job)
@@ -63,6 +93,10 @@ local function wrap_outbox_job(core_job)
     _closed = false,
     _terminal = false,
   }, OutboxJob)
+end
+
+local function wrap_history_consumer(core_consumer)
+  return setmetatable({ _core = core_consumer, _closed = false }, HistoryConsumer)
 end
 
 local function normalize_result(a, b)
@@ -80,6 +114,13 @@ local function decode_json(payload)
   return lonejson.decode_json(payload)
 end
 
+local function require_sink(sink, method, materializer)
+  if sink == nil then
+    error(method .. " requires a sink; use " .. materializer .. " to materialize")
+  end
+  return sink
+end
+
 local function with_json_content_type(req)
   local next_req = {}
   local k, v
@@ -93,24 +134,6 @@ local function with_json_content_type(req)
     next_req.content_type = "application/json"
   end
   return next_req
-end
-
-local function normalize_outbox_entry(entry)
-  local next_entry = {}
-  local k, v
-
-  entry = entry or {}
-  for k, v in pairs(entry) do
-    next_entry[k] = v
-  end
-  if next_entry.headers ~= nil then
-    if next_entry.headers_json ~= nil then
-      error("outbox entry accepts either headers or headers_json, not both")
-    end
-    next_entry.headers_json = encode_json(next_entry.headers)
-    next_entry.headers = nil
-  end
-  return next_entry
 end
 
 local function unwrap_lease_ref(value)
@@ -140,7 +163,7 @@ local function flatten_lease_request(req)
     next_req[k] = v
   end
   lease_ref = req.lease
-  if lease_ref ~= nil and next_req.namespace_name == nil then
+  if lease_ref ~= nil and next_req.namespace == nil then
     if type(lease_ref) == "table" and getmetatable(lease_ref) == Lease then
       lease_ref = lease_ref:info()
     end
@@ -169,7 +192,7 @@ local function flatten_message_request(req)
     next_req[k] = v
   end
   message_ref = req.message
-  if message_ref ~= nil and next_req.namespace_name == nil then
+  if message_ref ~= nil and next_req.namespace == nil then
     if type(message_ref) == "table" and getmetatable(message_ref) == Message then
       message_ref = message_ref:info()
     end
@@ -197,7 +220,35 @@ function M.version_string()
   return core.version_string()
 end
 
+function M.xid_new()
+  return core.xid_new()
+end
+
+function M.pouch_crypto_generate_key()
+  return core.pouch_crypto_generate_key()
+end
+
+function M.pouch_crypto_default_key_file()
+  return core.pouch_crypto_default_key_file()
+end
+
+function M.pouch_crypto_generate_key_file(path, overwrite)
+  return core.pouch_crypto_generate_key_file(path, overwrite)
+end
+
 M.json_null = JSON_NULL
+M.OK = core.OK
+M.ERR_INVALID = core.ERR_INVALID
+M.ERR_NOMEM = core.ERR_NOMEM
+M.ERR_TRANSPORT = core.ERR_TRANSPORT
+M.ERR_PROTOCOL = core.ERR_PROTOCOL
+M.ERR_SERVER = core.ERR_SERVER
+M.ERR_TIMEOUT = core.ERR_TIMEOUT
+M.NACK_FAILURE = core.NACK_FAILURE
+M.NACK_DEFER = core.NACK_DEFER
+M.COMMAND_PENDING = core.COMMAND_PENDING
+M.COMMAND_COMPLETED = core.COMMAND_COMPLETED
+M.COMMAND_FAILED = core.COMMAND_FAILED
 
 function M.open(config)
   local client, err = core.open(config)
@@ -219,13 +270,47 @@ function Client:close()
   end
 end
 
-function Client:new_workflow(config)
-  local workflow, err = self._core:new_workflow(config)
+function Client:new_outbox(config, options)
+  local core_options = options
 
-  if workflow == nil then
+  if options ~= nil and options.dispatcher ~= nil then
+    core_options = { dispatcher = options.dispatcher._core }
+  end
+  local outbox, err = self._core:new_outbox(config, core_options)
+
+  if outbox == nil then
     return nil, err
   end
-  return wrap_workflow(workflow)
+  return wrap_outbox(outbox)
+end
+
+function Client:new_history_consumer(config)
+  local consumer, err = self._core:new_history_consumer(config)
+
+  if consumer == nil then
+    return nil, err
+  end
+  return wrap_history_consumer(consumer)
+end
+
+function HistoryConsumer:position()
+  return self._core:position()
+end
+
+function HistoryConsumer:advance(acknowledged_index_seq)
+  return self._core:advance(acknowledged_index_seq)
+end
+
+function HistoryConsumer:unregister()
+  return self._core:unregister()
+end
+
+function HistoryConsumer:close()
+  if self._core ~= nil then
+    self._core:close()
+    self._core = nil
+    self._closed = true
+  end
 end
 
 function Client:acquire(req)
@@ -253,8 +338,8 @@ function Client:acquire_for_update(req, handler)
       return decode_json(self.state), self.state_meta
     end
 
-    function af:update_raw(body, opts)
-      return lease:update_raw(body, opts)
+    function af:update(body, opts)
+      return lease:update(body, opts)
     end
 
     function af:update_json(value, opts)
@@ -303,12 +388,18 @@ function Client:describe(req)
   return self._core:describe(req)
 end
 
-function Client:get_raw(req, dest)
-  return self._core:get(req, dest)
+function Client:get(req, sink)
+  -- `req.namespace` selects an explicit namespace; omitted keeps the client
+  -- default. This mirrors lc_get_in_namespace without exposing C maps.
+  return self._core:get(req, require_sink(sink, "client:get", "client:read"))
 end
 
-function Client:get_json(req)
-  local payload, meta_or_err = self._core:get(req)
+function Client:read(req)
+  return self._core:get(req)
+end
+
+function Client:read_json(req)
+  local payload, meta_or_err = self:read(req)
 
   if payload == nil then
     return nil, meta_or_err
@@ -319,12 +410,12 @@ function Client:get_json(req)
   return decode_json(payload), meta_or_err
 end
 
-function Client:update_raw(req, body)
+function Client:update(req, body)
   return self._core:update(flatten_lease_request(req), body)
 end
 
 function Client:update_json(req, value)
-  return self:update_raw(with_json_content_type(req), encode_json(value))
+  return self:update(with_json_content_type(req), encode_json(value))
 end
 
 function Client:mutate(req)
@@ -355,8 +446,13 @@ function Client:list_attachments(req)
   return self._core:list_attachments(flatten_lease_request(req))
 end
 
-function Client:get_attachment(req, dest)
-  return self._core:get_attachment(flatten_lease_request(req), dest)
+function Client:get_attachment(req, sink)
+  return self._core:get_attachment(flatten_lease_request(req),
+    require_sink(sink, "client:get_attachment", "client:read_attachment"))
+end
+
+function Client:read_attachment(req)
+  return self._core:get_attachment(flatten_lease_request(req))
 end
 
 function Client:delete_attachment(req)
@@ -383,8 +479,17 @@ function Client:queue_extend(req)
   return self._core:queue_extend(flatten_message_request(req))
 end
 
-function Client:query_raw(req, dest)
-  return self._core:query(req, dest)
+function Client:query(req, sink)
+  return self._core:query(req,
+    require_sink(sink, "client:query", "client:read_query"))
+end
+
+function Client:read_query(req)
+  return self._core:query(req)
+end
+
+function Client:query_keys(req, handler)
+  return self._core:query_keys(req, handler)
 end
 
 function Client:get_namespace_config(req)
@@ -397,6 +502,62 @@ end
 
 function Client:flush_index(req)
   return self._core:flush_index(req)
+end
+
+function Client:txn_replay(req)
+  return self._core:txn_replay(req)
+end
+
+function Client:txn_prepare(req)
+  return self._core:txn_prepare(req)
+end
+
+function Client:txn_commit(req)
+  return self._core:txn_commit(req)
+end
+
+function Client:txn_rollback(req)
+  return self._core:txn_rollback(req)
+end
+
+function Client:tc_lease_acquire(req)
+  return self._core:tc_lease_acquire(req)
+end
+
+function Client:tc_lease_renew(req)
+  return self._core:tc_lease_renew(req)
+end
+
+function Client:tc_lease_release(req)
+  return self._core:tc_lease_release(req)
+end
+
+function Client:tc_leader()
+  return self._core:tc_leader()
+end
+
+function Client:tc_cluster_announce(req)
+  return self._core:tc_cluster_announce(req)
+end
+
+function Client:tc_cluster_leave()
+  return self._core:tc_cluster_leave()
+end
+
+function Client:tc_cluster_list()
+  return self._core:tc_cluster_list()
+end
+
+function Client:tc_rm_register(req)
+  return self._core:tc_rm_register(req)
+end
+
+function Client:tc_rm_unregister(req)
+  return self._core:tc_rm_unregister(req)
+end
+
+function Client:tc_rm_list()
+  return self._core:tc_rm_list()
 end
 
 function Client:enqueue(req, body)
@@ -449,12 +610,16 @@ function Lease:describe()
   return self._core:describe()
 end
 
-function Lease:get_raw(req, dest)
-  return self._core:get(req, dest)
+function Lease:get(opts, sink)
+  return self._core:get(opts, require_sink(sink, "lease:get", "lease:read"))
 end
 
-function Lease:get_json(req)
-  local payload, meta_or_err = self._core:get(req)
+function Lease:read(opts)
+  return self._core:get(opts)
+end
+
+function Lease:read_json(opts)
+  local payload, meta_or_err = self:read(opts)
 
   if payload == nil then
     return nil, meta_or_err
@@ -465,12 +630,12 @@ function Lease:get_json(req)
   return decode_json(payload), meta_or_err
 end
 
-function Lease:update_raw(body, req)
+function Lease:update(body, req)
   return self._core:update(body, req)
 end
 
 function Lease:update_json(value, req)
-  return self:update_raw(encode_json(value), with_json_content_type(req))
+  return self:update(encode_json(value), with_json_content_type(req))
 end
 
 function Lease:mutate(req)
@@ -510,8 +675,13 @@ function Lease:list_attachments()
   return self._core:list_attachments()
 end
 
-function Lease:get_attachment(req, dest)
-  return self._core:get_attachment(req, dest)
+function Lease:get_attachment(req, sink)
+  return self._core:get_attachment(req,
+    require_sink(sink, "lease:get_attachment", "lease:read_attachment"))
+end
+
+function Lease:read_attachment(req)
+  return self._core:get_attachment(req)
 end
 
 function Lease:delete_attachment(selector)
@@ -572,12 +742,17 @@ function Message:rewind_payload()
   return self._core:rewind_payload()
 end
 
-function Message:payload(dest)
-  return self._core:payload(dest)
+function Message:write_payload(sink)
+  return self._core:payload(
+    require_sink(sink, "message:write_payload", "message:read_payload"))
 end
 
-function Message:payload_json()
-  local payload, written_or_err = self._core:payload()
+function Message:read_payload()
+  return self._core:payload()
+end
+
+function Message:read_payload_json()
+  local payload, written_or_err = self:read_payload()
 
   if payload == nil then
     return nil, written_or_err
@@ -585,16 +760,39 @@ function Message:payload_json()
   return decode_json(payload), written_or_err
 end
 
-function Workflow:close()
+function Outbox:close()
   if self._core ~= nil and not self._closed then
     self._core:close()
     self._closed = true
   end
 end
 
-function Workflow:append_outbox(entry, payload)
-  local transaction, receipt_or_err = self._core:append_outbox(
-    normalize_outbox_entry(entry), payload)
+function Outbox:begin()
+  local transaction, err = self._core:begin()
+
+  if transaction == nil then
+    return nil, err
+  end
+  return wrap_outbox_transaction(transaction)
+end
+
+function Outbox:transaction(fn)
+  return self._core:transaction(function(transaction)
+    return fn(wrap_outbox_transaction(transaction))
+  end)
+end
+
+function Outbox:dispatcher()
+  local dispatcher, err = self._core:dispatcher()
+
+  if dispatcher == nil then
+    return nil, err
+  end
+  return wrap_outbox_dispatcher(dispatcher)
+end
+
+function Outbox:append(entry, payload)
+  local transaction, receipt_or_err = self._core:append(entry, payload)
 
   if transaction == nil and receipt_or_err == nil then
     return nil
@@ -605,10 +803,10 @@ function Workflow:append_outbox(entry, payload)
   if transaction == nil then
     return nil, receipt_or_err
   end
-  return wrap_workflow_transaction(transaction), receipt_or_err
+  return wrap_outbox_transaction(transaction), receipt_or_err
 end
 
-function Workflow:accept_inbox(message)
+function Outbox:accept_inbox(message)
   local transaction, result_or_err = self._core:accept_inbox(message)
 
   if transaction == nil and result_or_err == nil then
@@ -620,10 +818,10 @@ function Workflow:accept_inbox(message)
   if transaction == nil then
     return nil, result_or_err
   end
-  return wrap_workflow_transaction(transaction), result_or_err
+  return wrap_outbox_transaction(transaction), result_or_err
 end
 
-function Workflow:accept_command(request)
+function Outbox:accept_command(request)
   local transaction, receipt_or_err = self._core:accept_command(request)
 
   if transaction == nil and receipt_or_err == nil then
@@ -635,18 +833,34 @@ function Workflow:accept_command(request)
   if transaction == nil then
     return nil, receipt_or_err
   end
-  return wrap_workflow_transaction(transaction), receipt_or_err
+  return wrap_outbox_transaction(transaction), receipt_or_err
 end
 
-function Workflow:command_receipt(identity)
+function Outbox:get_command_receipt(identity)
   return self._core:get_command_receipt(identity)
 end
 
-function Workflow:write_command_result(identity, dest)
-  return self._core:write_command_result(identity, dest)
+-- Reads one durable receipt by the component-generated command id.
+function Outbox:get_command_receipt_by_id(command_id)
+  return self._core:get_command_receipt_by_id(command_id)
 end
 
-function Workflow:resume_command(identity)
+-- Waits only for a durable terminal receipt; it never performs dispatch.
+-- A positive timeout is a monotonic deadline, including each remote read.
+function Outbox:wait_command(command_id, timeout_ms)
+  return self._core:wait_command(command_id, timeout_ms)
+end
+
+function Outbox:write_command_result(identity, sink)
+  return self._core:write_command_result(identity, require_sink(sink,
+    "outbox:write_command_result", "outbox:read_command_result"))
+end
+
+function Outbox:read_command_result(identity)
+  return self._core:write_command_result(identity)
+end
+
+function Outbox:resume_command(identity)
   local transaction, receipt_or_err = self._core:resume_command(identity)
 
   if transaction == nil and receipt_or_err == nil then
@@ -658,10 +872,34 @@ function Workflow:resume_command(identity)
   if transaction == nil then
     return nil, receipt_or_err
   end
-  return wrap_workflow_transaction(transaction), receipt_or_err
+  return wrap_outbox_transaction(transaction), receipt_or_err
 end
 
-function Workflow:next(timeout_ms)
+-- Resumes a pending receipt by command id for a supervisor-owned finalizer.
+function Outbox:resume_command_by_id(command_id)
+  local transaction, receipt_or_err = self._core:resume_command_by_id(command_id)
+
+  if transaction == nil and receipt_or_err == nil then
+    return nil
+  end
+  if transaction == nil then
+    return nil, receipt_or_err
+  end
+  return wrap_outbox_transaction(transaction), receipt_or_err
+end
+
+function OutboxDispatcher:close()
+  if self._core ~= nil and not self._closed then
+    self._core:close()
+    self._closed = true
+  end
+  -- A Lua handler binding lasts while at least one dispatcher wrapper is
+  -- reachable. This wrapper no longer needs to retain its adapter map once it
+  -- has surrendered its receiver reference.
+  release_dispatcher_handler_map(self)
+end
+
+function OutboxDispatcher:next(timeout_ms)
   local job, err = self._core:next(timeout_ms)
 
   if job == nil then
@@ -670,64 +908,201 @@ function Workflow:next(timeout_ms)
   return wrap_outbox_job(job)
 end
 
-function Workflow:stats()
+-- Explicitly opts this pull into the paired outbox/checkpoint claim. The
+-- native boundary rejects backends that cannot provide that durable invariant;
+-- it never silently substitutes a stateless job.
+function OutboxDispatcher:next_with_state(timeout_ms)
+  local job, err = self._core:next_with_state(timeout_ms)
+
+  if job == nil then
+    return nil, err
+  end
+  return wrap_outbox_job(job)
+end
+
+local function dispatcher_handler_options(self, options)
+  local handlers
+  local key, handler
+  local handler_count
+  local core_options
+  local core_handlers
+  local cached_handlers
+  local activation
+  local activate_map
+  local retain_map
+
+  if type(options) ~= "table" then
+    return options
+  end
+  handlers = options.handlers
+  if type(handlers) ~= "table" then
+    return options
+  end
+  handler_count = 0
+  for key, handler in pairs(handlers) do
+    if type(key) ~= "string" or key == "" or key:find("\0", 1, true) ~= nil or
+        type(handler) ~= "function" then
+      -- Let the native boundary report the standard structured argument error.
+      return options
+    end
+    handler_count = handler_count + 1
+  end
+  if handler_count == 0 then
+    return options
+  end
+  cached_handlers = self._handler_binding_state.cached_handlers
+  if self._handler_binding_state.handlers ~= handlers then
+    cached_handlers = nil
+  end
+  activation = { handlers = handlers, cached_handlers = cached_handlers }
+  activate_map = function()
+    local source = activation.handlers
+
+    if source == nil then
+      return
+    end
+    self._handler_binding_state.handlers = source
+    self._handler_binding_state.cached_handlers = activation.cached_handlers
+    -- The adapter callbacks retain this closure after binding. Drop the
+    -- application table as soon as the adapter is published so a fully closed
+    -- dispatcher does not keep the caller's handler map alive.
+    activation.handlers = nil
+    activation.cached_handlers = nil
+  end
+  retain_map = function()
+    activate_map()
+    if self._closed then
+      return
+    end
+    self._handler_core_map = cached_handlers.core_handlers
+  end
+  if cached_handlers == nil then
+    core_handlers = {}
+    for key, handler in pairs(handlers) do
+      local handler_function = handler
+
+      core_handlers[key] = function(core_job)
+        -- This wrapper is entered only after native code has accepted this
+        -- exact map. Promote before application code can recurse through an
+        -- alias while the first pump/run invocation remains active.
+        activate_map()
+        return handler_function(wrap_outbox_job(core_job))
+      end
+    end
+    cached_handlers = { core_handlers = core_handlers }
+    activation.cached_handlers = cached_handlers
+  end
+  core_options = {}
+  for key, handler in pairs(options) do
+    core_options[key] = handler
+  end
+  core_options.handlers = cached_handlers.core_handlers
+  -- The native layer changes this only after it has accepted this exact
+  -- adapter as the dispatcher's immutable handler map.
+  core_options._lockdc_facade_handlers_bound = false
+  return core_options, retain_map
+end
+
+local function dispatcher_handler_call(self, options, method)
+  local core_options
+  local retain_map
+  local result
+  local error_result
+  local status
+
+  core_options, retain_map = dispatcher_handler_options(self, options)
+  if retain_map == nil then
+    return method(self._core, core_options)
+  end
+  result, error_result, status = method(self._core, core_options)
+  if core_options._lockdc_facade_handlers_bound then
+    retain_map()
+  end
+  return result, error_result, status
+end
+
+function OutboxDispatcher:pump(options)
+  return dispatcher_handler_call(self, options, self._core.pump)
+end
+
+function OutboxDispatcher:run(options)
+  return dispatcher_handler_call(self, options, self._core.run)
+end
+
+function OutboxDispatcher:notify_outbox_key(outbox_key)
+  return self._core:notify_outbox_key(outbox_key)
+end
+
+function OutboxDispatcher:stats()
   return self._core:stats()
 end
 
-function Workflow:reconcile()
+function OutboxDispatcher:reconcile()
   return self._core:reconcile()
 end
 
-function Workflow:replay_dead_letter(outbox_key)
+function OutboxDispatcher:replay_dead_letter(outbox_key)
   return self._core:replay_dead_letter(outbox_key)
 end
 
-function Workflow:delete_dead_letter(outbox_key)
+function OutboxDispatcher:delete_dead_letter(outbox_key)
   return self._core:delete_dead_letter(outbox_key)
 end
 
-function Workflow:export_dead_letters(options, dest)
-  if dest == nil and (type(options) == "string" or type(options) == "number" or
-      (type(options) == "table" and
-       (options.path ~= nil or options.fd ~= nil))) then
-    return self._core:export_dead_letters(nil, options)
-  end
-  return self._core:export_dead_letters(options, dest)
+function OutboxDispatcher:export_dead_letters(options, sink)
+  return self._core:export_dead_letters(options, require_sink(sink,
+    "dispatcher:export_dead_letters", "dispatcher:read_dead_letters"))
 end
 
-function WorkflowTransaction:close()
+function OutboxDispatcher:read_dead_letters(options)
+  return self._core:export_dead_letters(options)
+end
+
+function OutboxDispatcher:stop(deadline_ms)
+  return self._core:stop(deadline_ms)
+end
+
+function OutboxDispatcher:wait(deadline_ms)
+  return self._core:wait(deadline_ms)
+end
+
+function OutboxTransaction:close()
   if self._core ~= nil and not self._closed then
     self._core:close()
     self._closed = true
   end
 end
 
-function WorkflowTransaction:acquire(req)
+function OutboxTransaction:acquire(req)
   local participant, err = self._core:acquire(req)
 
   if participant == nil then
     return nil, err
   end
-  return wrap_workflow_participant(participant)
+  return wrap_outbox_participant(participant)
 end
 
-function WorkflowTransaction:append_outbox(entry, payload)
-  return self._core:append_outbox(normalize_outbox_entry(entry), payload)
+function OutboxTransaction:append(entry, payload)
+  return self._core:append(entry, payload)
 end
 
-function WorkflowTransaction:accept_command(request)
+function OutboxTransaction:accept_command(request)
   return self._core:accept_command(request)
 end
 
-function WorkflowTransaction:complete_command(result)
+function OutboxTransaction:accept_inbox(message)
+  return self._core:accept_inbox(message)
+end
+
+function OutboxTransaction:complete_command(result)
   return self._core:complete_command(result)
 end
 
-function WorkflowTransaction:fail_command(result)
+function OutboxTransaction:fail_command(result)
   return self._core:fail_command(result)
 end
 
-function WorkflowTransaction:commit()
+function OutboxTransaction:commit()
   local ok, err = normalize_result(self._core:commit())
 
   if ok ~= nil then
@@ -736,7 +1111,7 @@ function WorkflowTransaction:commit()
   return ok, err
 end
 
-function WorkflowTransaction:rollback()
+function OutboxTransaction:rollback()
   local ok, err = normalize_result(self._core:rollback())
 
   if ok ~= nil then
@@ -745,27 +1120,32 @@ function WorkflowTransaction:rollback()
   return ok, err
 end
 
-function WorkflowParticipant:info()
+function OutboxParticipant:info()
   return self._core:info()
 end
 
-function WorkflowParticipant:close()
+function OutboxParticipant:close()
   if self._core ~= nil and not self._closed then
     self._core:close()
     self._closed = true
   end
 end
 
-function WorkflowParticipant:describe()
+function OutboxParticipant:describe()
   return self._core:describe()
 end
 
-function WorkflowParticipant:get_raw(opts, dest)
-  return self._core:get(opts, dest)
+function OutboxParticipant:get(opts, sink)
+  return self._core:get(opts, require_sink(sink,
+    "outbox participant:get", "outbox participant:read"))
 end
 
-function WorkflowParticipant:get_json(opts)
-  local payload, meta_or_err = self._core:get(opts)
+function OutboxParticipant:read(opts)
+  return self._core:get(opts)
+end
+
+function OutboxParticipant:read_json(opts)
+  local payload, meta_or_err = self:read(opts)
 
   if payload == nil then
     return nil, meta_or_err
@@ -776,51 +1156,56 @@ function WorkflowParticipant:get_json(opts)
   return decode_json(payload), meta_or_err
 end
 
-function WorkflowParticipant:update_raw(body, opts)
+function OutboxParticipant:update(body, opts)
   return self._core:update(body, opts)
 end
 
-function WorkflowParticipant:update_json(value, opts)
-  return self:update_raw(encode_json(value), with_json_content_type(opts))
+function OutboxParticipant:update_json(value, opts)
+  return self:update(encode_json(value), with_json_content_type(opts))
 end
 
-function WorkflowParticipant:mutate(req)
+function OutboxParticipant:mutate(req)
   return self._core:mutate(req)
 end
 
-function WorkflowParticipant:mutate_local(req)
+function OutboxParticipant:mutate_local(req)
   return self._core:mutate_local(req)
 end
 
-function WorkflowParticipant:metadata(req)
+function OutboxParticipant:metadata(req)
   return self._core:metadata(req)
 end
 
-function WorkflowParticipant:remove(req)
+function OutboxParticipant:remove(req)
   return self._core:remove(req)
 end
 
-function WorkflowParticipant:keepalive(req)
+function OutboxParticipant:keepalive(req)
   return self._core:keepalive(req)
 end
 
-function WorkflowParticipant:attach(req, body)
+function OutboxParticipant:attach(req, body)
   return self._core:attach(req, body)
 end
 
-function WorkflowParticipant:list_attachments()
+function OutboxParticipant:list_attachments()
   return self._core:list_attachments()
 end
 
-function WorkflowParticipant:get_attachment(req, dest)
-  return self._core:get_attachment(req, dest)
+function OutboxParticipant:get_attachment(req, sink)
+  return self._core:get_attachment(req, require_sink(sink,
+    "outbox participant:get_attachment", "outbox participant:read_attachment"))
 end
 
-function WorkflowParticipant:delete_attachment(selector)
+function OutboxParticipant:read_attachment(req)
+  return self._core:get_attachment(req)
+end
+
+function OutboxParticipant:delete_attachment(selector)
   return self._core:delete_attachment(selector)
 end
 
-function WorkflowParticipant:delete_all_attachments()
+function OutboxParticipant:delete_all_attachments()
   return self._core:delete_all_attachments()
 end
 
@@ -835,16 +1220,29 @@ function OutboxJob:close()
   end
 end
 
-function OutboxJob:write_payload(dest)
-  return self._core:write_payload(dest)
+function OutboxJob:write_payload(sink)
+  return self._core:write_payload(require_sink(sink,
+    "outbox job:write_payload", "outbox job:read_payload"))
 end
 
-function OutboxJob:payload(dest)
-  return self:write_payload(dest)
+-- Returns a normal Lua lease facade for a stateful job's paired checkpoint.
+-- The job owns the claim lifetime: do not close this borrowed wrapper or use
+-- it after job completion, retry, dead-letter, or close.
+function OutboxJob:state()
+  local lease = self._core:state()
+
+  if lease == nil then
+    return nil
+  end
+  return wrap_lease(lease)
 end
 
-function OutboxJob:payload_json()
-  local payload, written_or_err = self:write_payload()
+function OutboxJob:read_payload()
+  return self._core:write_payload()
+end
+
+function OutboxJob:read_payload_json()
+  local payload, written_or_err = self:read_payload()
 
   if payload == nil then
     return nil, written_or_err
@@ -886,18 +1284,7 @@ function OutboxJob:dead_letter(diagnostic)
   return ok, err
 end
 
-local function should_continue(err_handler, err)
-  if err_handler == nil then
-    return false, err
-  end
-  return err_handler(err) == nil, err
-end
-
-local function sleep_seconds(seconds)
-  os.execute(string.format("sleep %.3f", seconds))
-end
-
-local function run_subscribe(client, req, with_state, handler, should_stop)
+local function run_threadless_service(client, req, with_state, handler, should_stop)
   local dequeue_fn
 
   if with_state then
@@ -912,7 +1299,7 @@ local function run_subscribe(client, req, with_state, handler, should_stop)
     end
 
     local message, err = dequeue_fn(client, req)
-    local ok, handler_err
+    local ok, handler_result, handler_err
     local state
 
     if should_stop ~= nil and should_stop() then
@@ -922,91 +1309,100 @@ local function run_subscribe(client, req, with_state, handler, should_stop)
       return nil, err
     end
     state = with_state and message:state() or nil
-    ok, handler_err = pcall(handler, message, state)
+    ok, handler_result, handler_err = pcall(handler, message, state)
     if state ~= nil then
       state:close()
       state = nil
     end
-    if ok and handler_err == nil and message:is_open() then
-      local ack_ok, ack_err = message:ack()
-
-      if ack_ok == nil then
-        return nil, ack_err
-      end
-    elseif not ok then
+    if ok and (handler_result == nil and handler_err == nil or
+        handler_result == true) then
       if message:is_open() then
-        message:nack({ intent = "failure" })
+        local ack_ok, ack_err = message:ack()
+
+        if ack_ok == nil then
+          return nil, ack_err
+        end
       end
-      return nil, handler_err
-    elseif message:is_open() then
-      message:nack({ intent = "failure" })
-      return nil, handler_err
+    else
+      local failure = handler_err or handler_result
+
+      if not ok then
+        failure = handler_result
+      end
+      if failure == nil or failure == false then
+        failure = {
+          code = core.ERR_INVALID,
+          message = "Lua consumer handler returned false",
+        }
+      elseif type(failure) ~= "table" then
+        failure = {
+          code = core.ERR_INVALID,
+          message = tostring(failure),
+        }
+      end
+      if message:is_open() then
+        local nack_ok, nack_err = message:nack({ intent = "failure" })
+
+        if nack_ok == nil then
+          return nil, nack_err
+        end
+      end
+      return nil, failure
     end
   end
+end
+
+local function invoke_subscription_handler(handler, core_message, core_state)
+  local message = wrap_message(core_message)
+  local state = core_state ~= nil and wrap_lease(core_state) or nil
+  local ok, first, second = pcall(handler, message, state)
+
+  -- Subscription deliveries and their attached state leases are borrowed from
+  -- the native callback frame. Keep the public wrapper's lifecycle truthful
+  -- when an application retains either object after the callback returns.
+  message._closed = true
+  if state ~= nil then
+    state._closed = true
+  end
+  if not ok then
+    error(first, 0)
+  end
+  return first, second
 end
 
 function Client:subscribe(req, handler)
-  return run_subscribe(self, req, false, handler)
+  if type(handler) ~= "function" then
+    error("client:subscribe requires a handler function")
+  end
+  return self._core:subscribe(req, function(message)
+    return invoke_subscription_handler(handler, message, nil)
+  end)
 end
 
 function Client:subscribe_with_state(req, handler)
-  return run_subscribe(self, req, true, handler)
+  if type(handler) ~= "function" then
+    error("client:subscribe_with_state requires a handler function")
+  end
+  return self._core:subscribe_with_state(req, function(message, state)
+    return invoke_subscription_handler(handler, message, state)
+  end)
 end
 
 function Client:watch_queue(req, handler)
-  local last_signature
-  local interval
-
-  interval = tonumber((req or {}).poll_interval_seconds or 1) or 1
-  while true do
-    local stats, err = self:queue_stats(req)
-    local signature
-
-    if stats == nil then
-      return nil, err
-    end
-    signature = table.concat({
-      tostring(stats.available),
-      stats.head_message_id or "",
-    }, "|")
-    if signature ~= last_signature then
-      local ok, callback_err = pcall(handler, {
-        namespace_name = req.namespace_name,
-        queue = req.queue,
-        available = stats.available,
-        head_message_id = stats.head_message_id,
-        changed_at_unix = os.time(),
-        correlation_id = stats.correlation_id,
-      })
-
-      if not ok then
-        return nil, callback_err
-      end
-      last_signature = signature
-    end
-    sleep_seconds(interval)
-  end
+  return self._core:watch_queue(req, handler)
 end
 
-function Client:new_consumer_service(...)
+function Client:new_consumer_service(config)
   return setmetatable({
     _client = self,
-    _configs = { ... },
+    _config = config,
     _stop_requested = false,
   }, Service)
-end
-
-function Client:start_consumer(...)
-  return self:new_consumer_service(...):run()
 end
 
 function Service:stop()
   self._stop_requested = true
   return true
-end
-
-function Service:start()
-  return self:run()
 end
 
 function Service:wait()
@@ -1015,64 +1411,52 @@ function Service:wait()
   end
   return nil, {
     code = core.ERR_INVALID,
-    message = "lockdc Lua consumer service wait() only becomes meaningful after start()/run() completes",
+    message = "lockdc Lua consumer service wait() only becomes meaningful after run() completes",
   }
 end
 
 function Service:run()
-  local configs = self._configs
-  local i
+  local config = self._config
+  local req = {}
+  local k, v
 
-  if #configs == 0 then
+  if type(config) ~= "table" then
     return nil, {
       code = core.ERR_INVALID,
-      message = "lockdc Lua consumer service requires exactly one consumer config",
+      message = "lockdc Lua consumer service requires one config table",
     }
   end
-  if #configs ~= 1 then
+  if type(config.request) ~= "table" then
     return nil, {
       code = core.ERR_INVALID,
-      message = "lockdc Lua consumer service supports exactly one consumer config per blocking service; start separate consumers for separate queues",
+      message = "lockdc Lua consumer service config requires request",
     }
   end
-
-  for i = 1, #configs do
-    local config = configs[i]
-    local req = {}
-    local k, v
-
-    for k, v in pairs(config.Options or {}) do
-      req[k] = v
-    end
-    if config.Namespace ~= nil and req.namespace_name == nil then
-      req.namespace_name = config.Namespace
-    end
-    req.queue = config.Queue or req.queue
-    req.owner = req.owner or config.Name or config.Queue
-    if config.WithState then
-      local ok, err = run_subscribe(self._client, req, true, function(message, state)
-        return config.MessageHandler(message, state)
-      end, function()
-        return self._stop_requested
-      end)
-
-      if ok == nil then
-        return nil, err
-      end
-    else
-      local ok, err = run_subscribe(self._client, req, false, function(message)
-        return config.MessageHandler(message)
-      end, function()
-        return self._stop_requested
-      end)
-
-      if ok == nil then
-        return nil, err
-      end
-    end
+  if type(config.handle) ~= "function" then
+    return nil, {
+      code = core.ERR_INVALID,
+      message = "lockdc Lua consumer service config requires handle",
+    }
+  end
+  for k, v in pairs(config.request) do
+    req[k] = v
+  end
+  req.owner = req.owner or config.name or req.queue
+  local ok, err = run_threadless_service(self._client, req,
+    config.with_state == true, config.handle, function()
+      return self._stop_requested
+    end)
+  if ok == nil then
+    self._completed = true
+    return nil, err
   end
   self._completed = true
   return true
+end
+
+function Service:close()
+  self:stop()
+  self._completed = true
 end
 
 return M

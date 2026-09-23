@@ -5,8 +5,9 @@
  * @file lc/lc.h
  * @brief Public C API for remote lockd and local Pouch clients.
  *
- * The API is C89-compatible and uses receiver-style handles for normal
- * workflows. Initialize transparent request/config structs with their
+ * The API is C89-compatible, supports C++98-or-later consumers through C
+ * linkage, and uses receiver-style handles for normal operations. Initialize
+ * transparent request/config structs with their
  * matching `*_init()` function, then call methods such as
  * `client->acquire(client, ...)` and `lease->update(lease, ...)`.
  *
@@ -22,7 +23,8 @@
  * failure. When supplied, `lc_error` receives actionable diagnostics and must
  * eventually be passed to `lc_error_cleanup()`. Unless documented as a
  * terminal operation, an existing handle remains owned by the caller after a
- * failed method call.
+ * failed method call. `lc_error_set()` copies diagnostic strings supplied by
+ * public callbacks into an error they return to the library.
  *
  * APIs described as streaming move data through bounded buffers without
  * materializing the complete value. In-memory sources/sinks and ordinary
@@ -37,18 +39,33 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/*
+ * `lc_shared` is compiled with hidden visibility so implementation helpers do
+ * not become an accidental dynamic ABI.  Keep declarations in this installed
+ * header explicitly default-visible; their matching definitions retain that
+ * visibility on GCC- and Clang-family C89 toolchains.  Restore the consumer's
+ * visibility state at the end of the header.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(default)
+#endif
+
 /** Default maximum bytes accepted while parsing a typed JSON HTTP response. */
 #define LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT (100UL * 1024UL * 1024UL)
 
 /** Maximum combined byte length of durable outbox envelope fields. Payloads are
  * streamed attachments and are not included in this bound. */
-#define LC_WORKFLOW_MAX_ENVELOPE_BYTES (1024UL * 1024UL)
+#define LC_OUTBOX_MAX_ENVELOPE_BYTES (1024UL * 1024UL)
 
 /** Maximum serialized byte length reserved for a durable command or inbox
  * receipt. Input identity fields are conservatively bounded below this value
  * to account for JSON escaping and fixed record fields; payload and result
  * bodies are streamed attachments and are not included. */
-#define LC_WORKFLOW_MAX_RECEIPT_BYTES (1024UL * 1024UL)
+#define LC_OUTBOX_MAX_RECEIPT_BYTES (1024UL * 1024UL)
 
 /** Opaque client handle. */
 typedef struct lc_client lc_client;
@@ -58,13 +75,17 @@ typedef struct lc_lease lc_lease;
 typedef struct lc_message lc_message;
 /** Opaque managed queue consumer service. */
 typedef struct lc_consumer_service lc_consumer_service;
-/** Opaque inbox/outbox workflow handle. */
-typedef struct lc_workflow lc_workflow;
-/** Opaque workflow transaction handle. */
-typedef struct lc_workflow_transaction lc_workflow_transaction;
-/** Restricted non-terminal lease view owned by a workflow transaction. */
-typedef struct lc_workflow_participant lc_workflow_participant;
-/** Owned, claimed outbox delivery returned from a workflow. */
+/** Opaque durable Pouch history-retention consumer. */
+typedef struct lc_history_consumer lc_history_consumer;
+/** Opaque transactional outbox handle. */
+typedef struct lc_outbox lc_outbox;
+/** Opaque process-local outbox dispatcher. */
+typedef struct lc_outbox_dispatcher lc_outbox_dispatcher;
+/** Opaque outbox transaction handle. */
+typedef struct lc_outbox_transaction lc_outbox_transaction;
+/** Restricted non-terminal lease view owned by an outbox transaction. */
+typedef struct lc_outbox_participant lc_outbox_participant;
+/** Owned, claimed outbox delivery returned from an outbox. */
 typedef struct lc_outbox_job lc_outbox_job;
 /** Opaque byte source used for uploads and streamed request bodies. */
 typedef struct lc_source lc_source;
@@ -82,6 +103,12 @@ typedef int64_t lc_version;
 typedef int64_t lc_unix_seconds;
 /** Query/index sequence. Mirrors lockd's unsigned uint64 value. */
 typedef uint64_t lc_index_seq;
+/**
+ * Selects the namespace's durable current sequence when creating a history
+ * consumer. This value is only meaningful in
+ * `lc_history_consumer_config.initial_acknowledged_index_seq`.
+ */
+#define LC_HISTORY_CONSUMER_START_AT_CURRENT ((lc_index_seq) - 1)
 /** Transaction-coordinator leader term. Mirrors lockd's unsigned uint64 value.
  */
 typedef uint64_t lc_tc_term;
@@ -208,6 +235,100 @@ typedef struct lc_pouch_endpoint_option {
   const char *value;
 } lc_pouch_endpoint_option;
 
+/** Bit in `lc_pouch_settings.set_mask` selecting `single_writer`. */
+#define LC_POUCH_SETTING_SINGLE_WRITER ((uint64_t)1)
+/** Bit in `lc_pouch_settings.set_mask` selecting `durable_sync`. */
+#define LC_POUCH_SETTING_DURABLE_SYNC ((uint64_t)1 << 1)
+/** Bit in `lc_pouch_settings.set_mask` selecting `fsync_batch_max_ops`. */
+#define LC_POUCH_SETTING_FSYNC_BATCH_MAX_OPS ((uint64_t)1 << 2)
+/** Bit in `lc_pouch_settings.set_mask` selecting `segment_target_bytes`. */
+#define LC_POUCH_SETTING_SEGMENT_TARGET_BYTES ((uint64_t)1 << 3)
+/** Bit in `lc_pouch_settings.set_mask` selecting `indexer_flush_docs`. */
+#define LC_POUCH_SETTING_INDEXER_FLUSH_DOCS ((uint64_t)1 << 4)
+/** Bit selecting `indexer_flush_interval_seconds`. */
+#define LC_POUCH_SETTING_INDEXER_FLUSH_INTERVAL_SECONDS ((uint64_t)1 << 5)
+/** Bit selecting `background_compaction_enabled`. */
+#define LC_POUCH_SETTING_BACKGROUND_COMPACTION ((uint64_t)1 << 6)
+/** Bit selecting `compaction_throttling_disabled`. */
+#define LC_POUCH_SETTING_DISABLE_COMPACTION_THROTTLING ((uint64_t)1 << 7)
+/** Bit selecting `terminal_reclaim_min_bytes`. */
+#define LC_POUCH_SETTING_TERMINAL_RECLAIM_MIN_BYTES ((uint64_t)1 << 8)
+/** Bit selecting `queue_watch`. */
+#define LC_POUCH_SETTING_QUEUE_WATCH ((uint64_t)1 << 9)
+/** Bit selecting `query_engine`. */
+#define LC_POUCH_SETTING_QUERY_ENGINE ((uint64_t)1 << 10)
+/** Bit selecting `query_fallback_engine`. */
+#define LC_POUCH_SETTING_QUERY_FALLBACK_ENGINE ((uint64_t)1 << 11)
+/** Bit selecting `query_indexing_enabled`. */
+#define LC_POUCH_SETTING_QUERY_INDEXING ((uint64_t)1 << 12)
+/** Bit selecting `crypto_key`. */
+#define LC_POUCH_SETTING_CRYPTO_KEY ((uint64_t)1 << 13)
+/** Bit selecting `crypto_key_file`. */
+#define LC_POUCH_SETTING_CRYPTO_KEY_FILE ((uint64_t)1 << 14)
+/** Bit selecting `crypto_generate_key_file`. */
+#define LC_POUCH_SETTING_CRYPTO_GENERATE_KEY_FILE ((uint64_t)1 << 15)
+/** Bit selecting `compression`. */
+#define LC_POUCH_SETTING_COMPRESSION ((uint64_t)1 << 16)
+
+/**
+ * Optional typed local-Pouch root-open settings.
+ *
+ * Initialize with `lc_pouch_settings_init()`, set a field's matching
+ * `LC_POUCH_SETTING_*` bit, then attach the object to
+ * `lc_client_config.pouch_settings`. The object and its strings are borrowed
+ * only for `lc_client_open()`. A nonzero mask requires exactly one local
+ * `pouch://` endpoint; remote and Unix-socket clients reject it rather than
+ * silently ignoring root-local policy. String fields selected by the mask
+ * must be non-NULL and non-empty. Boolean fields must be zero or one.
+ *
+ * A selected field overrides the corresponding legacy endpoint query option.
+ * Existing dedicated `lc_client_config` crypto/compression fields remain
+ * supported and take precedence over endpoint options, while this object has
+ * final precedence. These settings are distinct from per-query engine hints
+ * and durable namespace configuration.
+ */
+typedef struct lc_pouch_settings {
+  /** Bitwise OR of the `LC_POUCH_SETTING_*` fields selected below. */
+  uint64_t set_mask;
+  /** Explicit exclusive-writer policy. */
+  int single_writer;
+  /** Wait for durable root fsync at each public mutation. */
+  int durable_sync;
+  /** Maximum durable group-commit requests; zero leaves it unbounded. */
+  uint64_t fsync_batch_max_ops;
+  /** Target immutable segment size; zero uses the Pouch default. */
+  uint64_t segment_target_bytes;
+  /** Pending index documents before an index flush; zero uses the default. */
+  uint64_t indexer_flush_docs;
+  /** Index flush interval in seconds; zero uses the default. */
+  uint64_t indexer_flush_interval_seconds;
+  /** Enables or disables background Pouch compaction. */
+  int background_compaction_enabled;
+  /** Disables the background compaction I/O throttle. */
+  int compaction_throttling_disabled;
+  /** Active-segment threshold for terminal reclaim; zero uses the default. */
+  uint64_t terminal_reclaim_min_bytes;
+  /** Requests filesystem-backed queue notifications where supported. */
+  int queue_watch;
+  /** Default query engine: `"index"` or `"scan"`. */
+  const char *query_engine;
+  /** Fallback query engine: `"index"` or `"scan"`. */
+  const char *query_fallback_engine;
+  /** Enables or disables local derived query-index maintenance. */
+  int query_indexing_enabled;
+  /** Pouch root encryption key string. Treat it as secret material. */
+  const char *crypto_key;
+  /** Pouch root encryption key-file path. */
+  const char *crypto_key_file;
+  /** Creates a missing selected Pouch key file. */
+  int crypto_generate_key_file;
+  /** At-rest compression: `"none"` or `"zlib"`. */
+  const char *compression;
+} lc_pouch_settings;
+
+/** Zeros a typed local-Pouch root-open settings object. */
+void lc_pouch_settings_init(lc_pouch_settings *settings);
+
 /**
  * Client construction settings.
  *
@@ -219,7 +340,8 @@ typedef struct lc_pouch_endpoint_option {
  * `pouch:///var/lib/app/lockd-root`. Local Pouch storage defaults to exclusive
  * single-writer mode. A second default writer for the same root fails at open;
  * callers that intentionally need multiple active local writers must opt in
- * with `?single_writer=false`.
+ * with `LC_POUCH_SETTING_SINGLE_WRITER` set to zero in `pouch_settings`, or
+ * through the legacy `?single_writer=false` endpoint option.
  *
  * Endpoint query options are copied at open and use the same C-native Pouch
  * storage engine as direct Pouch callers. Supported options include
@@ -227,8 +349,13 @@ typedef struct lc_pouch_endpoint_option {
  * `durable_sync`, `fsync_batch_max_ops`, `segment_target_bytes`,
  * `indexer_flush_docs`, `indexer_flush_interval_seconds`,
  * `background_compaction`, `disable_compaction_throttling`,
- * `retention_seconds`, `janitor_interval_seconds`, `queue_watch`,
- * `query_engine`, and `query_fallback_engine`.
+ * `terminal_reclaim_min_bytes`, `queue_watch`,
+ * `query_engine`, `query_fallback_engine`, and `query_indexing`.
+ * Set `query_indexing=false` for roots that never execute indexed queries;
+ * ordinary queries then use scans and explicit indexed queries are rejected.
+ * New code should prefer the typed `pouch_settings` field below. Endpoint
+ * options remain a compatibility input and are overridden per field by typed
+ * settings.
  */
 typedef struct lc_client_config {
   /**
@@ -250,7 +377,7 @@ typedef struct lc_client_config {
   lc_source *client_bundle_source;
   /** Deprecated compatibility path to the combined PEM bundle. */
   const char *client_bundle_path;
-  /** Namespace used when a request leaves `namespace_name` unset. */
+  /** Namespace used when a request leaves `ns` unset. */
   const char *default_namespace;
   /**
    * Whole-request timeout in milliseconds.
@@ -268,9 +395,9 @@ typedef struct lc_client_config {
   int prefer_http_2;
   /** Maximum typed JSON response bytes parsed through lonejson for operations
    * issued through this client. Zero uses
-   * `LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT`. A remote workflow owns a separate
+   * `LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT`. A remote outbox owns a separate
    * dispatcher client with the standard bounded limit and rejects envelopes
-   * above `LC_WORKFLOW_MAX_ENVELOPE_BYTES`, so a lower application-facing
+   * above `LC_OUTBOX_MAX_ENVELOPE_BYTES`, so a lower application-facing
    * limit cannot strand its library-owned durable envelopes.
    */
   size_t http_json_response_limit_bytes;
@@ -316,6 +443,15 @@ typedef struct lc_client_config {
    * in a Pouch endpoint.
    */
   int pouch_crypto_generate_key_file_set;
+  /**
+   * Optional typed local-Pouch root-open policy.
+   *
+   * This object is borrowed for `lc_client_open()` and may be released when
+   * that call returns. A nonzero `set_mask` is valid only for exactly one
+   * `pouch://` endpoint. It overrides legacy Pouch endpoint options and the
+   * dedicated compatibility crypto/compression fields above.
+   */
+  const lc_pouch_settings *pouch_settings;
 } lc_client_config;
 
 /** Public status codes returned by all API entry points. */
@@ -331,7 +467,9 @@ enum {
   /** A remote response or durable local value violated its protocol. */
   LC_ERR_PROTOCOL = 4,
   /** The lockd server rejected an otherwise valid request. */
-  LC_ERR_SERVER = 5
+  LC_ERR_SERVER = 5,
+  /** A caller-supplied local wait deadline elapsed before completion. */
+  LC_ERR_TIMEOUT = 6
 };
 
 /**
@@ -391,7 +529,7 @@ typedef struct lc_file_value_resolver {
 /** Request used to acquire a new lease. */
 typedef struct lc_acquire_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** Lease key to acquire. */
   const char *key;
   /** Non-empty logical owner identifier required for lease acquisition. */
@@ -423,7 +561,7 @@ typedef struct lc_acquire_res {
  * token; an empty reference is never an unfenced write request. */
 typedef struct lc_lease_ref {
   /** Namespace of the existing lease. */
-  const char *namespace_name;
+  const char *ns;
   /** Key of the existing lease. */
   const char *key;
   /** Server-issued lease identifier, required for every mutation. */
@@ -437,7 +575,7 @@ typedef struct lc_lease_ref {
 /** Request used to describe a lease or state object. */
 typedef struct lc_describe_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** Key to describe. */
   const char *key;
 } lc_describe_req;
@@ -445,7 +583,7 @@ typedef struct lc_describe_req {
 /** Lease description returned by describe operations. */
 typedef struct lc_describe_res {
   /** Namespace of the described key. */
-  char *namespace_name;
+  char *ns;
   /** Described key. */
   char *key;
   /** Current lease owner, when a lease is active. */
@@ -627,7 +765,7 @@ typedef struct lc_metadata_op {
 /** Metadata returned by a successful metadata update. */
 typedef struct lc_metadata_res {
   /** Namespace of the updated key. */
-  char *namespace_name;
+  char *ns;
   /** Updated key. */
   char *key;
   /** State version after the metadata update. */
@@ -725,7 +863,7 @@ typedef struct lc_release_res {
 /** Streamed query request. Query result rows are written into a sink. */
 typedef struct lc_query_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** JSON selector expression used by the query engine. */
   const char *selector_json;
   /** Maximum number of rows to return in this page. */
@@ -788,6 +926,34 @@ typedef struct lc_query_key_handler {
   int (*end)(void *context, lc_error *error);
 } lc_query_key_handler;
 
+/**
+ * Creates or reopens one durable history-retention consumer.
+ *
+ * The `(ns, consumer_id)` pair is durable identity. A consumer
+ * pins Pouch log history until it advances its acknowledged sequence or is
+ * explicitly unregistered. It does not itself deliver history records.
+ */
+typedef struct lc_history_consumer_config {
+  /** Namespace whose durable history this consumer retains. */
+  const char *ns;
+  /** Stable, nonempty application-defined consumer identity. */
+  const char *consumer_id;
+  /**
+   * Initial retained boundary for a newly created consumer. Existing durable
+   * consumers retain their recorded boundary and ignore this field. Set
+   * `LC_HISTORY_CONSUMER_START_AT_CURRENT` to retain only later records.
+   */
+  lc_index_seq initial_acknowledged_index_seq;
+} lc_history_consumer_config;
+
+/** Durable and current positions reported by a history consumer. */
+typedef struct lc_history_consumer_position {
+  /** Highest history sequence durably acknowledged by this consumer. */
+  lc_index_seq acknowledged_index_seq;
+  /** Current durable namespace sequence observed by this operation. */
+  lc_index_seq current_index_seq;
+} lc_history_consumer_position;
+
 /** Generic owned string list used by several management responses. */
 typedef struct lc_string_list {
   /** Owned array of owned strings. */
@@ -799,7 +965,7 @@ typedef struct lc_string_list {
 /** Request used to read or update namespace configuration. */
 typedef struct lc_namespace_config_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** Preferred query engine, for example `index` or `scan`. */
   const char *preferred_engine;
   /** Fallback query engine, for example `scan`. */
@@ -811,7 +977,7 @@ typedef struct lc_namespace_config_req {
 /** Namespace configuration returned by get or update operations. */
 typedef struct lc_namespace_config_res {
   /** Namespace whose config was returned. */
-  char *namespace_name;
+  char *ns;
   /** Preferred query engine. */
   char *preferred_engine;
   /** Fallback query engine. */
@@ -825,7 +991,7 @@ typedef struct lc_namespace_config_res {
 /** Request used to flush an index for a namespace. */
 typedef struct lc_index_flush_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** Flush mode, for example `wait` for synchronous freshness. */
   const char *mode;
 } lc_index_flush_req;
@@ -833,7 +999,7 @@ typedef struct lc_index_flush_req {
 /** Result returned by an index flush request. */
 typedef struct lc_index_flush_res {
   /** Namespace whose index was flushed. */
-  char *namespace_name;
+  char *ns;
   /** Flush mode applied by the engine. */
   char *mode;
   /** Engine-generated flush identifier, when present. */
@@ -856,7 +1022,7 @@ typedef struct lc_index_flush_res {
  * whitespace-only nonempty values are invalid. */
 typedef struct lc_txn_participant {
   /** Participant namespace. */
-  const char *namespace_name;
+  const char *ns;
   /** Participant key. */
   const char *key;
   /** Target backend hash or compatibility wildcard. */
@@ -1065,7 +1231,7 @@ typedef struct lc_tc_rm_list_res {
 /** Request used to enqueue a streamed queue payload. */
 typedef struct lc_enqueue_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** Queue name. */
   const char *queue;
   /** Initial delivery delay in seconds. The resulting Unix timestamp must fit
@@ -1086,7 +1252,7 @@ typedef struct lc_enqueue_req {
 /** Result returned by a successful queue enqueue operation. */
 typedef struct lc_enqueue_res {
   /** Owned namespace containing the message. */
-  char *namespace_name;
+  char *ns;
   /** Owned queue name. */
   char *queue;
   /** Owned server-issued message identifier. */
@@ -1110,7 +1276,7 @@ typedef struct lc_enqueue_res {
 /** Request used to dequeue queue messages. */
 typedef struct lc_dequeue_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** Queue name. */
   const char *queue;
   /**
@@ -1134,7 +1300,7 @@ typedef struct lc_dequeue_req {
 /** Request used to fetch queue-level statistics. */
 typedef struct lc_queue_stats_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** Queue name. */
   const char *queue;
 } lc_queue_stats_req;
@@ -1142,7 +1308,7 @@ typedef struct lc_queue_stats_req {
 /** Queue-level metrics and head-of-line metadata. */
 typedef struct lc_queue_stats_res {
   /** Namespace containing the queue. */
-  char *namespace_name;
+  char *ns;
   /** Queue name. */
   char *queue;
   /** Number of consumers currently waiting. */
@@ -1184,7 +1350,7 @@ typedef struct lc_dequeue_batch_res {
 /** Stable queue message identity used by client-level queue operations. */
 typedef struct lc_message_ref {
   /** Namespace of the message. */
-  const char *namespace_name;
+  const char *ns;
   /** Queue containing the message. */
   const char *queue;
   /** Server-issued message identifier. */
@@ -1342,7 +1508,7 @@ typedef struct lc_extend_res {
 /** Request used to watch queue availability changes. */
 typedef struct lc_watch_queue_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** Queue name. */
   const char *queue;
 } lc_watch_queue_req;
@@ -1350,7 +1516,7 @@ typedef struct lc_watch_queue_req {
 /** Event delivered to queue watch handlers. */
 typedef struct lc_watch_event {
   /** Namespace containing the watched queue. */
-  char *namespace_name;
+  char *ns;
   /** Queue name. */
   char *queue;
   /** Non-zero when a message is available. */
@@ -1497,7 +1663,7 @@ typedef struct lc_consumer_lifecycle_event {
  * One managed consumer loop configuration used by `lc_consumer_service`.
  *
  * The service will default `request.owner` when it is empty, default
- * `request.namespace_name` from the client when it is empty, and then run a
+ * `request.ns` from the client when it is empty, and then run a
  * long-lived streaming subscribe loop that calls `handle()` once per
  * delivery.
  */
@@ -1561,20 +1727,21 @@ typedef struct lc_consumer_service_config {
   size_t consumer_count;
 } lc_consumer_service_config;
 
-/** Settings for one inbox/outbox workflow namespace.
+/** Settings for one inbox/outbox namespace.
  *
- * `namespace_name` is required. All zero duration/count fields use the
+ * `ns` is required. All zero duration/count fields use the
  * documented defaults; negative values, invalid retry ranges, and claim TTLs
  * that cannot produce an `lc_unix_seconds` deadline are rejected during
- * `lc_client_new_workflow()` before its dispatcher thread starts.
+ * `lc_client_new_outbox()`. Dispatcher resources are created only by
+ * `lc_outbox_dispatcher_get_or_start()`.
  */
-typedef struct lc_workflow_config {
+typedef struct lc_outbox_config {
   /** Required namespace that contains both inbox and outbox records. */
-  const char *namespace_name;
+  const char *ns;
   /** Optional lease owner for component-owned records and claims. Defaults to
-   * `"lockdc-workflow"`. */
+   * `"lockdc-outbox"`. */
   const char *owner;
-  /** TTL for workflow transaction participants; zero defaults to 30 seconds. */
+  /** TTL for outbox transaction participants; zero defaults to 30 seconds. */
   long transaction_ttl_seconds;
   /** TTL for an outbox claim; zero defaults to five minutes. */
   long claim_ttl_seconds;
@@ -1590,10 +1757,12 @@ typedef struct lc_workflow_config {
   long host_retry_delay_max_seconds;
   /**
    * Infrequent durable-recovery cadence. Zero defaults to five minutes for a
-   * remote endpoint and disables routine scans for local Pouch; startup and
-   * overflow reconciliation always run. Set a positive value for shared-root
-   * Pouch dispatch. A positive interval must produce a supported Unix
-   * timestamp from the workflow creation time.
+   * remote endpoint and disables routine scans for local Pouch. Startup
+   * recovery is requested by the first blocking consumer demand or explicit
+   * reconcile call; overflow reconciliation is always scheduled. Set a
+   * positive value for shared-root Pouch dispatch. A positive interval must
+   * produce a supported Unix
+   * timestamp from the outbox creation time.
    */
   long recovery_interval_seconds;
   /**
@@ -1605,7 +1774,27 @@ typedef struct lc_workflow_config {
   /** When non-zero, replay durable dead letters through startup reconciliation.
    */
   int replay_dead_letters_on_startup;
-} lc_workflow_config;
+  /**
+   * Pouch-only automatic dead-letter retention. Zero defaults to 30 days;
+   * `-1` disables automatic retention explicitly; a positive value is the
+   * retention period in seconds. Other negative values are invalid. An
+   * explicit value is rejected for remote lockd rather than ignored.
+   */
+  long dead_letter_retention_seconds;
+  /**
+   * Pouch-only retained dead-letter envelope cap. Zero defaults to 1,024;
+   * `SIZE_MAX` disables this capacity bound. An explicit value is rejected for
+   * remote lockd rather than ignored.
+   */
+  size_t dead_letter_max_count;
+  /**
+   * Pouch-only logical retained-byte cap, including envelope payload and a
+   * stateful checkpoint when present. Zero defaults to 64 MiB; `UINT64_MAX`
+   * disables this capacity bound. An explicit value is rejected for remote
+   * lockd rather than ignored.
+   */
+  uint64_t dead_letter_max_bytes;
+} lc_outbox_config;
 
 /** Streaming representation requested from `export_dead_letters()`. */
 enum {
@@ -1615,11 +1804,11 @@ enum {
   LC_DEAD_LETTER_EXPORT_JSONL = 2
 };
 
-/** Bounded export settings for workflow dead-letter envelopes. */
+/** Bounded export settings for outbox dead-letter envelopes. */
 typedef struct lc_dead_letter_export_opts {
   /** `LC_DEAD_LETTER_EXPORT_JSON` or `LC_DEAD_LETTER_EXPORT_JSONL`. */
   int format;
-  /** Maximum records to export; zero uses the workflow notification capacity.
+  /** Maximum records to export; zero uses the outbox notification capacity.
    * Values larger than `LONG_MAX` are rejected with `LC_ERR_INVALID`.
    */
   size_t limit;
@@ -1631,33 +1820,39 @@ typedef struct lc_dead_letter_export_res {
   size_t exported;
 } lc_dead_letter_export_res;
 
-/** Cheap process-local workflow observability snapshot. */
-typedef struct lc_workflow_stats {
-  /** Non-zero while the private dispatcher may claim new work. */
+/** Cheap process-local outbox observability snapshot. */
+typedef struct lc_outbox_stats {
+  /** Non-zero while this dispatcher may accept demand for new work. */
   int running;
-  /** Current direct-notification backlog. */
-  size_t pending_notifications;
-  /** Current preclaimed host-job backlog. */
-  size_t ready_jobs;
-  /** Monotonic successful key notifications in this workflow process. */
+  /** Current bounded direct-key candidate backlog. */
+  size_t pending_candidates;
+  /** Current bounded delayed-retry wake backlog. */
+  size_t delayed_wakes;
+  /** Number of raw consumers currently waiting in `next()`. */
+  size_t waiting_consumers;
+  /** Monotonic successful key notifications in this outbox process. */
   uint64_t direct_notifications;
   /** Monotonic notification overflows repaired through reconciliation. */
   uint64_t notification_overflows;
   /** Monotonic indexed reconciliation sweeps started by this process. */
   uint64_t recovery_queries;
-  /** Monotonic outbox keys rediscovered by reconciliation. */
+  /** Monotonic outbox candidates rediscovered by reconciliation. */
   uint64_t recovered_claims;
   /** Monotonic claims that could not become a host job. */
   uint64_t claim_losses;
   /** Monotonic payload streaming failures observed from claimed jobs. */
   uint64_t payload_open_failures;
-  /** Owned latest private-dispatcher error text, or `NULL`. */
+  /** Monotonic Pouch retention markers safely consumed by maintenance. */
+  uint64_t dead_letter_reclaims;
+  /** Monotonic Pouch retention maintenance failures retained for retry. */
+  uint64_t dead_letter_reclaim_failures;
+  /** Owned latest dispatcher error text, or `NULL`. */
   char *last_error;
-} lc_workflow_stats;
+} lc_outbox_stats;
 
 /** Immutable envelope and routing data for one durable outbox effect. The
  * combined byte length of its string fields must not exceed
- * `LC_WORKFLOW_MAX_ENVELOPE_BYTES`. */
+ * `LC_OUTBOX_MAX_ENVELOPE_BYTES`. */
 typedef struct lc_outbox_entry {
   /** Required stable business-operation identity. */
   const char *operation_id;
@@ -1713,10 +1908,16 @@ typedef struct lc_command_identity {
   const char *idempotency_key;
 } lc_command_identity;
 
-/** Command identity plus immutable binding data accepted by the workflow. */
+/** Command identity plus immutable binding data accepted by the outbox. */
 typedef struct lc_command_request {
   /** Required receipt identity. */
   lc_command_identity identity;
+  /**
+   * Generates an XID-backed idempotency key when non-zero. In this explicit
+   * mode `identity.idempotency_key` must be `NULL` or empty; the generated key
+   * is returned through the owned command receipt.
+   */
+  int generate_idempotency_key;
   /** Required opaque semantic request binding; never interpreted by liblockdc.
    */
   const char *request_digest;
@@ -1730,11 +1931,11 @@ enum {
   LC_COMMAND_FAILED = 3
 };
 
-/** One terminal outcome staged through an owned workflow transaction. */
+/** One terminal outcome staged through an owned outbox transaction. */
 typedef struct lc_command_result {
   /** Required safe application result class for a completed command. */
   const char *result_code;
-  /** Optional safe resource, workflow, or status reference. */
+  /** Optional safe resource, outbox, or status reference. */
   const char *result_reference;
   /** Required only when `body` is non-NULL. */
   const char *content_type;
@@ -1768,7 +1969,7 @@ typedef struct lc_command_receipt {
   char *operation_id;
   /** Owned safe completed result class, or `NULL`. */
   char *result_code;
-  /** Owned safe completed resource, workflow, or status reference, or `NULL`.
+  /** Owned safe completed resource, outbox, or status reference, or `NULL`.
    */
   char *result_reference;
   /** Owned safe terminal failure class, or `NULL`. */
@@ -1784,12 +1985,12 @@ typedef struct lc_command_receipt {
 typedef struct lc_outbox_completion {
   /**
    * Optional provider or broker delivery reference. At most
-   * `LC_WORKFLOW_MAX_COMPLETION_EVIDENCE_BYTES` bytes are accepted.
+   * `LC_OUTBOX_MAX_COMPLETION_EVIDENCE_BYTES` bytes are accepted.
    */
   const char *delivery_reference;
   /**
    * Optional opaque digest of the provider response or acknowledgement. At
-   * most `LC_WORKFLOW_MAX_COMPLETION_EVIDENCE_BYTES` bytes are accepted.
+   * most `LC_OUTBOX_MAX_COMPLETION_EVIDENCE_BYTES` bytes are accepted.
    */
   const char *response_digest;
 } lc_outbox_completion;
@@ -1808,6 +2009,17 @@ typedef struct lc_outbox_receipt {
   int duplicate;
 } lc_outbox_receipt;
 
+/** Receipts published by one successful outbox transaction commit.
+ *
+ * `outbox_receipts` is owned by this result and contains only effects made
+ * durable by this commit. Initialize before use and clean it up after use. */
+typedef struct lc_outbox_commit_result {
+  /** Owned receipts for newly committed outbox effects. */
+  lc_outbox_receipt *outbox_receipts;
+  /** Number of entries in `outbox_receipts`. */
+  size_t outbox_receipt_count;
+} lc_outbox_commit_result;
+
 /** Result of durable inbox acceptance. */
 typedef struct lc_inbox_accept_result {
   /** Non-zero when a new inbox record and transaction were created. */
@@ -1817,13 +2029,13 @@ typedef struct lc_inbox_accept_result {
 } lc_inbox_accept_result;
 
 /** Maximum retained byte length of an outbox failure diagnostic. */
-#define LC_WORKFLOW_MAX_DIAGNOSTIC_BYTES 4096U
+#define LC_OUTBOX_MAX_DIAGNOSTIC_BYTES 4096U
 
 /**
  * Maximum retained byte length of either optional provider completion-evidence
  * field. Both fields are durable outbox metadata, not payload attachments.
  */
-#define LC_WORKFLOW_MAX_COMPLETION_EVIDENCE_BYTES 4096U
+#define LC_OUTBOX_MAX_COMPLETION_EVIDENCE_BYTES 4096U
 
 /** Durable outcome requested for a claimed outbox job. */
 typedef struct lc_outbox_retry {
@@ -1831,19 +2043,19 @@ typedef struct lc_outbox_retry {
   long delay_seconds;
   /**
    * Optional failure diagnostic retained with the record. At most
-   * `LC_WORKFLOW_MAX_DIAGNOSTIC_BYTES` bytes are accepted.
+   * `LC_OUTBOX_MAX_DIAGNOSTIC_BYTES` bytes are accepted.
    */
   const char *diagnostic;
 } lc_outbox_retry;
 
-/** Domain-lease acquisition request within a workflow transaction. */
-typedef struct lc_workflow_participant_request {
+/** Domain-lease acquisition request within an outbox transaction. */
+typedef struct lc_outbox_participant_request {
   /**
    * Lease request for the domain key. `key` is required and `txn_id` must be
-   * `NULL`; namespace, owner, and TTL default from the parent workflow.
+   * `NULL`; namespace, owner, and TTL default from the parent outbox.
    */
   lc_acquire_req acquire;
-} lc_workflow_participant_request;
+} lc_outbox_participant_request;
 
 /** Attachment selector by id or name. */
 typedef struct lc_attachment_selector {
@@ -2111,7 +2323,7 @@ struct lc_lease {
   void (*close)(lc_lease *self);
 
   /** Namespace of the bound lease. */
-  const char *namespace_name;
+  const char *ns;
   /** Key of the bound lease. */
   const char *key;
   /** Current recorded owner of the lease. */
@@ -2203,7 +2415,7 @@ struct lc_message {
   void (*close)(lc_message *self);
 
   /** Namespace containing the queue message. */
-  const char *namespace_name;
+  const char *ns;
   /** Queue name. */
   const char *queue;
   /** Server-issued message identifier. */
@@ -2245,7 +2457,7 @@ struct lc_message {
  * Managed queue consumer service.
  *
  * Create this from `client->new_consumer_service()`, then call `run()` for the
- * blocking Go-`StartConsumer` style workflow or `start()`/`stop()`/`wait()` for
+ * blocking Go-`StartConsumer` style outbox or `start()`/`stop()`/`wait()` for
  * explicit daemon-style integration.
  */
 struct lc_consumer_service {
@@ -2292,112 +2504,150 @@ struct lc_consumer_service {
 };
 
 /**
- * One owned workflow transaction. The first command, inbox, or outbox
- * operation obtains its xid from the endpoint; later participant acquires
- * automatically carry that xid. Only this receiver can make the terminal
- * decision.
+ * One owned outbox transaction. Its first participating operation lazily
+ * creates an explicit xid; later participant acquires automatically carry
+ * that xid. Only this receiver can make the terminal decision.
  * If an operation fails after enrolling a later participant, implicit XA has
  * rolled the xid back; close this transaction and begin a new one to retry.
  */
-struct lc_workflow_transaction {
+struct lc_outbox_transaction {
   /**
    * Accepts one durable command receipt in this transaction.
    *
    * A transaction may own at most one command. A matching existing receipt is
    * returned with `receipt->duplicate` set and does not repeat the command.
    */
-  int (*accept_command)(lc_workflow_transaction *self,
+  int (*accept_command)(lc_outbox_transaction *self,
                         const lc_command_request *request,
                         lc_command_receipt *receipt, lc_error *error);
+  /**
+   * Accepts one durable inbox receipt in this transaction.
+   *
+   * A matching existing receipt is returned with `result->duplicate` set and
+   * does not repeat the inbox transition. A fresh receipt becomes durable only
+   * with this transaction's terminal decision.
+   */
+  int (*accept_inbox)(lc_outbox_transaction *self,
+                      const lc_inbox_message *message,
+                      lc_inbox_accept_result *result, lc_error *error);
   /**
    * Acquires a non-terminal domain participant under this transaction's xid.
    *
    * The request must not supply its own transaction id. Close the returned
    * participant after use; only this transaction can commit or roll it back.
    */
-  int (*acquire)(lc_workflow_transaction *self,
-                 const lc_workflow_participant_request *request,
-                 lc_workflow_participant **out, lc_error *error);
+  int (*acquire)(lc_outbox_transaction *self,
+                 const lc_outbox_participant_request *request,
+                 lc_outbox_participant **out, lc_error *error);
   /**
    * Stages an immutable outbox effect and its streamed payload.
-   * `entry->payload_digest` binds duplicate identity without pre-reading the
-   * payload source.
+   *
+   * A fresh effect leaves `out` empty until commit; an existing committed
+   * duplicate is returned immediately. `entry->payload_digest` binds duplicate
+   * identity without pre-reading the payload source. The payload callback may
+   * close this transaction safely; in that case staging returns
+   * `LC_ERR_INVALID` because no transaction remains for a later commit.
    */
-  int (*append_outbox)(lc_workflow_transaction *self,
-                       const lc_outbox_entry *entry, lc_source *payload,
-                       lc_outbox_receipt *out, lc_error *error);
-  /** Completes this transaction's owned pending command with a safe result. */
-  int (*complete_command)(lc_workflow_transaction *self,
+  int (*append)(lc_outbox_transaction *self, const lc_outbox_entry *entry,
+                lc_source *payload, lc_outbox_receipt *out, lc_error *error);
+  /**
+   * Completes this transaction's owned pending command with a safe result.
+   * A streamed `result->body` may close this transaction safely; completion
+   * then returns `LC_ERR_INVALID` rather than reporting a usable decision.
+   */
+  int (*complete_command)(lc_outbox_transaction *self,
                           const lc_command_result *result, lc_error *error);
-  /** Fails this transaction's owned pending command with a safe result. */
-  int (*fail_command)(lc_workflow_transaction *self,
+  /**
+   * Fails this transaction's owned pending command with a safe result.
+   * A streamed `result->body` may close this transaction safely; failure then
+   * returns `LC_ERR_INVALID` rather than reporting a usable decision.
+   */
+  int (*fail_command)(lc_outbox_transaction *self,
                       const lc_command_result *result, lc_error *error);
-  /** Commits every enrolled participant and consumes their lease handles.
-   * Returns an error when the endpoint durably rolls the transaction back. */
-  int (*commit)(lc_workflow_transaction *self, lc_error *error);
+  /**
+   * Commits every enrolled participant and consumes their lease handles.
+   *
+   * `out` is populated only after the durable commit and contains fresh
+   * wakeable outbox receipts. Returns an error when the endpoint durably rolls
+   * the transaction back or cannot confirm its terminal decision.
+   */
+  int (*commit)(lc_outbox_transaction *self, lc_outbox_commit_result *out,
+                lc_error *error);
   /** Rolls back every enrolled participant and consumes their lease handles. */
-  int (*rollback)(lc_workflow_transaction *self, lc_error *error);
+  int (*rollback)(lc_outbox_transaction *self, lc_error *error);
   /**
    * Releases the local transaction wrapper.
    *
    * For an undecided transaction, this makes a best-effort rollback before
    * invalidating every participant view.
    */
-  void (*close)(lc_workflow_transaction *self);
+  void (*close)(lc_outbox_transaction *self);
   /** Private implementation pointer; callers must not inspect or modify it. */
   void *impl;
 };
 
 /**
- * Restricted non-terminal view over a workflow-owned lease. A terminal
+ * Restricted non-terminal view over an outbox-owned lease. A terminal
  * transaction decision or transaction close invalidates the view; subsequent
  * methods fail with `LC_ERR_INVALID`, but `close` remains required and safe.
  */
-struct lc_workflow_participant {
+struct lc_outbox_participant {
   /** Refreshes the public lease snapshot fields from the staged view. */
-  int (*describe)(lc_workflow_participant *self, lc_error *error);
-  /** Streams the participant's staged state into `dst`. */
-  int (*get)(lc_workflow_participant *self, lc_sink *dst,
-             const lc_get_opts *opts, lc_get_res *out, lc_error *error);
-  /** Streams and stages a state replacement. */
-  int (*update)(lc_workflow_participant *self, lc_source *src,
+  int (*describe)(lc_outbox_participant *self, lc_error *error);
+  /**
+   * Streams the participant's staged state into `dst`.
+   * The sink may close this view safely; it becomes unusable after the call.
+   */
+  int (*get)(lc_outbox_participant *self, lc_sink *dst, const lc_get_opts *opts,
+             lc_get_res *out, lc_error *error);
+  /**
+   * Streams and stages a state replacement. The source may close this view
+   * safely; it becomes unusable after the call.
+   */
+  int (*update)(lc_outbox_participant *self, lc_source *src,
                 const lc_update_opts *opts, lc_error *error);
   /** Applies a staged server-side mutation. */
-  int (*mutate)(lc_workflow_participant *self, const lc_mutate_req *req,
+  int (*mutate)(lc_outbox_participant *self, const lc_mutate_req *req,
                 lc_error *error);
   /** Applies a staged client-side mutation. */
-  int (*mutate_local)(lc_workflow_participant *self,
+  int (*mutate_local)(lc_outbox_participant *self,
                       const lc_mutate_local_req *req, lc_error *error);
   /** Stages metadata changes without replacing the state body. */
-  int (*metadata)(lc_workflow_participant *self, const lc_metadata_req *req,
+  int (*metadata)(lc_outbox_participant *self, const lc_metadata_req *req,
                   lc_error *error);
   /** Stages removal of this participant's state. */
-  int (*remove)(lc_workflow_participant *self, const lc_remove_req *req,
+  int (*remove)(lc_outbox_participant *self, const lc_remove_req *req,
                 lc_error *error);
   /** Extends the underlying lease while leaving the transaction open. */
-  int (*keepalive)(lc_workflow_participant *self, const lc_keepalive_req *req,
+  int (*keepalive)(lc_outbox_participant *self, const lc_keepalive_req *req,
                    lc_error *error);
-  /** Streams and stages one attachment upload. */
-  int (*attach)(lc_workflow_participant *self, const lc_attach_req *req,
+  /**
+   * Streams and stages one attachment upload. The source may close this view
+   * safely; it becomes unusable after the call.
+   */
+  int (*attach)(lc_outbox_participant *self, const lc_attach_req *req,
                 lc_source *src, lc_attach_res *out, lc_error *error);
   /** Lists attachments visible through the participant's staged view. */
-  int (*list_attachments)(lc_workflow_participant *self,
-                          lc_attachment_list *out, lc_error *error);
-  /** Streams an attachment visible through the participant's staged view. */
-  int (*get_attachment)(lc_workflow_participant *self,
+  int (*list_attachments)(lc_outbox_participant *self, lc_attachment_list *out,
+                          lc_error *error);
+  /**
+   * Streams an attachment visible through the participant's staged view. The
+   * sink may close this view safely; it becomes unusable after the call.
+   */
+  int (*get_attachment)(lc_outbox_participant *self,
                         const lc_attachment_get_req *req, lc_sink *dst,
                         lc_attachment_get_res *out, lc_error *error);
   /** Stages deletion of one attachment. */
-  int (*delete_attachment)(lc_workflow_participant *self,
+  int (*delete_attachment)(lc_outbox_participant *self,
                            const lc_attachment_selector *selector, int *deleted,
                            lc_error *error);
   /** Stages deletion of every attachment. */
-  int (*delete_all_attachments)(lc_workflow_participant *self,
-                                int *deleted_count, lc_error *error);
+  int (*delete_all_attachments)(lc_outbox_participant *self, int *deleted_count,
+                                lc_error *error);
   /** Releases this view; it cannot make a terminal transaction decision. */
-  void (*close)(lc_workflow_participant *self);
+  void (*close)(lc_outbox_participant *self);
   /** Borrowed namespace name; valid until this view is closed. */
-  const char *namespace_name;
+  const char *ns;
   /** Borrowed state key; valid until this view is closed. */
   const char *key;
   /** Borrowed transaction id; valid until this view is closed. */
@@ -2413,18 +2663,32 @@ struct lc_workflow_participant {
 };
 
 /**
- * One claimed outbox effect, owned by the host after `workflow->next()`.
+ * One claimed outbox effect, owned by the host after `dispatcher->next()`.
  *
- * The methods never invoke host callbacks. `write_payload()` streams the
+ * Terminal methods never invoke host callbacks. `write_payload()` streams the
  * immutable payload attachment into the caller's sink without materializing it
- * in liblockdc. A terminal method consumes the job on success. All string
- * fields are borrowed and valid until `close()` or a successful terminal
- * method.
+ * in liblockdc; that sink may close the job safely, and the job becomes
+ * unusable after the call. A terminal method consumes the job on success. All
+ * string fields are borrowed and valid until `close()` or a successful
+ * terminal method.
  */
 struct lc_outbox_job {
-  /** Streams the immutable payload attachment into `dst`. */
+  /**
+   * Streams the immutable payload attachment into `dst`; `dst` may close this
+   * job safely.
+   */
   int (*write_payload)(lc_outbox_job *self, lc_sink *dst, size_t *written,
                        lc_error *error);
+  /**
+   * Returns the optional state lease associated with this stateful delivery.
+   *
+   * The returned handle is borrowed from the job and is invalidated by a
+   * successful terminal operation or `close()`. It is `NULL` for a job
+   * obtained through the stateless dispatcher operation. Successful state and
+   * attachment mutations are immediately durable under this lease's fencing
+   * precondition, so a later expiry claimant can observe a host checkpoint.
+   */
+  lc_lease *(*state)(lc_outbox_job *self);
   /** Extends the claim before a longer foreign operation. */
   int (*renew)(lc_outbox_job *self, long ttl_seconds, lc_error *error);
   /** Marks delivery complete and optionally retains delivery evidence. */
@@ -2448,6 +2712,12 @@ struct lc_outbox_job {
   const char *effect_key;
   /** Component-generated stable transport message identity. */
   const char *message_id;
+  /**
+   * Optional component-generated command identity that owns this effect.
+   * It is set for an effect appended through a command-owning transaction and
+   * is independent of the caller-defined `causation_id`.
+   */
+  const char *command_id;
   /** Optional immediate durable command or source-message cause. */
   const char *causation_id;
   /** Borrowed caller-defined routing kind. */
@@ -2470,26 +2740,47 @@ struct lc_outbox_job {
   lc_unix_seconds lease_expires_at_unix;
   /** Private implementation pointer; callers must not inspect or modify it. */
   void *impl;
+  /** Reserved ABI-4 extension slots. Always `NULL`. */
+  void *reserved_extension_slots[8];
 };
 
-/** A parent workflow owns private dispatch coordination and exposes jobs here.
- */
-struct lc_workflow {
+/** Threadless outbox producer and transactional receipt façade. */
+struct lc_outbox {
+  /**
+   * Creates a lazy transaction with no durable marker or xid until its first
+   * participant is staged. An empty transaction cannot commit.
+   */
+  int (*begin)(lc_outbox *self, lc_outbox_transaction **out, lc_error *error);
   /**
    * Accepts an idempotent command.
    *
    * A fresh command returns an owned transaction in `out_txn`. A matching
    * receipt returns `*out_txn == NULL` with `receipt->duplicate` set.
    */
-  int (*accept_command)(lc_workflow *self, const lc_command_request *request,
-                        lc_workflow_transaction **out_txn,
+  int (*accept_command)(lc_outbox *self, const lc_command_request *request,
+                        lc_outbox_transaction **out_txn,
                         lc_command_receipt *receipt, lc_error *error);
-  /** Reads one durable command receipt without acquiring workflow work. */
-  int (*get_command_receipt)(lc_workflow *self,
+  /** Reads one durable command receipt without acquiring outbox work. */
+  int (*get_command_receipt)(lc_outbox *self,
                              const lc_command_identity *identity,
                              lc_command_receipt *out, lc_error *error);
-  /** Streams a completed command's result attachment into `dst`, if present. */
-  int (*write_command_result)(lc_workflow *self,
+  /** Reads a durable command receipt by its component-generated command id. */
+  int (*get_command_receipt_by_id)(lc_outbox *self, const char *command_id,
+                                   lc_command_receipt *out, lc_error *error);
+  /**
+   * Waits for a command receipt to become terminal without claiming work or
+   * invoking host code. `timeout_ms` is zero for a one-shot read, `-1` to wait
+   * without a deadline, or positive for a monotonic deadline that also bounds
+   * each remote receipt read. A timeout returns `LC_ERR_TIMEOUT` and the
+   * latest pending receipt in `out`.
+   */
+  int (*wait_command)(lc_outbox *self, const char *command_id, long timeout_ms,
+                      lc_command_receipt *out, lc_error *error);
+  /**
+   * Streams a completed command's result attachment into `dst`, if present.
+   * The sink may close this outbox safely; it becomes unusable after the call.
+   */
+  int (*write_command_result)(lc_outbox *self,
                               const lc_command_identity *identity, lc_sink *dst,
                               size_t *written, lc_error *error);
   /**
@@ -2497,54 +2788,124 @@ struct lc_workflow {
    *
    * A terminal receipt returns `*out_txn == NULL`; it is never reopened.
    */
-  int (*resume_command)(lc_workflow *self, const lc_command_identity *identity,
-                        lc_workflow_transaction **out_txn,
+  int (*resume_command)(lc_outbox *self, const lc_command_identity *identity,
+                        lc_outbox_transaction **out_txn,
                         lc_command_receipt *receipt, lc_error *error);
   /**
-   * Creates one durable outbox effect and starts its transaction.
-   *
-   * A matching effect, including its immutable `payload_digest`, returns no
-   * transaction and sets `receipt->duplicate`.
+   * Resumes a pending command by its component-generated command id. This is
+   * intended for a claimed command-bound outbox job's supervisor. A terminal
+   * command returns `*out_txn == NULL` and its current receipt.
    */
-  int (*append_outbox)(lc_workflow *self, const lc_outbox_entry *entry,
-                       lc_source *payload, lc_workflow_transaction **out_txn,
-                       lc_outbox_receipt *receipt, lc_error *error);
+  int (*resume_command_by_id)(lc_outbox *self, const char *command_id,
+                              lc_outbox_transaction **out_txn,
+                              lc_command_receipt *receipt, lc_error *error);
+  /**
+   * Stages one durable outbox effect and starts its lazy transaction.
+   *
+   * A fresh effect leaves `receipt` empty; its wakeable receipt appears only
+   * in `transaction->commit()`. A matching committed effect returns no
+   * transaction and sets `receipt->duplicate`. The payload source may close
+   * this outbox safely; the append then returns `LC_ERR_INVALID` and no
+   * transaction.
+   */
+  int (*append)(lc_outbox *self, const lc_outbox_entry *entry,
+                lc_source *payload, lc_outbox_transaction **out_txn,
+                lc_outbox_receipt *receipt, lc_error *error);
   /**
    * Creates one durable inbox receipt and starts its transaction.
    *
    * A matching source message returns no transaction and sets
    * `result->duplicate`.
    */
-  int (*accept_inbox)(lc_workflow *self, const lc_inbox_message *message,
-                      lc_workflow_transaction **out_txn,
+  int (*accept_inbox)(lc_outbox *self, const lc_inbox_message *message,
+                      lc_outbox_transaction **out_txn,
                       lc_inbox_accept_result *result, lc_error *error);
-  /**
-   * Waits for one claimed outbox job.
-   *
-   * `timeout_ms == 0` only checks ready work and `-1` waits indefinitely; other
-   * negative values are invalid.
+  /** Obtains the one compatible local dispatcher for this client and config. */
+  int (*get_or_start_dispatcher)(lc_outbox *self, lc_outbox_dispatcher **out,
+                                 lc_error *error);
+  /** Releases this threadless producer. It never stops an attached dispatcher.
    */
-  int (*next)(lc_workflow *self, long timeout_ms, lc_outbox_job **out,
+  void (*close)(lc_outbox *self);
+  /** Private implementation pointer; callers must not inspect or modify it. */
+  void *impl;
+  /** Reserved ABI-4 extension slots. Always `NULL`. */
+  void *reserved_extension_slots[8];
+};
+
+/**
+ * Explicit process-local outbox consumer. Its private thread queues bounded
+ * candidates and recovery intent only. Acquisition itself performs no recovery
+ * I/O; a blocking `next()` or explicit `reconcile()` requests it. A
+ * zero-timeout `next()` is an in-memory non-query probe. `next()` claims work
+ * on caller demand.
+ */
+struct lc_outbox_dispatcher {
+  /** Waits for, claims, and returns one outbox job on consumer demand. */
+  int (*next)(lc_outbox_dispatcher *self, long timeout_ms, lc_outbox_job **out,
               lc_error *error);
+  /** Copies one committed durable outbox key into the bounded wake queue. */
+  int (*notify_outbox_key)(lc_outbox_dispatcher *self, const char *outbox_key,
+                           lc_error *error);
   /** Returns a cheap process-local dispatcher observability snapshot. */
-  int (*get_stats)(lc_workflow *self, lc_workflow_stats *out, lc_error *error);
-  /** Requests asynchronous durable reconciliation and returns immediately. */
-  int (*reconcile)(lc_workflow *self, lc_error *error);
+  int (*get_stats)(lc_outbox_dispatcher *self, lc_outbox_stats *out,
+                   lc_error *error);
+  /** Requests asynchronous bounded durable reconciliation. */
+  int (*reconcile)(lc_outbox_dispatcher *self, lc_error *error);
   /** Returns one dead-lettered effect to pending and signals dispatch. */
-  int (*replay_dead_letter)(lc_workflow *self, const char *outbox_key,
+  int (*replay_dead_letter)(lc_outbox_dispatcher *self, const char *outbox_key,
                             lc_error *error);
   /** Permanently deletes one dead-lettered effect and its payload attachment.
    */
-  int (*delete_dead_letter)(lc_workflow *self, const char *outbox_key,
+  int (*delete_dead_letter)(lc_outbox_dispatcher *self, const char *outbox_key,
                             lc_error *error);
   /** Streams selected dead-letter envelopes as JSON or JSONL; never payloads.
    */
-  int (*export_dead_letters)(lc_workflow *self,
+  int (*export_dead_letters)(lc_outbox_dispatcher *self,
                              const lc_dead_letter_export_opts *options,
                              lc_sink *dst, lc_dead_letter_export_res *out,
                              lc_error *error);
-  /** Stops and joins the private dispatcher, then releases the workflow. */
-  void (*close)(lc_workflow *self);
+  /** Stops this dispatcher and waits up to `deadline_ms` for its thread. */
+  int (*stop)(lc_outbox_dispatcher *self, long deadline_ms, lc_error *error);
+  /** Waits up to `deadline_ms` for a requested stop to finish. */
+  int (*wait)(lc_outbox_dispatcher *self, long deadline_ms, lc_error *error);
+  /** Releases one caller reference; it does not stop the dispatcher. */
+  void (*close)(lc_outbox_dispatcher *self);
+  /** Private implementation pointer; callers must not inspect or modify it. */
+  void *impl;
+  /**
+   * Waits for and claims one outbox job with its paired durable state lease.
+   *
+   * On failure no job escapes. The returned job owns the state lease exposed
+   * by `lc_outbox_job_state()` until terminalization or close. This consumes
+   * one formerly reserved ABI-4 extension slot.
+   */
+  int (*next_with_state)(lc_outbox_dispatcher *self, long timeout_ms,
+                         lc_outbox_job **out, lc_error *error);
+  /** Reserved ABI-4 extension slots. Always `NULL`. */
+  void *reserved_extension_slots[7];
+};
+
+/**
+ * Durable cursor which prevents Pouch compaction from reclaiming unacknowledged
+ * namespace history.
+ *
+ * Closing this local handle does not unregister the durable consumer. Call
+ * `unregister()` only after the consumer no longer needs retained history.
+ */
+struct lc_history_consumer {
+  /** Reads this consumer's durable acknowledgement and current sequence. */
+  int (*position)(lc_history_consumer *self, lc_history_consumer_position *out,
+                  lc_error *error);
+  /**
+   * Durably advances the acknowledgement. The value must be monotonic and no
+   * greater than the current namespace sequence.
+   */
+  int (*advance)(lc_history_consumer *self, lc_index_seq acknowledged_index_seq,
+                 lc_history_consumer_position *out, lc_error *error);
+  /** Removes the durable retention pin. The local handle remains closable. */
+  int (*unregister)(lc_history_consumer *self, lc_error *error);
+  /** Releases the local handle without changing its durable registration. */
+  void (*close)(lc_history_consumer *self);
   /** Private implementation pointer; callers must not inspect or modify it. */
   void *impl;
 };
@@ -2560,6 +2921,13 @@ struct lc_workflow {
  * `dequeue()` returns an `lc_message` handle. Those returned handles own their
  * ongoing lifecycle and should normally be finished with `release()`/`ack()`
  * rather than jumping back to client-level calls.
+ *
+ * A concrete client retains itself for the duration of any application
+ * callback invoked by one of its methods, including source and sink callbacks,
+ * query handlers, queue consumers, queue watches, and
+ * `acquire_for_update()` handlers. Such a callback may close the root client;
+ * the active operation then unwinds safely, but the callback must not make a
+ * further root-client call after closing it.
  */
 struct lc_client {
   /**
@@ -2596,8 +2964,8 @@ struct lc_client {
    * `lc_client` receiver shell must provide this method when they support
    * `lc_load_in_namespace()`.
    */
-  int (*load_in_namespace)(lc_client *self, const char *namespace_name,
-                           const char *key, const lonejson_map *map, void *dst,
+  int (*load_in_namespace)(lc_client *self, const char *ns, const char *key,
+                           const lonejson_map *map, void *dst,
                            const lc_get_opts *opts, lc_get_res *out,
                            lc_error *error);
   /** Updates an existing, credentialed lease reference from a streamed JSON
@@ -2739,7 +3107,7 @@ struct lc_client {
                               const lc_consumer *consumer, lc_error *error);
   /**
    * Creates a managed consumer service that mirrors the Go SDK
-   * `StartConsumer` workflow.
+   * `StartConsumer` outbox.
    *
    * The returned service owns deep copies of the consumer configs and may
    * outlive the root client. Remote workers use cloned client instances. Pouch
@@ -2751,27 +3119,34 @@ struct lc_client {
   int (*new_consumer_service)(lc_client *self,
                               const lc_consumer_service_config *config,
                               lc_consumer_service **out, lc_error *error);
-  /**
-   * Creates an inbox/outbox workflow owned by this client.
-   *
-   * The workflow owns a private dispatcher thread. It uses immediate local
-   * notifications for newly committed effects and durable reconciliation for
-   * restart and cross-process recovery. Close the returned workflow to join
-   * that thread and release its retained client session.
+  /** Creates a threadless inbox/outbox producer owned by this client.
    */
-  int (*new_workflow)(lc_client *self, const lc_workflow_config *config,
-                      lc_workflow **out, lc_error *error);
+  int (*new_outbox)(lc_client *self, const lc_outbox_config *config,
+                    lc_outbox **out, lc_error *error);
+  /**
+   * Creates a threadless outbox and attaches an already-compatible explicit
+   * dispatcher. The dispatcher receives post-commit local wake hints only.
+   */
+  int (*new_outbox_with_dispatcher)(lc_client *self,
+                                    const lc_outbox_config *config,
+                                    lc_outbox_dispatcher *dispatcher,
+                                    lc_outbox **out, lc_error *error);
   /** Watches queue depth changes with a streaming watch callback. */
   int (*watch_queue)(lc_client *self, const lc_watch_queue_req *req,
                      const lc_watch_handler *handler, lc_error *error);
   /**
-   * Closes the client and invalidates any derived lease or message handles.
+   * Closes this root client receiver.
    *
-   * Call this once when all work with the client is finished.
+   * Do not make further calls through `self` after this returns. Independently
+   * returned lease, message, outbox, and service handles retain the ownership
+   * they need to reach their own documented terminal or close boundary; callers
+   * must still close or terminalize each of them. Calling this from an
+   * application callback is safe: the active operation retains the concrete
+   * client until it has fully unwound.
    */
   void (*close)(lc_client *self);
 
-  /** Default namespace applied when request structs leave `namespace_name`
+  /** Default namespace applied when request structs leave `ns`
    * unset. */
   const char *default_namespace;
   /** Private implementation pointer; callers must not inspect or modify it. */
@@ -2801,6 +3176,29 @@ struct lc_client {
   int (*query_keys)(lc_client *self, const lc_query_req *req,
                     const lc_query_key_handler *handler, void *context,
                     lc_query_res *out, lc_error *error);
+  /**
+   * Opens a durable Pouch history-retention consumer.
+   *
+   * Remote lockd clients currently reject this local-storage operation.
+   */
+  int (*new_history_consumer)(lc_client *self,
+                              const lc_history_consumer_config *config,
+                              lc_history_consumer **out, lc_error *error);
+  /**
+   * Streams a state document from an explicit namespace into `dst`.
+   *
+   * This is the namespace-aware counterpart to `get()`. It is useful for
+   * component records that deliberately live outside the client's default
+   * namespace. The namespace must be nonempty.
+   */
+  int (*get_in_namespace)(lc_client *self, const char *ns, const char *key,
+                          const lc_get_opts *opts, lc_sink *dst,
+                          lc_get_res *out, lc_error *error);
+  /**
+   * Reserved ABI-4 extension slots. They are always `NULL`; callers must not
+   * inspect or modify them.
+   */
+  void *reserved_extension_slots[7];
 };
 
 /**
@@ -2823,6 +3221,15 @@ void lc_error_init(lc_error *error);
  * Accepts `NULL` and an already-zeroed error.
  */
 void lc_error_cleanup(lc_error *error);
+/**
+ * Replaces `error` with an owned diagnostic and returns `code`.
+ *
+ * All supplied strings are copied, so callback implementations may pass
+ * transient storage. `error` may be `NULL` when only the status is needed.
+ */
+int lc_error_set(lc_error *error, int code, long http_status,
+                 const char *message, const char *detail,
+                 const char *server_code, const char *correlation_id);
 /**
  * Mints a sortable, rs/xid-compatible identifier into `out`.
  *
@@ -2942,16 +3349,22 @@ void lc_consumer_restart_policy_init(lc_consumer_restart_policy *policy);
 void lc_consumer_config_init(lc_consumer_config *config);
 /** Initializes a consumer service config to all-zero/empty values. */
 void lc_consumer_service_config_init(lc_consumer_service_config *config);
-/** Initializes an inbox/outbox workflow config to all-zero/empty values. */
-void lc_workflow_config_init(lc_workflow_config *config);
+/** Initializes a history-consumer config with a zero acknowledgement. */
+void lc_history_consumer_config_init(lc_history_consumer_config *config);
+/** Initializes an inbox/outbox config to all-zero/empty values. */
+void lc_outbox_config_init(lc_outbox_config *config);
+/** Clears an outbox commit result without releasing any prior contents. */
+void lc_outbox_commit_result_init(lc_outbox_commit_result *result);
+/** Releases every receipt owned by an outbox commit result. */
+void lc_outbox_commit_result_cleanup(lc_outbox_commit_result *result);
 /** Initializes a dead-letter export request to JSON with the default bound. */
 void lc_dead_letter_export_opts_init(lc_dead_letter_export_opts *options);
 /** Clears a dead-letter export result to zero records. */
 void lc_dead_letter_export_res_init(lc_dead_letter_export_res *result);
-/** Clears a workflow observability snapshot to zero/empty values. */
-void lc_workflow_stats_init(lc_workflow_stats *stats);
-/** Releases strings owned by a workflow observability snapshot. */
-void lc_workflow_stats_cleanup(lc_workflow_stats *stats);
+/** Clears an outbox observability snapshot to zero/empty values. */
+void lc_outbox_stats_init(lc_outbox_stats *stats);
+/** Releases strings owned by an outbox observability snapshot. */
+void lc_outbox_stats_cleanup(lc_outbox_stats *stats);
 /** Initializes an outbox envelope request to all-zero/empty values. */
 void lc_outbox_entry_init(lc_outbox_entry *entry);
 /** Initializes an inbox identity request to all-zero/empty values. */
@@ -2970,9 +3383,8 @@ void lc_command_receipt_cleanup(lc_command_receipt *receipt);
 void lc_outbox_completion_init(lc_outbox_completion *completion);
 /** Clears a retry request so policy chooses its delay and no diagnostic. */
 void lc_outbox_retry_init(lc_outbox_retry *request);
-/** Initializes a workflow participant request to all-zero/empty values. */
-void lc_workflow_participant_request_init(
-    lc_workflow_participant_request *request);
+/** Initializes an outbox participant request to all-zero/empty values. */
+void lc_outbox_participant_request_init(lc_outbox_participant_request *request);
 /** Initializes an outbox receipt to all-zero/empty values. */
 void lc_outbox_receipt_init(lc_outbox_receipt *receipt);
 /** Releases strings owned by an outbox receipt. */
@@ -3155,6 +3567,14 @@ int lc_pouch_crypto_generate_key_file(const char *path, int overwrite,
 void lc_client_close(lc_client *client);
 /** Closes and frees a lease handle. Accepts `NULL`. */
 void lc_lease_close(lc_lease *lease);
+/**
+ * Returns an independently closable copy of a non-staged lease, or `NULL`.
+ *
+ * A `NULL` source, an exhausted allocator, or a transaction-staged lease
+ * returns `NULL`; staged leases remain exclusively owned by their outbox
+ * transaction and cannot be cloned.
+ */
+lc_lease *lc_lease_clone(const lc_lease *lease);
 /** Closes and frees a message handle. Accepts `NULL`. */
 void lc_message_close(lc_message *message);
 /** Closes and frees a source. Accepts `NULL`. */
@@ -3256,6 +3676,16 @@ int lc_describe(lc_client *client, const lc_describe_req *req,
 int lc_get(lc_client *client, const char *key, const lc_get_opts *opts,
            lc_sink *dst, lc_get_res *out, lc_error *error);
 /**
+ * Streams a state document from an explicit namespace into `dst`.
+ *
+ * This is the namespace-aware counterpart to `lc_get()`. It is useful for
+ * component records that deliberately live outside the client's default
+ * namespace. `ns` must be nonempty.
+ */
+int lc_get_in_namespace(lc_client *client, const char *ns, const char *key,
+                        const lc_get_opts *opts, lc_sink *dst, lc_get_res *out,
+                        lc_error *error);
+/**
  * Parses state into a caller-provided struct through a lonejson map.
  *
  * Ordinary mapped fields are materialized. Spool-backed lonejson fields may
@@ -3271,8 +3701,8 @@ int lc_load(lc_client *client, const char *key, const lonejson_map *map,
  * component records that deliberately live outside the client's default
  * namespace.
  */
-int lc_load_in_namespace(lc_client *client, const char *namespace_name,
-                         const char *key, const lonejson_map *map, void *dst,
+int lc_load_in_namespace(lc_client *client, const char *ns, const char *key,
+                         const lonejson_map *map, void *dst,
                          const lc_get_opts *opts, lc_get_res *out,
                          lc_error *error);
 /** Updates an existing, credentialed lease reference from a streamed source. */
@@ -3428,14 +3858,22 @@ int lc_subscribe_with_state(lc_client *client, const lc_dequeue_req *req,
 int lc_client_new_consumer_service(lc_client *client,
                                    const lc_consumer_service_config *config,
                                    lc_consumer_service **out, lc_error *error);
-/**
- * Creates an inbox/outbox workflow owned by this client.
- *
- * The returned workflow owns a private dispatcher thread; close it to join
- * that thread and release its retained client session.
+/** Creates a threadless inbox/outbox producer; clears `*out` on error.
  */
-int lc_client_new_workflow(lc_client *client, const lc_workflow_config *config,
-                           lc_workflow **out, lc_error *error);
+int lc_client_new_outbox(lc_client *client, const lc_outbox_config *config,
+                         lc_outbox **out, lc_error *error);
+/**
+ * Creates a threadless outbox attached to a compatible explicit dispatcher.
+ * Clears `*out` on error.
+ */
+int lc_client_new_outbox_with_dispatcher(lc_client *client,
+                                         const lc_outbox_config *config,
+                                         lc_outbox_dispatcher *dispatcher,
+                                         lc_outbox **out, lc_error *error);
+/** Opens a durable Pouch history-retention consumer. */
+int lc_client_new_history_consumer(lc_client *client,
+                                   const lc_history_consumer_config *config,
+                                   lc_history_consumer **out, lc_error *error);
 /** Watches queue depth changes with a streaming watch callback. */
 int lc_watch_queue(lc_client *client, const lc_watch_queue_req *req,
                    const lc_watch_handler *handler, lc_error *error);
@@ -3507,7 +3945,13 @@ int lc_message_nack(lc_message *message, const lc_nack_req *req,
 /** Extends visibility for a bound message without closing it. */
 int lc_message_extend(lc_message *message, const lc_extend_req *req,
                       lc_error *error);
-/** Returns the state lease associated with a bound message, if any. */
+/**
+ * Returns the state lease associated with a bound message, if any.
+ *
+ * The returned lease is borrowed from `message` and is invalid after a
+ * successful message terminal operation or `lc_message_close()`. Use
+ * `lc_lease_clone()` before retaining a non-staged view independently.
+ */
 lc_lease *lc_message_state(lc_message *message);
 /**
  * Returns the payload reader owned by the message handle.
@@ -3542,80 +3986,151 @@ void lc_consumer_service_close(lc_consumer_service *service);
  *
  * On a matching existing effect, including `entry->payload_digest`, succeeds
  * with `*out_txn == NULL` and `receipt->duplicate` set. The caller owns and
- * must close a returned transaction.
+ * must close a returned transaction. The payload source may close `outbox`
+ * safely; this call then returns `LC_ERR_INVALID` with no transaction.
  */
-int lc_workflow_append_outbox(lc_workflow *workflow,
-                              const lc_outbox_entry *entry, lc_source *payload,
-                              lc_workflow_transaction **out_txn,
-                              lc_outbox_receipt *receipt, lc_error *error);
+int lc_outbox_append(lc_outbox *outbox, const lc_outbox_entry *entry,
+                     lc_source *payload, lc_outbox_transaction **out_txn,
+                     lc_outbox_receipt *receipt, lc_error *error);
 /**
  * Creates one durable inbox receipt and its transaction.
  *
  * On a matching existing message, succeeds with `*out_txn == NULL` and
  * `result->duplicate` set.
  */
-int lc_workflow_accept_inbox(lc_workflow *workflow,
-                             const lc_inbox_message *message,
-                             lc_workflow_transaction **out_txn,
-                             lc_inbox_accept_result *result, lc_error *error);
+int lc_outbox_accept_inbox(lc_outbox *outbox, const lc_inbox_message *message,
+                           lc_outbox_transaction **out_txn,
+                           lc_inbox_accept_result *result, lc_error *error);
 /**
  * Accepts an idempotent command and starts a transaction for a fresh receipt.
  *
  * A matching receipt succeeds with `*out_txn == NULL` and
  * `receipt->duplicate` set.
  */
-int lc_workflow_accept_command(lc_workflow *workflow,
-                               const lc_command_request *request,
-                               lc_workflow_transaction **out_txn,
-                               lc_command_receipt *receipt, lc_error *error);
+int lc_outbox_accept_command(lc_outbox *outbox,
+                             const lc_command_request *request,
+                             lc_outbox_transaction **out_txn,
+                             lc_command_receipt *receipt, lc_error *error);
 /** Reads a durable command receipt without claiming or resuming work. */
-int lc_workflow_get_command_receipt(lc_workflow *workflow,
-                                    const lc_command_identity *identity,
-                                    lc_command_receipt *out, lc_error *error);
-/** Streams a completed command result attachment into `dst`, if it exists. */
-int lc_workflow_write_command_result(lc_workflow *workflow,
-                                     const lc_command_identity *identity,
-                                     lc_sink *dst, size_t *written,
-                                     lc_error *error);
+int lc_outbox_get_command_receipt(lc_outbox *outbox,
+                                  const lc_command_identity *identity,
+                                  lc_command_receipt *out, lc_error *error);
+/** Reads a durable command receipt by its component-generated command id. */
+int lc_outbox_get_command_receipt_by_id(lc_outbox *outbox,
+                                        const char *command_id,
+                                        lc_command_receipt *out,
+                                        lc_error *error);
+/**
+ * Waits for a command receipt to become terminal without performing dispatch.
+ * `timeout_ms` is zero for one read, `-1` for no deadline, or positive for a
+ * monotonic deadline that also bounds each remote receipt read. A timeout
+ * returns `LC_ERR_TIMEOUT` and the latest pending receipt in `out`.
+ */
+int lc_outbox_wait_command(lc_outbox *outbox, const char *command_id,
+                           long timeout_ms, lc_command_receipt *out,
+                           lc_error *error);
+/**
+ * Streams a completed command result attachment into `dst`, if it exists.
+ * The sink may close `outbox` safely; it becomes unusable after the call.
+ */
+int lc_outbox_write_command_result(lc_outbox *outbox,
+                                   const lc_command_identity *identity,
+                                   lc_sink *dst, size_t *written,
+                                   lc_error *error);
 /**
  * Starts a transaction for a pending command receipt.
  *
  * A terminal receipt succeeds with `*out_txn == NULL` and is never reopened.
  */
-int lc_workflow_resume_command(lc_workflow *workflow,
-                               const lc_command_identity *identity,
-                               lc_workflow_transaction **out_txn,
-                               lc_command_receipt *receipt, lc_error *error);
-/**
- * Waits for one claimed outbox job.
- *
- * `timeout_ms == 0` only checks ready work and `-1` waits indefinitely; other
- * negative values are invalid.
+int lc_outbox_resume_command(lc_outbox *outbox,
+                             const lc_command_identity *identity,
+                             lc_outbox_transaction **out_txn,
+                             lc_command_receipt *receipt, lc_error *error);
+/** Resumes a pending command by component-generated command id. */
+int lc_outbox_resume_command_by_id(lc_outbox *outbox, const char *command_id,
+                                   lc_outbox_transaction **out_txn,
+                                   lc_command_receipt *receipt,
+                                   lc_error *error);
+/** Creates a lazy outbox transaction with no durable marker until use. */
+int lc_outbox_begin(lc_outbox *outbox, lc_outbox_transaction **out,
+                    lc_error *error);
+/** Obtains the one compatible explicit dispatcher and clears `*out` on error.
  */
-int lc_workflow_next(lc_workflow *workflow, long timeout_ms,
-                     lc_outbox_job **out, lc_error *error);
-/** Returns a cheap process-local dispatcher observability snapshot. */
-int lc_workflow_get_stats(lc_workflow *workflow, lc_workflow_stats *out,
-                          lc_error *error);
-/** Requests asynchronous durable reconciliation and returns immediately. */
-int lc_workflow_reconcile(lc_workflow *workflow, lc_error *error);
-/** Returns one dead-lettered outbox effect to pending and signals dispatch. */
-int lc_workflow_replay_dead_letter(lc_workflow *workflow,
-                                   const char *outbox_key, lc_error *error);
+int lc_outbox_dispatcher_get_or_start(lc_outbox *outbox,
+                                      lc_outbox_dispatcher **out,
+                                      lc_error *error);
+/**
+ * Releases a threadless outbox producer and its dispatcher reference.
+ * It never stops that dispatcher.
+ */
+void lc_outbox_close(lc_outbox *outbox);
+/**
+ * Waits for, claims, and returns one job on explicit consumer demand.
+ *
+ * `timeout_ms == 0` only checks immediately available in-memory work and never
+ * starts a recovery query. `-1` waits indefinitely; other negative values are
+ * invalid.
+ */
+int lc_outbox_dispatcher_next(lc_outbox_dispatcher *dispatcher, long timeout_ms,
+                              lc_outbox_job **out, lc_error *error);
+/**
+ * Waits for and claims one stateful outbox job on explicit consumer demand.
+ *
+ * `timeout_ms == 0` only checks immediately available in-memory work and never
+ * starts recovery. A Pouch stateful pull may first reclaim one durably named
+ * completed checkpoint; that bounded operation never scans or queries a
+ * namespace. `-1` waits indefinitely; other negative values are invalid.
+ * On failure `*out` is cleared and no partial claim is handed to the caller.
+ * Stateful delivery currently requires a Pouch client; unsupported backends
+ * return `LC_ERR_INVALID` rather than silently returning a stateless job.
+ */
+int lc_outbox_dispatcher_next_with_state(lc_outbox_dispatcher *dispatcher,
+                                         long timeout_ms, lc_outbox_job **out,
+                                         lc_error *error);
+/** Copies a committed outbox key into the dispatcher's bounded wake queue. */
+int lc_outbox_dispatcher_notify_outbox_key(lc_outbox_dispatcher *dispatcher,
+                                           const char *outbox_key,
+                                           lc_error *error);
+/** Returns a cheap dispatcher-local observability snapshot. */
+int lc_outbox_dispatcher_get_stats(lc_outbox_dispatcher *dispatcher,
+                                   lc_outbox_stats *out, lc_error *error);
+/** Requests asynchronous bounded durable reconciliation. */
+int lc_outbox_dispatcher_reconcile(lc_outbox_dispatcher *dispatcher,
+                                   lc_error *error);
+/** Returns one dead-lettered effect to pending and signals dispatch. */
+int lc_outbox_dispatcher_replay_dead_letter(lc_outbox_dispatcher *dispatcher,
+                                            const char *outbox_key,
+                                            lc_error *error);
 /** Permanently deletes one dead-lettered effect and its payload attachment. */
-int lc_workflow_delete_dead_letter(lc_workflow *workflow,
-                                   const char *outbox_key, lc_error *error);
+int lc_outbox_dispatcher_delete_dead_letter(lc_outbox_dispatcher *dispatcher,
+                                            const char *outbox_key,
+                                            lc_error *error);
 /** Streams selected dead-letter envelopes as JSON or JSONL; never payloads. */
-int lc_workflow_export_dead_letters(lc_workflow *workflow,
-                                    const lc_dead_letter_export_opts *options,
-                                    lc_sink *dst,
-                                    lc_dead_letter_export_res *out,
-                                    lc_error *error);
-/** Stops and joins the private dispatcher, then releases the workflow. */
-void lc_workflow_close(lc_workflow *workflow);
-/** Streams the immutable payload of a claimed outbox job into `dst`. */
+int lc_outbox_dispatcher_export_dead_letters(
+    lc_outbox_dispatcher *dispatcher, const lc_dead_letter_export_opts *options,
+    lc_sink *dst, lc_dead_letter_export_res *out, lc_error *error);
+/** Requests stop and waits up to `deadline_ms` for dispatcher infrastructure.
+ */
+int lc_outbox_dispatcher_stop(lc_outbox_dispatcher *dispatcher,
+                              long deadline_ms, lc_error *error);
+/** Waits up to `deadline_ms` for an already requested dispatcher stop. */
+int lc_outbox_dispatcher_wait(lc_outbox_dispatcher *dispatcher,
+                              long deadline_ms, lc_error *error);
+/** Releases one dispatcher handle reference without stopping it. */
+void lc_outbox_dispatcher_close(lc_outbox_dispatcher *dispatcher);
+/**
+ * Streams the immutable payload of a claimed outbox job into `dst`.
+ * The sink may close `job` safely; it becomes unusable after the call.
+ */
 int lc_outbox_job_write_payload(lc_outbox_job *job, lc_sink *dst,
                                 size_t *written, lc_error *error);
+/**
+ * Returns the borrowed Pouch state lease for a stateful outbox job, or `NULL`.
+ * The job owns this handle; do not close it independently. Successful state
+ * and attachment mutations are immediately durable under the paired lease's
+ * fencing precondition, including when the job later expires.
+ */
+lc_lease *lc_outbox_job_state(lc_outbox_job *job);
 /** Extends a claimed outbox job before a longer foreign operation. */
 int lc_outbox_job_renew(lc_outbox_job *job, long ttl_seconds, lc_error *error);
 /**
@@ -3643,44 +4158,119 @@ int lc_outbox_job_dead_letter(lc_outbox_job *job, const char *diagnostic,
 /** Releases a local outbox-job handle without a terminal transition. */
 void lc_outbox_job_close(lc_outbox_job *job);
 /** Acquires a non-terminal domain participant under the transaction's xid. */
-int lc_workflow_transaction_acquire(
-    lc_workflow_transaction *transaction,
-    const lc_workflow_participant_request *request,
-    lc_workflow_participant **out, lc_error *error);
+int lc_outbox_transaction_acquire(lc_outbox_transaction *transaction,
+                                  const lc_outbox_participant_request *request,
+                                  lc_outbox_participant **out, lc_error *error);
 /**
  * Stages one immutable outbox effect and its payload in a transaction.
  * `entry->payload_digest` must bind the exact payload bytes without requiring
  * liblockdc to pre-read the source.
  */
-int lc_workflow_transaction_append_outbox(lc_workflow_transaction *transaction,
-                                          const lc_outbox_entry *entry,
-                                          lc_source *payload,
-                                          lc_outbox_receipt *out,
-                                          lc_error *error);
+int lc_outbox_transaction_append(lc_outbox_transaction *transaction,
+                                 const lc_outbox_entry *entry,
+                                 lc_source *payload, lc_outbox_receipt *out,
+                                 lc_error *error);
 /** Accepts the transaction's one durable command receipt. */
-int lc_workflow_transaction_accept_command(lc_workflow_transaction *transaction,
-                                           const lc_command_request *request,
-                                           lc_command_receipt *receipt,
-                                           lc_error *error);
-/** Completes the transaction's owned pending command. */
-int lc_workflow_transaction_complete_command(
-    lc_workflow_transaction *transaction, const lc_command_result *result,
-    lc_error *error);
-/** Fails the transaction's owned pending command. */
-int lc_workflow_transaction_fail_command(lc_workflow_transaction *transaction,
-                                         const lc_command_result *result,
+int lc_outbox_transaction_accept_command(lc_outbox_transaction *transaction,
+                                         const lc_command_request *request,
+                                         lc_command_receipt *receipt,
                                          lc_error *error);
+/** Accepts one durable inbox receipt through an open outbox transaction. */
+int lc_outbox_transaction_accept_inbox(lc_outbox_transaction *transaction,
+                                       const lc_inbox_message *message,
+                                       lc_inbox_accept_result *result,
+                                       lc_error *error);
+/** Completes the transaction's owned pending command. */
+int lc_outbox_transaction_complete_command(lc_outbox_transaction *transaction,
+                                           const lc_command_result *result,
+                                           lc_error *error);
+/** Fails the transaction's owned pending command. */
+int lc_outbox_transaction_fail_command(lc_outbox_transaction *transaction,
+                                       const lc_command_result *result,
+                                       lc_error *error);
 /** Commits all enrolled participants and consumes their lease handles.
  * Returns an error when the endpoint durably rolls the transaction back. */
-int lc_workflow_transaction_commit(lc_workflow_transaction *transaction,
-                                   lc_error *error);
+int lc_outbox_transaction_commit(lc_outbox_transaction *transaction,
+                                 lc_outbox_commit_result *out, lc_error *error);
 /** Rolls back all enrolled participants and consumes their lease handles. */
-int lc_workflow_transaction_rollback(lc_workflow_transaction *transaction,
-                                     lc_error *error);
+int lc_outbox_transaction_rollback(lc_outbox_transaction *transaction,
+                                   lc_error *error);
 /** Best-effort rolls back an undecided transaction, then releases its wrapper.
  */
-void lc_workflow_transaction_close(lc_workflow_transaction *transaction);
-/** Releases a workflow participant view; it cannot make a terminal decision. */
-void lc_workflow_participant_close(lc_workflow_participant *participant);
+void lc_outbox_transaction_close(lc_outbox_transaction *transaction);
+/** Refreshes the staged lease snapshot exposed by an outbox participant. */
+int lc_outbox_participant_describe(lc_outbox_participant *participant,
+                                   lc_error *error);
+/** Streams the participant's staged state into `dst`. */
+int lc_outbox_participant_get(lc_outbox_participant *participant, lc_sink *dst,
+                              const lc_get_opts *opts, lc_get_res *out,
+                              lc_error *error);
+/** Streams and stages a replacement state for an outbox participant. */
+int lc_outbox_participant_update(lc_outbox_participant *participant,
+                                 lc_source *src, const lc_update_opts *opts,
+                                 lc_error *error);
+/** Applies a staged server-side mutation for an outbox participant. */
+int lc_outbox_participant_mutate(lc_outbox_participant *participant,
+                                 const lc_mutate_req *req, lc_error *error);
+/** Applies a staged client-side mutation for an outbox participant. */
+int lc_outbox_participant_mutate_local(lc_outbox_participant *participant,
+                                       const lc_mutate_local_req *req,
+                                       lc_error *error);
+/** Stages metadata changes for an outbox participant. */
+int lc_outbox_participant_metadata(lc_outbox_participant *participant,
+                                   const lc_metadata_req *req, lc_error *error);
+/** Stages removal of an outbox participant's state. */
+int lc_outbox_participant_remove(lc_outbox_participant *participant,
+                                 const lc_remove_req *req, lc_error *error);
+/** Extends the underlying lease while retaining the open transaction. */
+int lc_outbox_participant_keepalive(lc_outbox_participant *participant,
+                                    const lc_keepalive_req *req,
+                                    lc_error *error);
+/** Streams and stages one outbox-participant attachment upload. */
+int lc_outbox_participant_attach(lc_outbox_participant *participant,
+                                 const lc_attach_req *req, lc_source *src,
+                                 lc_attach_res *out, lc_error *error);
+/** Lists attachments visible through an outbox participant's staged view. */
+int lc_outbox_participant_list_attachments(lc_outbox_participant *participant,
+                                           lc_attachment_list *out,
+                                           lc_error *error);
+/** Streams an attachment visible through an outbox participant's staged view.
+ */
+int lc_outbox_participant_get_attachment(lc_outbox_participant *participant,
+                                         const lc_attachment_get_req *req,
+                                         lc_sink *dst,
+                                         lc_attachment_get_res *out,
+                                         lc_error *error);
+/** Stages deletion of one attachment from an outbox participant. */
+int lc_outbox_participant_delete_attachment(
+    lc_outbox_participant *participant, const lc_attachment_selector *selector,
+    int *deleted, lc_error *error);
+/** Stages deletion of every attachment from an outbox participant. */
+int lc_outbox_participant_delete_all_attachments(
+    lc_outbox_participant *participant, int *deleted_count, lc_error *error);
+/** Releases an outbox participant view; it cannot make a terminal decision. */
+void lc_outbox_participant_close(lc_outbox_participant *participant);
+/** Reads a history consumer's durable acknowledgement and current sequence. */
+int lc_history_consumer_get_position(lc_history_consumer *consumer,
+                                     lc_history_consumer_position *out,
+                                     lc_error *error);
+/** Durably advances a history consumer's monotonic acknowledgement. */
+int lc_history_consumer_advance(lc_history_consumer *consumer,
+                                lc_index_seq acknowledged_index_seq,
+                                lc_history_consumer_position *out,
+                                lc_error *error);
+/** Removes a history consumer's durable retention pin. */
+int lc_history_consumer_unregister(lc_history_consumer *consumer,
+                                   lc_error *error);
+/** Releases a history-consumer handle without unregistering it. */
+void lc_history_consumer_close(lc_history_consumer *consumer);
+
+#ifdef __cplusplus
+}
+#endif
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
+#endif
 
 #endif

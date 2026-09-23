@@ -33,7 +33,7 @@ typedef struct lc_engine_query_key_stream_bridge {
 } lc_engine_query_key_stream_bridge;
 
 typedef struct lc_engine_query_body_json {
-  char *namespace_name;
+  char *ns;
   lonejson_json_value selector;
   lonejson_int64 limit;
   char *cursor;
@@ -50,8 +50,7 @@ typedef struct lc_engine_query_keys_response_json {
 } lc_engine_query_keys_response_json;
 
 static const lonejson_field lc_engine_query_body_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_query_body_json, namespace_name,
-                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_query_body_json, ns, "namespace"),
     LONEJSON_FIELD_JSON_VALUE_REQ(lc_engine_query_body_json, selector,
                                   "selector"),
     LONEJSON_FIELD_I64(lc_engine_query_body_json, limit, "limit"),
@@ -602,8 +601,7 @@ int lc_engine_client_query_into(lc_engine_client *client,
   state.response = response;
   state.error = error;
   lc_engine_buffer_init(&state.error_body);
-  body_src.namespace_name =
-      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  body_src.ns = (char *)lc_engine_effective_namespace(client, request->ns);
   body_src.limit = request->limit;
   body_src.cursor = (char *)request->cursor;
   body_src.return_mode = (char *)request->return_mode;
@@ -636,7 +634,7 @@ int lc_engine_client_query_into(lc_engine_client *client,
     }
   }
   body_field_count = 0U;
-  if (body_src.namespace_name != NULL && body_src.namespace_name[0] != '\0') {
+  if (body_src.ns != NULL && body_src.ns[0] != '\0') {
     body_fields[body_field_count++] = lc_engine_query_body_fields[0];
   }
   body_fields[body_field_count++] = lc_engine_query_body_fields[1];
@@ -808,8 +806,7 @@ int lc_engine_client_query_keys(lc_engine_client *client,
         error, rc, &lj_error, "failed to configure query metadata capture");
   }
   lc_engine_buffer_init(&state.error_body);
-  body_src.namespace_name =
-      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  body_src.ns = (char *)lc_engine_effective_namespace(client, request->ns);
   body_src.limit = request->limit;
   body_src.cursor = (char *)request->cursor;
   body_src.return_mode = "keys";
@@ -845,7 +842,7 @@ int lc_engine_client_query_keys(lc_engine_client *client,
     }
   }
   body_field_count = 0U;
-  if (body_src.namespace_name != NULL && body_src.namespace_name[0] != '\0') {
+  if (body_src.ns != NULL && body_src.ns[0] != '\0') {
     body_fields[body_field_count++] = lc_engine_query_body_fields[0];
   }
   body_fields[body_field_count++] = lc_engine_query_body_fields[1];

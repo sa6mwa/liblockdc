@@ -29,13 +29,29 @@ file(MAKE_DIRECTORY "${lockdc_verify_work_dir}")
 set(lockdc_expected_artifacts "")
 set(lockdc_expected_checksum_artifacts "")
 set(lockdc_release_version "")
+set(LOCKDC_BOOTLIN_TOOLCHAIN_ROOTS "")
 
 foreach(lockdc_preset IN LISTS lockdc_release_presets)
     set(lockdc_build_dir "${LOCKDC_ROOT}/build/${lockdc_preset}")
     set(lockdc_metadata "${lockdc_build_dir}/package-metadata.cmake")
+    set(lockdc_cache "${lockdc_build_dir}/CMakeCache.txt")
 
     if(NOT EXISTS "${lockdc_metadata}")
         message(FATAL_ERROR "missing package metadata for release preset ${lockdc_preset}: ${lockdc_metadata}")
+    endif()
+    if(NOT EXISTS "${lockdc_cache}")
+        message(FATAL_ERROR "missing CMake cache for release preset ${lockdc_preset}: ${lockdc_cache}")
+    endif()
+
+    file(STRINGS "${lockdc_cache}" lockdc_sysroot_cache_line
+        REGEX "^CMAKE_SYSROOT(:[^=]+)?="
+        LIMIT_COUNT 1)
+    if(lockdc_sysroot_cache_line)
+        string(REGEX REPLACE "^[^=]*=" "" lockdc_sysroot "${lockdc_sysroot_cache_line}")
+        if(NOT lockdc_sysroot STREQUAL "")
+            get_filename_component(lockdc_toolchain_root "${lockdc_sysroot}" DIRECTORY)
+            list(APPEND LOCKDC_BOOTLIN_TOOLCHAIN_ROOTS "${lockdc_toolchain_root}")
+        endif()
     endif()
 
     unset(LOCKDC_VERSION)
@@ -73,6 +89,7 @@ foreach(lockdc_preset IN LISTS lockdc_release_presets)
         "liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}.tar.gz"
     )
 endforeach()
+list(REMOVE_DUPLICATES LOCKDC_BOOTLIN_TOOLCHAIN_ROOTS)
 
 if(lockdc_release_version STREQUAL "")
     message(FATAL_ERROR "no release presets were provided for archive verification")

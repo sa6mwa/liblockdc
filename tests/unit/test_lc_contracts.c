@@ -1,6 +1,7 @@
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -10,6 +11,49 @@
 
 #include "lc/lc.h"
 #include "mock_lc_public.h"
+
+static int test_public_shell_query_keys(lc_client *self,
+                                        const lc_query_req *request,
+                                        const lc_query_key_handler *handler,
+                                        void *context, lc_query_res *result,
+                                        lc_error *error) {
+  int *calls = (int *)context;
+
+  (void)request;
+  (void)handler;
+  (void)error;
+  assert_non_null(self);
+  assert_non_null(calls);
+  assert_non_null(result);
+  ++*calls;
+  memset(result, 0, sizeof(*result));
+  return LC_OK;
+}
+
+static void test_query_keys_accepts_public_receiver_shell(void **state) {
+  lc_client *client;
+  lc_query_req request;
+  lc_query_key_handler handler;
+  lc_query_res result;
+  lc_error error;
+  int calls;
+  int rc;
+
+  (void)state;
+  client = (lc_client *)calloc(1U, sizeof(*client));
+  assert_non_null(client);
+  memset(&request, 0, sizeof(request));
+  memset(&handler, 0, sizeof(handler));
+  memset(&result, 0, sizeof(result));
+  calls = 0;
+  client->query_keys = test_public_shell_query_keys;
+  lc_error_init(&error);
+  rc = lc_query_keys(client, &request, &handler, &calls, &result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(calls, 1);
+  lc_error_cleanup(&error);
+  free(client);
+}
 
 static void test_client_wrappers_delegate_full_public_surface(void **state) {
   lc_public_mock_client client;
@@ -80,12 +124,16 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   lc_dequeue_batch_res dequeue_batch_res;
   lc_consumer consumer;
   lc_consumer_service_config consumer_service_config;
+  lc_outbox_config outbox_config;
+  lc_history_consumer_config history_consumer_config;
   lc_watch_queue_req watch_queue_req;
   lc_watch_handler watch_handler;
   lc_source source_for_update;
   lc_lease *lease_out;
   lc_message *message_out;
   lc_consumer_service *service_out;
+  lc_outbox *outbox_out;
+  lc_history_consumer *history_consumer_out;
   int deleted;
   int deleted_count;
   int rc;
@@ -161,6 +209,8 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   memset(&dequeue_batch_res, 0, sizeof(dequeue_batch_res));
   memset(&consumer, 0, sizeof(consumer));
   memset(&consumer_service_config, 0, sizeof(consumer_service_config));
+  memset(&outbox_config, 0, sizeof(outbox_config));
+  memset(&history_consumer_config, 0, sizeof(history_consumer_config));
   memset(&watch_queue_req, 0, sizeof(watch_queue_req));
   memset(&watch_handler, 0, sizeof(watch_handler));
   lc_error_init(&error);
@@ -171,6 +221,8 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   lease_out = NULL;
   message_out = NULL;
   service_out = NULL;
+  outbox_out = NULL;
+  history_consumer_out = NULL;
   deleted = 0;
   deleted_count = 0;
 
@@ -179,6 +231,9 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   assert_ptr_equal(lease_out, &lease.pub);
   assert_int_equal(client.acquire_call.count, 1);
 
+  rc = lc_acquire_for_update(&client.pub, &acquire_req, NULL, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+
   rc = lc_describe(&client.pub, &describe_req, NULL, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(client.describe_call.count, 1);
@@ -186,6 +241,13 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   rc = lc_get(&client.pub, "key-1", &get_opts, &sink.pub, &get_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_ptr_equal(client.get_call.arg2, "key-1");
+
+  rc = lc_get_in_namespace(&client.pub, "component", "key-namespace", &get_opts,
+                           &sink.pub, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(client.get_in_namespace_call.count, 1);
+  assert_ptr_equal(client.get_in_namespace_call.arg2, "component");
+  assert_ptr_equal(client.get_in_namespace_call.arg3, "key-namespace");
 
   rc = lc_load(&client.pub, "key-2", NULL, NULL, &get_opts, &get_res, &error);
   assert_int_equal(rc, LC_OK);
@@ -301,12 +363,23 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
                                       &service_out, &error);
   assert_int_equal(rc, LC_OK);
   assert_ptr_equal(service_out, &service.pub);
+  rc = lc_client_new_outbox(&client.pub, &outbox_config, &outbox_out, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_client_new_outbox_with_dispatcher(&client.pub, &outbox_config, NULL,
+                                            &outbox_out, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_client_new_history_consumer(&client.pub, &history_consumer_config,
+                                      &history_consumer_out, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(client.new_history_consumer_call.count, 1);
   rc = lc_watch_queue(&client.pub, &watch_queue_req, &watch_handler, &error);
   assert_int_equal(rc, LC_OK);
 
   assert_int_equal(client.acquire_call.count, 1);
+  assert_int_equal(client.acquire_for_update_call.count, 1);
   assert_int_equal(client.describe_call.count, 1);
   assert_int_equal(client.get_call.count, 1);
+  assert_int_equal(client.get_in_namespace_call.count, 1);
   assert_int_equal(client.load_call.count, 1);
   assert_int_equal(client.load_in_namespace_call.count, 1);
   assert_int_equal(client.update_call.count, 1);
@@ -350,10 +423,136 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   assert_int_equal(client.subscribe_call.count, 1);
   assert_int_equal(client.subscribe_with_state_call.count, 1);
   assert_int_equal(client.new_consumer_service_call.count, 1);
+  assert_int_equal(client.new_outbox_call.count, 1);
+  assert_int_equal(client.new_outbox_with_dispatcher_call.count, 1);
+  assert_int_equal(client.new_history_consumer_call.count, 1);
   assert_int_equal(client.watch_queue_call.count, 1);
 
   lc_client_close(&client.pub);
   assert_int_equal(client.close_calls, 1);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_outbox_participant_and_history_wrappers_delegate_full_public_surface(
+    void **state) {
+  lc_public_mock_outbox_participant participant;
+  lc_public_mock_history_consumer history;
+  lc_public_mock_source source;
+  lc_public_mock_sink sink;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  lc_update_opts update_opts;
+  lc_mutate_req mutate_req;
+  lc_mutate_local_req mutate_local_req;
+  lc_metadata_req metadata_req;
+  lc_remove_req remove_req;
+  lc_keepalive_req keepalive_req;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_attachment_list attachment_list;
+  lc_attachment_get_req attachment_get_req;
+  lc_attachment_get_res attachment_get_res;
+  lc_attachment_selector attachment_selector;
+  lc_history_consumer_position history_position;
+  lc_error error;
+  int deleted;
+  int deleted_count;
+  int rc;
+
+  (void)state;
+  lc_public_mock_outbox_participant_init(&participant);
+  lc_public_mock_history_consumer_init(&history);
+  lc_public_mock_source_init(&source);
+  lc_public_mock_sink_init(&sink);
+  memset(&get_opts, 0, sizeof(get_opts));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&update_opts, 0, sizeof(update_opts));
+  memset(&mutate_req, 0, sizeof(mutate_req));
+  memset(&mutate_local_req, 0, sizeof(mutate_local_req));
+  memset(&metadata_req, 0, sizeof(metadata_req));
+  memset(&remove_req, 0, sizeof(remove_req));
+  memset(&keepalive_req, 0, sizeof(keepalive_req));
+  memset(&attach_req, 0, sizeof(attach_req));
+  memset(&attach_res, 0, sizeof(attach_res));
+  memset(&attachment_list, 0, sizeof(attachment_list));
+  memset(&attachment_get_req, 0, sizeof(attachment_get_req));
+  memset(&attachment_get_res, 0, sizeof(attachment_get_res));
+  memset(&attachment_selector, 0, sizeof(attachment_selector));
+  memset(&history_position, 0, sizeof(history_position));
+  lc_error_init(&error);
+  deleted = 0;
+  deleted_count = 0;
+
+  rc = lc_outbox_participant_describe(&participant.pub, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_outbox_participant_get(&participant.pub, &sink.pub, &get_opts,
+                                 &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_outbox_participant_update(&participant.pub, &source.pub, &update_opts,
+                                    &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_outbox_participant_mutate(&participant.pub, &mutate_req, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_outbox_participant_mutate_local(&participant.pub, &mutate_local_req,
+                                          &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_outbox_participant_metadata(&participant.pub, &metadata_req, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_outbox_participant_remove(&participant.pub, &remove_req, &error);
+  assert_int_equal(rc, LC_OK);
+  rc =
+      lc_outbox_participant_keepalive(&participant.pub, &keepalive_req, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_outbox_participant_attach(&participant.pub, &attach_req, &source.pub,
+                                    &attach_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_outbox_participant_list_attachments(&participant.pub,
+                                              &attachment_list, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_outbox_participant_get_attachment(&participant.pub,
+                                            &attachment_get_req, &sink.pub,
+                                            &attachment_get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_outbox_participant_delete_attachment(
+      &participant.pub, &attachment_selector, &deleted, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(deleted, 1);
+  rc = lc_outbox_participant_delete_all_attachments(&participant.pub,
+                                                    &deleted_count, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(deleted_count, 2);
+
+  assert_int_equal(participant.describe_call.count, 1);
+  assert_int_equal(participant.get_call.count, 1);
+  assert_int_equal(participant.update_call.count, 1);
+  assert_int_equal(participant.mutate_call.count, 1);
+  assert_int_equal(participant.mutate_local_call.count, 1);
+  assert_int_equal(participant.metadata_call.count, 1);
+  assert_int_equal(participant.remove_call.count, 1);
+  assert_int_equal(participant.keepalive_call.count, 1);
+  assert_int_equal(participant.attach_call.count, 1);
+  assert_int_equal(participant.list_attachments_call.count, 1);
+  assert_int_equal(participant.get_attachment_call.count, 1);
+  assert_int_equal(participant.delete_attachment_call.count, 1);
+  assert_int_equal(participant.delete_all_attachments_call.count, 1);
+  lc_outbox_participant_close(&participant.pub);
+  assert_int_equal(participant.close_calls, 1);
+
+  rc =
+      lc_history_consumer_get_position(&history.pub, &history_position, &error);
+  assert_int_equal(rc, LC_OK);
+  rc =
+      lc_history_consumer_advance(&history.pub, 42U, &history_position, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_history_consumer_unregister(&history.pub, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(history.position_call.count, 1);
+  assert_int_equal(history.advance_call.count, 1);
+  assert_int_equal(history.acknowledged_index_seq, 42U);
+  assert_int_equal(history.unregister_call.count, 1);
+  lc_history_consumer_close(&history.pub);
+  assert_int_equal(history.close_calls, 1);
   lc_error_cleanup(&error);
 }
 
@@ -403,6 +602,14 @@ static void test_public_struct_layout_preserves_stable_prefixes(void **state) {
                        sizeof(((lc_client *)0)->query));
   assert_true(offsetof(lc_client, query_keys) >
               offsetof(lc_client, acquire_for_update));
+  assert_true(offsetof(lc_client, new_history_consumer) >
+              offsetof(lc_client, query_keys));
+  assert_true(offsetof(lc_client, get_in_namespace) >
+              offsetof(lc_client, new_history_consumer));
+  assert_true(offsetof(lc_client, reserved_extension_slots) >
+              offsetof(lc_client, get_in_namespace));
+  assert_int_equal(sizeof(((lc_client *)0)->reserved_extension_slots),
+                   7U * sizeof(void *));
 }
 
 static void test_lease_wrappers_delegate_full_public_surface(void **state) {
@@ -604,6 +811,35 @@ static void test_stream_close_wrappers_delegate(void **state) {
   assert_int_equal(sink.close_calls, 1);
 }
 
+static void test_error_set_copies_callback_diagnostics(void **state) {
+  lc_error error;
+  char message[] = "callback failed";
+  char detail[] = "request body";
+  char server_code[] = "callback_failure";
+  char correlation_id[] = "cid-1";
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  rc = lc_error_set(&error, LC_ERR_PROTOCOL, 503L, message, detail, server_code,
+                    correlation_id);
+  assert_int_equal(rc, LC_ERR_PROTOCOL);
+  message[0] = 'X';
+  detail[0] = 'X';
+  server_code[0] = 'X';
+  correlation_id[0] = 'X';
+  assert_int_equal(error.code, LC_ERR_PROTOCOL);
+  assert_int_equal(error.http_status, 503L);
+  assert_string_equal(error.message, "callback failed");
+  assert_string_equal(error.detail, "request body");
+  assert_string_equal(error.server_code, "callback_failure");
+  assert_string_equal(error.correlation_id, "cid-1");
+  assert_int_equal(
+      lc_error_set(NULL, LC_ERR_INVALID, 0L, NULL, NULL, NULL, NULL),
+      LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+}
+
 static void test_xid_new_mints_canonical_unique_identifiers(void **state) {
   char first[LC_XID_STRING_SIZE];
   char second[LC_XID_STRING_SIZE];
@@ -709,12 +945,16 @@ static void test_xid_new_refreshes_state_after_fork(void **state) {
 
 int main(void) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test(test_query_keys_accepts_public_receiver_shell),
       cmocka_unit_test(test_client_wrappers_delegate_full_public_surface),
+      cmocka_unit_test(
+          test_outbox_participant_and_history_wrappers_delegate_full_public_surface),
       cmocka_unit_test(test_public_struct_layout_preserves_stable_prefixes),
       cmocka_unit_test(test_lease_wrappers_delegate_full_public_surface),
       cmocka_unit_test(
           test_message_and_service_wrappers_delegate_full_public_surface),
       cmocka_unit_test(test_stream_close_wrappers_delegate),
+      cmocka_unit_test(test_error_set_copies_callback_diagnostics),
       cmocka_unit_test(test_xid_new_mints_canonical_unique_identifiers),
       cmocka_unit_test(test_xid_new_refreshes_state_after_fork),
   };

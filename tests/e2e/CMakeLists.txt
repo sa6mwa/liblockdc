@@ -33,7 +33,7 @@ function(lc_add_lua_e2e_test test_name script_path)
   if(NOT LUA_E2E_PACKAGE_ONLY AND NOT TARGET lockdc_lua_core)
     return()
   endif()
-  if(NOT LOCKDC_LUA_BIN OR NOT LOCKDC_LUAROCKS_BIN)
+  if(NOT LOCKDC_LUA_RUNNABLE OR NOT LOCKDC_LUAROCKS_BIN)
     return()
   endif()
 
@@ -43,6 +43,7 @@ function(lc_add_lua_e2e_test test_name script_path)
       -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
       -DLOCKDC_TEST_NAME=${test_name}
       -DLOCKDC_LUA_TEST_SCRIPT=${script_path}
+      -DLOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}
   )
   if(LUA_E2E_ENV_OVERRIDES)
     string(REPLACE ";" "|" lua_e2e_env_overrides "${LUA_E2E_ENV_OVERRIDES}")
@@ -75,6 +76,7 @@ endfunction()
 
 lc_add_e2e_shard(lc_e2e_disk_direct LC_E2E_GROUP_DISK_DIRECT)
 lc_add_e2e_shard(lc_e2e_pouch_direct LC_E2E_GROUP_POUCH_DIRECT)
+lc_add_e2e_shard(lc_e2e_pouch_shared_outbox LC_E2E_GROUP_POUCH_SHARED_OUTBOX)
 lc_add_e2e_shard(lc_e2e_s3_direct LC_E2E_GROUP_S3_DIRECT)
 lc_add_e2e_shard(lc_e2e_mem_direct LC_E2E_GROUP_MEM_DIRECT)
 lc_add_e2e_shard(lc_e2e_disk_consumer LC_E2E_GROUP_DISK_CONSUMER)
@@ -173,7 +175,6 @@ if(TARGET lc_example_startconsumer)
   )
 endif()
 
-find_program(LOCKDC_LUA_BIN NAMES lua5.5)
 find_program(LOCKDC_LUAROCKS_BIN NAMES luarocks)
 
 lc_add_lua_e2e_test(
@@ -237,9 +238,71 @@ lc_add_lua_e2e_test(
 )
 
 lc_add_lua_e2e_test(
-  lc_e2e_lua_workflow
-  "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_workflow.lua"
+  lc_e2e_lua_outbox
+  "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_outbox.lua"
   PACKAGE_ONLY
-  POUCH_ROOT "${CMAKE_BINARY_DIR}/lua-pouch-e2e/lc_e2e_lua_workflow"
+  POUCH_ROOT "${CMAKE_BINARY_DIR}/lua-pouch-e2e/lc_e2e_lua_outbox"
 )
+
+if(TARGET lc_example_outbox_producer AND LOCKDC_LUA_RUNNABLE AND
+   LOCKDC_LUAROCKS_BIN)
+  add_test(NAME lc_e2e_outbox_examples
+    COMMAND "${CMAKE_COMMAND}"
+      -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+      -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+      -DLOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}
+      -DLOCKDC_OUTBOX_PRODUCER=$<TARGET_FILE:lc_example_outbox_producer>
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/outbox_examples_test.cmake"
+  )
+  set_tests_properties(lc_e2e_outbox_examples PROPERTIES
+    LABELS "e2e;examples;lua"
+    RUN_SERIAL TRUE
+    TIMEOUT 300
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  )
+endif()
+
+# E2E execution is deliberately isolated from the rest of the local test
+# fleet.  This closure contains every executable a test labelled `e2e` can
+# invoke, so the E2E runner does not build unrelated unit and transport tests.
+set(lockdc_e2e_test_targets
+  lc_e2e_disk_direct
+  lc_e2e_pouch_direct
+  lc_e2e_pouch_shared_outbox
+  lc_e2e_s3_direct
+  lc_e2e_mem_direct
+  lc_e2e_disk_consumer
+  lc_e2e_s3_consumer
+  lc_e2e_mem_consumer
+)
+set(lockdc_e2e_example_candidates
+  lc_example_acquire_lease_lifecycle
+  lc_example_acquire_for_update
+  lc_example_client_and_lease_methods
+  lc_example_management_admin
+  lc_example_curl_fetch_into_lockd
+  lc_example_local_mutate
+  lc_example_startconsumer
+  lc_example_outbox_producer
+)
+set(lockdc_e2e_example_targets)
+foreach(lockdc_e2e_example_target IN LISTS lockdc_e2e_example_candidates)
+  if(TARGET ${lockdc_e2e_example_target})
+    list(APPEND lockdc_e2e_example_targets ${lockdc_e2e_example_target})
+  endif()
+endforeach()
+list(APPEND lockdc_e2e_test_targets ${lockdc_e2e_example_targets})
+if(LOCKDC_LUA_RUNNABLE AND LOCKDC_LUAROCKS_BIN)
+  list(APPEND lockdc_e2e_test_targets lockdc_lua_runner)
+  list(APPEND lockdc_e2e_example_targets lockdc_lua_runner)
+  if(TARGET lockdc_lua_core)
+    list(APPEND lockdc_e2e_test_targets lockdc_lua_core)
+    list(APPEND lockdc_e2e_example_targets lockdc_lua_core)
+  endif()
+  if(TARGET lc_shared)
+    list(APPEND lockdc_e2e_example_targets lc_shared)
+  endif()
+endif()
+add_custom_target(lockdc_e2e_tests DEPENDS ${lockdc_e2e_test_targets})
+add_custom_target(lockdc_e2e_example_tests DEPENDS ${lockdc_e2e_example_targets})
 lc_apply_default_test_timeouts()

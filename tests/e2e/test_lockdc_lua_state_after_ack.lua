@@ -3,14 +3,14 @@ local lockdc = require("lockdc")
 local endpoint = os.getenv("LOCKDC_URL") or "https://localhost:19441"
 local client_pem = os.getenv("LOCKDC_CLIENT_PEM")
   or "./devenv/volumes/lockd-disk-a-config/client.pem"
-local namespace_name = os.getenv("LOCKDC_NAMESPACE") or "default"
+local namespace = os.getenv("LOCKDC_NAMESPACE") or "default"
 local queue = os.getenv("LOCKDC_QUEUE") or "tests-lua-state-after-ack"
 local owner = os.getenv("LOCKDC_OWNER") or "tests-lua-state-after-ack"
 
 local client, err = lockdc.open({
   endpoints = { endpoint },
   client_bundle_source = { path = client_pem },
-  default_namespace = namespace_name,
+  default_namespace = namespace,
 })
 
 if client == nil then
@@ -33,7 +33,7 @@ if enqueued == nil then
 end
 
 local message, dequeue_err = client:dequeue_with_state({
-  namespace_name = namespace_name,
+  namespace = namespace,
   queue = queue,
   owner = owner,
   visibility_timeout_seconds = 30,

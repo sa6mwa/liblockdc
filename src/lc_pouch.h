@@ -37,6 +37,9 @@ typedef struct lc_pouch_open_options {
   uint64_t compaction_interval_seconds;
   uint64_t compaction_delete_grace_seconds;
   uint64_t compaction_max_io_bytes_per_sec;
+  /** Minimum active-segment bytes before a pending terminal transition seals
+   * it for bounded snapshot reclamation. Zero selects the default. */
+  uint64_t terminal_reclaim_min_bytes;
   int background_compaction_enabled;
   /** Distinguishes an explicit compaction setting from the Go-compatible
    * default. */
@@ -44,11 +47,6 @@ typedef struct lc_pouch_open_options {
   /** Leaves compaction IO unlimited instead of using the default 8 MiB/s
    * throttle. */
   int compaction_throttling_disabled;
-  /** Zero disables retention. Positive values delete state older than this
-   * duration. */
-  uint64_t retention_seconds;
-  /** Zero uses the default one-hour retention sweep interval. */
-  uint64_t janitor_interval_seconds;
   /**
    * Selects the writer mode explicitly. When unset, Pouch uses its default
    * exclusive-root writer mode. Set this field before using `single_writer`
@@ -67,6 +65,10 @@ typedef struct lc_pouch_open_options {
   int single_writer;
   const char *query_engine;
   const char *query_fallback_engine;
+  /** Disables local derived query-index maintenance when set to zero. The
+   * default is enabled unless `query_indexing_enabled_set` is nonzero. */
+  int query_indexing_enabled;
+  int query_indexing_enabled_set;
   const char *crypto_key;
   const char *crypto_key_file;
   int crypto_generate_key_file;
@@ -115,11 +117,9 @@ typedef struct lc_pouch_status {
   uint64_t compaction_interval_seconds;
   uint64_t compaction_delete_grace_seconds;
   uint64_t compaction_max_io_bytes_per_sec;
+  uint64_t terminal_reclaim_min_bytes;
   int background_compaction_enabled;
   int compaction_throttling_disabled;
-  uint64_t retention_seconds;
-  uint64_t janitor_interval_seconds;
-  int janitor_running;
   int single_writer;
   int supports_concurrent_writes;
   int aborted;
@@ -132,6 +132,7 @@ typedef struct lc_pouch_status {
   char *queue_watch_reason;
   char *query_engine;
   char *query_fallback_engine;
+  int query_indexing_enabled;
   int crypto_enabled;
   char *crypto_key_file;
   char *compression;
@@ -144,14 +145,20 @@ typedef struct lc_pouch_exclusive_writer_presence {
 } lc_pouch_exclusive_writer_presence;
 
 typedef struct lc_pouch_maintenance_options {
-  const char *namespace_name;
+  const char *ns;
   int force;
   int cleanup_only;
+  /** Requests a snapshot boundary for a pending terminal transition. This is
+   * used by Pouch's background reclaimer; ordinary callers normally leave it
+   * zero and use `force` for explicit full maintenance. */
+  int terminal_reclaim;
+  /** Explicit, namespace-scoped whole-document TTL maintenance. This is never
+   * run automatically by Pouch's background reclaimer. */
   lc_pouch_unix_seconds retention_updated_before_unix;
 } lc_pouch_maintenance_options;
 
 typedef struct lc_pouch_maintenance_result {
-  char *namespace_name;
+  char *ns;
   char *diagnostic;
   unsigned long candidate_segment_count;
   uint64_t candidate_bytes;
@@ -356,28 +363,25 @@ int lc_pouch_maintenance_run(lc_pouch *pouch,
                              lc_pouch_maintenance_result *out, lc_error *error);
 void lc_pouch_maintenance_result_cleanup(const lc_allocator *allocator,
                                          lc_pouch_maintenance_result *result);
-int lc_pouch_ensure_namespace(lc_pouch *pouch, const char *namespace_name,
-                              lc_error *error);
-int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
-                         const char *key, lc_source *body,
+int lc_pouch_ensure_namespace(lc_pouch *pouch, const char *ns, lc_error *error);
+int lc_pouch_state_write(lc_pouch *pouch, const char *ns, const char *key,
+                         lc_source *body,
                          const lc_pouch_state_write_options *options,
                          lc_pouch_state_write_result *out, lc_error *error);
-int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
-                          const char *key,
+int lc_pouch_state_delete(lc_pouch *pouch, const char *ns, const char *key,
                           const lc_pouch_state_write_options *options,
                           lc_pouch_state_write_result *out, lc_error *error);
-int lc_pouch_state_update_metadata(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_state_update_metadata(lc_pouch *pouch, const char *ns,
                                    const char *key,
                                    const lc_pouch_state_write_options *options,
                                    lc_pouch_state_write_result *out,
                                    lc_error *error);
-int lc_pouch_state_stage_write(lc_pouch *pouch, const char *namespace_name,
-                               const char *key, const char *txn_id,
-                               lc_source *body,
+int lc_pouch_state_stage_write(lc_pouch *pouch, const char *ns, const char *key,
+                               const char *txn_id, lc_source *body,
                                const lc_pouch_state_write_options *options,
                                lc_pouch_state_write_result *out,
                                lc_error *error);
-int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *ns,
                                   const char *key, const char *txn_id,
                                   const char *expected_committed_etag,
                                   lc_pouch_state_write_result *out,
@@ -388,11 +392,11 @@ int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
  * completion cannot retain the exclusive indexer guard indefinitely.
  */
 int lc_pouch_state_promote_staged_for_active_operation(
-    lc_pouch *pouch, const char *namespace_name, const char *key,
-    const char *txn_id, const char *expected_committed_etag,
+    lc_pouch *pouch, const char *ns, const char *key, const char *txn_id,
+    const char *expected_committed_etag,
     lc_pouch_unix_seconds operation_expires_at_unix,
     lc_pouch_state_write_result *out, lc_error *error);
-int lc_pouch_state_commit_staged(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_state_commit_staged(lc_pouch *pouch, const char *ns,
                                  const char *key, const char *txn_id,
                                  lc_pouch_state_write_result *out,
                                  lc_error *error);
@@ -400,47 +404,50 @@ int lc_pouch_state_commit_staged(lc_pouch *pouch, const char *namespace_name,
  * public operation's completion with lc_pouch_indexer_note_operation_complete.
  */
 int lc_pouch_state_commit_staged_for_active_operation(
-    lc_pouch *pouch, const char *namespace_name, const char *key,
-    const char *txn_id, lc_pouch_state_write_result *out, lc_error *error);
-int lc_pouch_state_discard_staged(lc_pouch *pouch, const char *namespace_name,
+    lc_pouch *pouch, const char *ns, const char *key, const char *txn_id,
+    lc_pouch_state_write_result *out, lc_error *error);
+int lc_pouch_state_discard_staged(lc_pouch *pouch, const char *ns,
                                   const char *key, const char *txn_id,
                                   int *discarded, lc_error *error);
-int lc_pouch_state_recover_staged_decisions(lc_pouch *pouch,
-                                            const char *namespace_name,
+int lc_pouch_state_recover_staged_decisions(lc_pouch *pouch, const char *ns,
                                             lc_error *error);
 void lc_pouch_state_write_result_cleanup(const lc_allocator *allocator,
                                          lc_pouch_state_write_result *result);
-int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
-                        const char *key, lc_pouch_state_read_result *out,
-                        lc_error *error);
-int lc_pouch_state_copy(lc_pouch *pouch, const char *namespace_name,
-                        const char *key, lc_sink *dst,
+int lc_pouch_state_read(lc_pouch *pouch, const char *ns, const char *key,
                         lc_pouch_state_read_result *out, lc_error *error);
-int lc_pouch_state_read_metadata(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_state_copy(lc_pouch *pouch, const char *ns, const char *key,
+                        lc_sink *dst, lc_pouch_state_read_result *out,
+                        lc_error *error);
+int lc_pouch_state_read_metadata(lc_pouch *pouch, const char *ns,
                                  const char *key,
                                  lc_pouch_state_read_result *out,
                                  lc_error *error);
-int lc_pouch_state_read_many(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_state_read_many(lc_pouch *pouch, const char *ns,
                              const char *const *keys, size_t key_count,
                              lc_pouch_state_read_many_fn visitor, void *context,
                              lc_error *error);
-int lc_pouch_state_read_many_cached(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_state_read_many_cached(lc_pouch *pouch, const char *ns,
                                     const char *const *keys, size_t key_count,
                                     lc_pouch_state_read_many_fn visitor,
                                     void *context, lc_error *error);
-int lc_pouch_state_read_many_metadata(lc_pouch *pouch,
-                                      const char *namespace_name,
+int lc_pouch_state_read_many_metadata(lc_pouch *pouch, const char *ns,
                                       const char *const *keys, size_t key_count,
                                       lc_pouch_state_read_many_fn visitor,
                                       void *context, lc_error *error);
-int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_state_visit(lc_pouch *pouch, const char *ns,
                          lc_pouch_state_visit_fn visitor, void *context,
                          lc_error *error);
-int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
+/* Visits only live keys with `prefix` without snapshotting unrelated records.
+ */
+int lc_pouch_state_visit_prefix(lc_pouch *pouch, const char *ns,
+                                const char *prefix,
+                                lc_pouch_state_visit_fn visitor, void *context,
+                                lc_error *error);
+int lc_pouch_state_index_seq(lc_pouch *pouch, const char *ns,
                              lc_pouch_generation *out, lc_error *error);
 /* Returns the durable sequence that can change indexed query candidates.
  * Lease-only metadata records intentionally do not advance this value. */
-int lc_pouch_state_query_index_seq(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_state_query_index_seq(lc_pouch *pouch, const char *ns,
                                    lc_pouch_generation *out, lc_error *error);
 void lc_pouch_state_read_result_cleanup(const lc_allocator *allocator,
                                         lc_pouch_state_read_result *result);

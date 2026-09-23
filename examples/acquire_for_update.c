@@ -87,7 +87,7 @@ static int update_order(void *context, lc_acquire_for_update_context *af,
 int main(void) {
   const char *endpoint;
   const char *client_pem;
-  const char *namespace_name;
+  const char *ns;
   const char *key;
   const char *owner;
   const char *endpoints[1];
@@ -129,7 +129,7 @@ int main(void) {
 
   endpoint = getenv("LOCKDC_URL");
   client_pem = getenv("LOCKDC_CLIENT_PEM");
-  namespace_name = getenv("LOCKDC_NAMESPACE");
+  ns = getenv("LOCKDC_NAMESPACE");
   key = getenv("LOCKDC_KEY");
   owner = getenv("LOCKDC_OWNER");
   if (endpoint == NULL || endpoint[0] == '\0') {
@@ -138,8 +138,8 @@ int main(void) {
   if (client_pem == NULL || client_pem[0] == '\0') {
     client_pem = EXAMPLE_CLIENT_PEM;
   }
-  if (namespace_name == NULL || namespace_name[0] == '\0') {
-    namespace_name = EXAMPLE_NAMESPACE;
+  if (ns == NULL || ns[0] == '\0') {
+    ns = EXAMPLE_NAMESPACE;
   }
   if (key == NULL || key[0] == '\0') {
     key = EXAMPLE_KEY;
@@ -152,7 +152,7 @@ int main(void) {
   lc_client_config_init(&config);
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
-  config.default_namespace = namespace_name;
+  config.default_namespace = ns;
   config.logger = sdk_logger;
 
   lc_error_init(&error);

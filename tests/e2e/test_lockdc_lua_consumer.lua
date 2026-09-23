@@ -3,14 +3,14 @@ local lockdc = require("lockdc")
 local endpoint = os.getenv("LOCKDC_URL") or "https://localhost:19441"
 local client_pem = os.getenv("LOCKDC_CLIENT_PEM")
   or "./devenv/volumes/lockd-disk-a-config/client.pem"
-local namespace_name = os.getenv("LOCKDC_NAMESPACE") or "default"
+local namespace = os.getenv("LOCKDC_NAMESPACE") or "default"
 local queue = os.getenv("LOCKDC_QUEUE") or "tests-lua-consumer"
 local owner = os.getenv("LOCKDC_OWNER") or "tests-lua-consumer"
 
 local client, err = lockdc.open({
   endpoints = { endpoint },
   client_bundle_source = { path = client_pem },
-  default_namespace = namespace_name,
+  default_namespace = namespace,
 })
 
 if client == nil then
@@ -36,17 +36,17 @@ local handled = 0
 local service
 
 service = client:new_consumer_service({
-  Name = owner,
-  Queue = queue,
-  WithState = true,
-  Options = {
-    namespace_name = namespace_name,
+  name = owner,
+  request = {
+    namespace = namespace,
+    queue = queue,
     owner = owner,
     visibility_timeout_seconds = 30,
     wait_seconds = 5,
   },
-  MessageHandler = function(message, state)
-    local payload, payload_err = message:payload_json()
+  with_state = true,
+  handle = function(message, state)
+    local payload, payload_err = message:read_payload_json()
     local document, meta
 
     if payload == nil then
@@ -56,11 +56,11 @@ service = client:new_consumer_service({
       return { message = "expected consumer state lease" }
     end
 
-    document, meta = state:get_json()
+    document, meta = state:read_json()
     if meta ~= nil and meta.no_content then
       document = {}
     elseif document == nil then
-      return { message = "state:get_json returned nil without no_content metadata" }
+      return { message = "state:read_json returned nil without no_content metadata" }
     end
 
     handled = handled + 1
@@ -80,11 +80,11 @@ service = client:new_consumer_service({
   end,
 })
 
-local ok, service_err = service:start()
+local ok, service_err = service:run()
 
 if ok == nil then
   client:close()
-  error(("service:start failed: %s"):format(service_err.message or tostring(service_err)))
+  error(("service:run failed: %s"):format(service_err.message or tostring(service_err)))
 end
 
 if handled ~= 1 then
@@ -93,7 +93,7 @@ if handled ~= 1 then
 end
 
 local stats, stats_err = client:queue_stats({
-  namespace_name = namespace_name,
+  namespace = namespace,
   queue = queue,
 })
 

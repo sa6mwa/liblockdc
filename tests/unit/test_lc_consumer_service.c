@@ -130,6 +130,11 @@ typedef struct fake_client {
   lc_consumer_service *service_to_return;
 } fake_client;
 
+typedef struct direct_subscribe_close_context {
+  lc_client *client;
+  size_t callback_calls;
+} direct_subscribe_close_context;
+
 static consumer_test_state *g_consumer_test_state = NULL;
 static lc_allocator g_test_allocator;
 static pslog_logger *g_test_client_logger = NULL;
@@ -569,7 +574,7 @@ lc_message *__wrap_lc_message_new(lc_client_handle *client,
   message->pub.rewind_payload = fake_delivery_message_rewind;
   message->pub.write_payload = fake_delivery_message_write_payload;
   message->pub.close = fake_delivery_message_close;
-  message->pub.namespace_name = delivery->namespace_name;
+  message->pub.ns = delivery->ns;
   message->pub.queue = delivery->queue;
   message->pub.message_id = delivery->message_id;
   message->pub.attempts = delivery->attempts;
@@ -833,7 +838,7 @@ static int fake_subscribe(lc_consumer_service_handle *service,
              (unsigned long)subscribe_call,
              (unsigned long)(delivery_index + 1U));
     memset(&delivery, 0, sizeof(delivery));
-    delivery.namespace_name = (char *)request->namespace_name;
+    delivery.ns = (char *)request->ns;
     delivery.queue = (char *)request->queue;
     delivery.message_id = message_id;
     delivery.payload_content_type = "application/json";
@@ -1005,7 +1010,7 @@ wrap_consumer_engine_subscribe(const lc_engine_dequeue_request *request,
     return LC_ENGINE_ERROR_INVALID_ARGUMENT;
   }
   memset(&public_request, 0, sizeof(public_request));
-  public_request.namespace_name = request->namespace_name;
+  public_request.ns = request->ns;
   public_request.queue = request->queue;
   public_request.owner = request->owner;
   public_request.txn_id = request->txn_id;
@@ -2800,7 +2805,7 @@ test_consumer_service_worker_clone_preserves_json_response_limit(void **state) {
 }
 
 static void
-test_workflow_dispatcher_clone_uses_standard_json_response_limit(void **state) {
+test_outbox_dispatcher_clone_uses_standard_json_response_limit(void **state) {
   tracked_allocator_state alloc_state;
   lc_allocator allocator;
   lc_client_handle client;
@@ -2822,8 +2827,8 @@ test_workflow_dispatcher_clone_uses_standard_json_response_limit(void **state) {
   dispatcher_client = NULL;
   g_consumer_test_state = &runtime_state;
 
-  assert_int_equal(lc_client_clone_remote_for_workflow(
-                       &client, 456L, &dispatcher_client, &error),
+  assert_int_equal(lc_client_clone_remote_for_outbox(
+                       &client, 456L, NULL, &dispatcher_client, &error),
                    LC_OK);
   assert_non_null(dispatcher_client);
   assert_int_equal(runtime_state.last_client_open_json_limit,
@@ -2952,6 +2957,70 @@ test_consumer_service_no_delivery_does_not_destroy_uninitialized_primitives(
   tracked_allocator_state_cleanup(&alloc_state);
 }
 
+static int direct_subscribe_close_handler(void *context, lc_message *message,
+                                          lc_error *error) {
+  direct_subscribe_close_context *close_context;
+
+  close_context = (direct_subscribe_close_context *)context;
+  close_context->callback_calls += 1U;
+  /* The root close is deliberately reentrant with the native subscriber. The
+   * subscription frame must retain the concrete client until its handler
+   * thread has joined and every final log/error path has unwound. */
+  lc_client_close(close_context->client);
+  return lc_message_ack(message, error);
+}
+
+static void
+test_direct_subscribe_retains_client_across_callback_close(void **state) {
+  consumer_test_state runtime_state;
+  direct_subscribe_close_context close_context;
+  lc_allocator allocator;
+  lc_client_handle *client;
+  lc_consumer consumer;
+  lc_dequeue_req request;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  memset(&close_context, 0, sizeof(close_context));
+  lc_allocator_init(&allocator);
+  client = (lc_client_handle *)lc_calloc_with_allocator(&allocator, 1U,
+                                                        sizeof(*client));
+  assert_non_null(client);
+  client->allocator = allocator;
+  client->base_logger = lc_log_noop_logger();
+  client->logger = lc_log_noop_logger();
+  client->refcount = 1U;
+  assert_int_equal(pthread_mutex_init(&client->lifecycle_mutex, NULL), 0);
+  client->lifecycle_mutex_initialized = 1;
+  client->pub.subscribe = lc_client_subscribe_method;
+  client->pub.close = lc_client_close_method;
+  close_context.client = &client->pub;
+  lc_consumer_init(&consumer);
+  consumer.handle = direct_subscribe_close_handler;
+  consumer.context = &close_context;
+  lc_dequeue_req_init(&request);
+  request.ns = "callback-close";
+  request.queue = "jobs";
+  request.owner = "worker";
+  request.visibility_timeout_seconds = 30L;
+  request.wait_seconds = 1L;
+  request.page_size = 1;
+  lc_error_init(&error);
+  assert_int_equal(pthread_mutex_init(&runtime_state.mutex, NULL), 0);
+  g_consumer_test_state = &runtime_state;
+
+  rc = lc_subscribe(&client->pub, &request, &consumer, &error);
+
+  g_consumer_test_state = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(close_context.callback_calls, 1U);
+  assert_int_equal(runtime_state.ack_calls, 1U);
+  lc_error_cleanup(&error);
+  pthread_mutex_destroy(&runtime_state.mutex);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_consumer_restart_policy_init_sets_defaults),
@@ -3008,7 +3077,7 @@ int main(void) {
       cmocka_unit_test(
           test_consumer_service_worker_clone_preserves_json_response_limit),
       cmocka_unit_test(
-          test_workflow_dispatcher_clone_uses_standard_json_response_limit),
+          test_outbox_dispatcher_clone_uses_standard_json_response_limit),
       cmocka_unit_test(
           test_consumer_service_worker_clone_preserves_pouch_compression),
       cmocka_unit_test(
@@ -3018,6 +3087,8 @@ int main(void) {
       cmocka_unit_test(
           test_consumer_service_logs_restart_with_configured_logger),
       cmocka_unit_test(test_consumer_service_logs_subscribe_lifecycle),
+      cmocka_unit_test(
+          test_direct_subscribe_retains_client_across_callback_close),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

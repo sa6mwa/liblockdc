@@ -1438,7 +1438,7 @@ void lc_pouch_index_term_generation_cleanup(
   if (generation == NULL) {
     return;
   }
-  lc_free_with_allocator(allocator, generation->namespace_name);
+  lc_free_with_allocator(allocator, generation->ns);
   lc_pouch_index_term_posting_table_cleanup(allocator, &generation->postings);
   lc_pouch_index_term_table_cleanup(allocator, &generation->terms);
   memset(generation, 0, sizeof(*generation));
@@ -1477,8 +1477,8 @@ int lc_pouch_index_term_generation_encode(
   }
   *out_bytes = NULL;
   *out_length = 0U;
-  if (generation == NULL || generation->namespace_name == NULL ||
-      generation->namespace_name[0] == '\0') {
+  if (generation == NULL || generation->ns == NULL ||
+      generation->ns[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index term generation encode requires "
                         "namespace and generation",
@@ -1553,7 +1553,7 @@ int lc_pouch_index_term_generation_encode(
   }
   if (rc == LC_OK) {
     rc = lc_pouch_index_term_generation_buffer_append_string(
-        allocator, &buffer, generation->namespace_name, error);
+        allocator, &buffer, generation->ns, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_index_term_generation_buffer_append_u64(
@@ -1936,7 +1936,7 @@ int lc_pouch_index_term_generation_decode(
   lc_pouch_index_term_generation decoded;
   lc_pouch_index_term_generation_cursor cursor;
   const unsigned char *magic;
-  const char *namespace_name;
+  const char *ns;
   size_t namespace_length;
   uint64_t version;
   const char **field_dictionary;
@@ -1962,7 +1962,7 @@ int lc_pouch_index_term_generation_decode(
   field_count = 0UL;
   previous_posting_term_id = 0UL;
   magic = NULL;
-  namespace_name = NULL;
+  ns = NULL;
   namespace_length = 0U;
   rc = lc_pouch_index_term_generation_cursor_read(
       &cursor, LC_POUCH_INDEX_TERM_GENERATION_MAGIC_LEN, &magic, error);
@@ -1996,7 +1996,7 @@ int lc_pouch_index_term_generation_decode(
         "pouch index term generation missing row hash", error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_index_term_generation_cursor_string(&cursor, &namespace_name,
+    rc = lc_pouch_index_term_generation_cursor_string(&cursor, &ns,
                                                       &namespace_length, error);
   }
   if (rc == LC_OK && namespace_length == 0U) {
@@ -2005,9 +2005,8 @@ int lc_pouch_index_term_generation_decode(
                       NULL, "pouch");
   }
   if (rc == LC_OK) {
-    decoded.namespace_name =
-        lc_strdup_with_allocator(allocator, namespace_name);
-    if (decoded.namespace_name == NULL) {
+    decoded.ns = lc_strdup_with_allocator(allocator, ns);
+    if (decoded.ns == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch index term generation "
                         "namespace",

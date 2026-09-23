@@ -115,10 +115,9 @@ static int lifecycle_open_client(const char *root, const lifecycle_mode *mode,
   return lc_client_open(&config, out, error);
 }
 
-static int lifecycle_put_doc(lc_client *client, const char *namespace_name,
-                             const char *key, const char *json,
-                             int attach_object, const char *attachment_body,
-                             lc_error *error) {
+static int lifecycle_put_doc(lc_client *client, const char *ns, const char *key,
+                             const char *json, int attach_object,
+                             const char *attachment_body, lc_error *error) {
   lc_acquire_req acquire_req;
   lc_release_req release_req;
   lc_update_opts update_opts;
@@ -135,7 +134,7 @@ static int lifecycle_put_doc(lc_client *client, const char *namespace_name,
   memset(&attach_res, 0, sizeof(attach_res));
   lease = NULL;
   source = NULL;
-  acquire_req.namespace_name = namespace_name;
+  acquire_req.ns = ns;
   acquire_req.key = key;
   acquire_req.owner = "lifecycle-fuzz";
   acquire_req.ttl_seconds = 60L;
@@ -192,7 +191,7 @@ static int lifecycle_enqueue(lc_client *client, const char *payload,
   if (source == NULL) {
     return LC_ERR_NOMEM;
   }
-  enqueue_req.namespace_name = "life";
+  enqueue_req.ns = "life";
   enqueue_req.queue = "jobs";
   enqueue_req.content_type = "text/plain";
   enqueue_req.visibility_timeout_seconds = 30L;
@@ -203,7 +202,7 @@ static int lifecycle_enqueue(lc_client *client, const char *payload,
   return rc;
 }
 
-static int lifecycle_flush_index(lc_client *client, const char *namespace_name,
+static int lifecycle_flush_index(lc_client *client, const char *ns,
                                  lc_error *error) {
   lc_index_flush_req flush_req;
   lc_index_flush_res flush_res;
@@ -211,14 +210,14 @@ static int lifecycle_flush_index(lc_client *client, const char *namespace_name,
 
   lc_index_flush_req_init(&flush_req);
   memset(&flush_res, 0, sizeof(flush_res));
-  flush_req.namespace_name = namespace_name;
+  flush_req.ns = ns;
   flush_req.mode = "wait";
   rc = client->flush_index(client, &flush_req, &flush_res, error);
   lc_index_flush_res_cleanup(&flush_res);
   return rc;
 }
 
-static int lifecycle_query_count(lc_client *client, const char *namespace_name,
+static int lifecycle_query_count(lc_client *client, const char *ns,
                                  const char *selector_json, size_t *rows_out,
                                  lc_error *error) {
   lc_query_key_handler handler;
@@ -235,7 +234,7 @@ static int lifecycle_query_count(lc_client *client, const char *namespace_name,
   handler.begin = lifecycle_key_begin;
   handler.chunk = lifecycle_key_chunk;
   handler.end = lifecycle_key_end;
-  req.namespace_name = namespace_name;
+  req.ns = ns;
   req.selector_json = selector_json;
   req.limit = 16L;
   rc = client->query_keys(client, &req, &handler, &count, &res, error);
@@ -246,9 +245,10 @@ static int lifecycle_query_count(lc_client *client, const char *namespace_name,
   return rc;
 }
 
-static int lifecycle_run_maintenance(const char *root,
-                                     const char *namespace_name, int force,
-                                     int cleanup_only, long retention_cutoff,
+static int lifecycle_run_maintenance(const char *root, const char *ns,
+                                     int force, int cleanup_only,
+                                     int terminal_reclaim,
+                                     long retention_cutoff,
                                      const lifecycle_mode *mode,
                                      lc_error *error) {
   lc_pouch *pouch;
@@ -267,9 +267,10 @@ static int lifecycle_run_maintenance(const char *root,
   }
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
   if (rc == LC_OK) {
-    maintenance_options.namespace_name = namespace_name;
+    maintenance_options.ns = ns;
     maintenance_options.force = force;
     maintenance_options.cleanup_only = cleanup_only;
+    maintenance_options.terminal_reclaim = terminal_reclaim;
     maintenance_options.retention_updated_before_unix = retention_cutoff;
     rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                   &maintenance_result, error);
@@ -282,16 +283,14 @@ static int lifecycle_run_maintenance(const char *root,
 }
 
 static int lifecycle_namespace_path(char *path, size_t path_size,
-                                    const char *root,
-                                    const char *namespace_name,
+                                    const char *root, const char *ns,
                                     const char *leaf) {
   int written;
 
-  if (root == NULL || namespace_name == NULL || leaf == NULL) {
+  if (root == NULL || ns == NULL || leaf == NULL) {
     return 0;
   }
-  written = snprintf(path, path_size, "%s/namespaces/%s/%s", root,
-                     namespace_name, leaf);
+  written = snprintf(path, path_size, "%s/namespaces/%s/%s", root, ns, leaf);
   return written > 0 && (size_t)written < path_size;
 }
 
@@ -309,13 +308,12 @@ static void lifecycle_write_text_file(const char *path, const char *text) {
   (void)fclose(fp);
 }
 
-static void lifecycle_damage_marker(const char *root,
-                                    const char *namespace_name,
+static void lifecycle_damage_marker(const char *root, const char *ns,
                                     unsigned int mode) {
   char path[768];
 
   if (mode == 0U ||
-      !lifecycle_namespace_path(path, sizeof(path), root, namespace_name,
+      !lifecycle_namespace_path(path, sizeof(path), root, ns,
                                 "markers/writer-lifecycle-peer.marker")) {
     return;
   }
@@ -328,14 +326,12 @@ static void lifecycle_damage_marker(const char *root,
   }
 }
 
-static void lifecycle_damage_query_index(const char *root,
-                                         const char *namespace_name,
+static void lifecycle_damage_query_index(const char *root, const char *ns,
                                          unsigned int mode) {
   char path[768];
 
-  if (mode == 0U ||
-      !lifecycle_namespace_path(path, sizeof(path), root, namespace_name,
-                                "index/query.index")) {
+  if (mode == 0U || !lifecycle_namespace_path(path, sizeof(path), root, ns,
+                                              "index/query.index")) {
     return;
   }
   if (mode == 1U) {
@@ -390,7 +386,7 @@ static int lifecycle_verify_survivors(lc_client *client, lc_error *error) {
     lifecycle_abort_if(rows != 1U);
   }
   if (rc == LC_OK) {
-    acquire_req.namespace_name = "life";
+    acquire_req.ns = "life";
     acquire_req.key = "state/keep";
     acquire_req.owner = "lifecycle-fuzz-reader";
     acquire_req.ttl_seconds = 60L;
@@ -412,13 +408,13 @@ static int lifecycle_verify_survivors(lc_client *client, lc_error *error) {
     }
   }
   if (rc == LC_OK) {
-    stats_req.namespace_name = "life";
+    stats_req.ns = "life";
     stats_req.queue = "jobs";
     rc = client->queue_stats(client, &stats_req, &stats_res, error);
   }
   if (rc == LC_OK) {
     lifecycle_abort_if(stats_res.available != 1);
-    dequeue_req.namespace_name = "life";
+    dequeue_req.ns = "life";
     dequeue_req.queue = "jobs";
     dequeue_req.owner = "lifecycle-fuzz-worker";
     dequeue_req.visibility_timeout_seconds = 30L;
@@ -513,17 +509,21 @@ static void lifecycle_run_input(const uint8_t *data, size_t size,
     client = NULL;
   }
   if (rc == LC_OK) {
+    stage = "terminal-reclaim-life";
+    rc = lifecycle_run_maintenance(root, "life", 0, 0, 1, 0L, mode, &error);
+  }
+  if (rc == LC_OK) {
     stage = "compact-life";
-    rc = lifecycle_run_maintenance(root, "life", 1, 0, 0L, mode, &error);
+    rc = lifecycle_run_maintenance(root, "life", 1, 0, 0, 0L, mode, &error);
   }
   if (rc == LC_OK && (knobs & 1U) != 0U) {
     stage = "cleanup-life";
-    rc = lifecycle_run_maintenance(root, "life", 0, 1, 0L, mode, &error);
+    rc = lifecycle_run_maintenance(root, "life", 0, 1, 0, 0L, mode, &error);
   }
   if (rc == LC_OK) {
     stage = "retention";
-    rc = lifecycle_run_maintenance(root, "life-retain", 0, 0, 2147483647L, mode,
-                                   &error);
+    rc = lifecycle_run_maintenance(root, "life-retain", 0, 0, 0, 2147483647L,
+                                   mode, &error);
   }
   if (rc == LC_OK) {
     unsigned int damage;

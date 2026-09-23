@@ -137,8 +137,7 @@ struct lc_pouch {
   uint64_t compaction_interval_seconds;
   uint64_t compaction_delete_grace_seconds;
   uint64_t compaction_max_io_bytes_per_sec;
-  uint64_t retention_seconds;
-  uint64_t janitor_interval_seconds;
+  uint64_t terminal_reclaim_min_bytes;
   uint64_t marker_sequence;
   int durable_sync;
   int background_compaction_enabled;
@@ -162,6 +161,7 @@ struct lc_pouch {
   int writer_root_lock_mode;
   char *query_engine;
   char *query_fallback_engine;
+  int query_indexing_enabled;
   char *compression;
   lc_pouch_crypto *crypto;
   char *crypto_key_file;
@@ -203,7 +203,13 @@ struct lc_pouch {
   int compaction_thread_started;
   int compaction_stop;
   int compaction_pending;
+  int compaction_marker_turn;
+  /* Last terminal-reclaim marker selected by the background worker. The
+   * durable marker remains until maintenance completes; this cursor prevents
+   * one failing marker from starving the other pending namespaces. */
+  char *terminal_reclaim_marker_cursor;
   char **compaction_namespaces;
+  unsigned char *compaction_namespace_terminal;
   size_t compaction_namespace_count;
   size_t compaction_namespace_capacity;
   /* Go disk's indexer batches durable-state replay away from mutations. */
@@ -215,14 +221,6 @@ struct lc_pouch {
   int indexer_thread_started;
   int indexer_stop;
   lc_pouch_indexer_pending_namespace *indexer_pending_namespaces;
-  pthread_mutex_t janitor_mutex;
-  pthread_cond_t janitor_cond;
-  pthread_t janitor_thread;
-  int janitor_mutex_initialized;
-  int janitor_cond_initialized;
-  int janitor_thread_started;
-  int janitor_stop;
-  int janitor_pending;
   lc_pouch_namespace_logstore *namespace_logstores;
   lc_pouch_namespace_logstore
       *namespace_logstore_buckets[LC_POUCH_NAMESPACE_REGISTRY_BUCKET_COUNT];
@@ -305,7 +303,7 @@ extern void *lc_pouch_test_before_queue_message_build_context;
 extern lc_pouch_test_hook lc_pouch_test_after_queue_batch_message_build_hook;
 extern void *lc_pouch_test_after_queue_batch_message_build_context;
 /* Invoked immediately before a Pouch transaction decision is made durable.
- * Tests use this to prove that a workflow does not publish one participant
+ * Tests use this to prove that an outbox does not publish one participant
  * before its multi-key terminal decision exists. */
 extern lc_pouch_test_hook lc_pouch_test_before_txn_decision_hook;
 extern void *lc_pouch_test_before_txn_decision_context;
@@ -313,8 +311,8 @@ extern void *lc_pouch_test_before_txn_decision_context;
  * Tests use this to exercise indeterminate post-vote replay failures. */
 extern lc_pouch_test_hook lc_pouch_test_before_txn_replay_hook;
 extern void *lc_pouch_test_before_txn_replay_context;
-typedef void (*lc_pouch_test_metadata_append_hook_fn)(
-    void *context, const char *namespace_name);
+typedef void (*lc_pouch_test_metadata_append_hook_fn)(void *context,
+                                                      const char *ns);
 extern lc_pouch_test_metadata_append_hook_fn lc_pouch_test_metadata_append_hook;
 extern void *lc_pouch_test_metadata_append_context;
 /* Invoked before a borrowed metadata record is copied for batch submission. */
@@ -325,7 +323,7 @@ extern void *lc_pouch_test_before_metadata_append_entry_copy_context;
 extern lc_pouch_test_hook lc_pouch_test_after_metadata_batch_append_hook;
 extern void *lc_pouch_test_after_metadata_batch_append_context;
 typedef void (*lc_pouch_test_body_append_hook_fn)(void *context,
-                                                  const char *namespace_name);
+                                                  const char *ns);
 extern lc_pouch_test_body_append_hook_fn lc_pouch_test_body_append_hook;
 extern void *lc_pouch_test_body_append_context;
 typedef void (*lc_pouch_test_tail_repair_hook_fn)(void *context,
@@ -333,15 +331,21 @@ typedef void (*lc_pouch_test_tail_repair_hook_fn)(void *context,
                                                   const char *segment);
 extern lc_pouch_test_tail_repair_hook_fn lc_pouch_test_tail_repair_hook;
 extern void *lc_pouch_test_tail_repair_context;
+/* Invoked under namespace mutation authority immediately before a completed
+ * terminal-reclaim pass consumes its durable marker. */
+extern lc_pouch_test_hook
+    lc_pouch_test_before_terminal_reclaim_marker_remove_hook;
+extern void *lc_pouch_test_before_terminal_reclaim_marker_remove_context;
 /* Extends only test batch coalescing, without changing production scheduling.
  */
 extern long lc_pouch_test_fsync_batch_delay_ns;
 extern int (*lc_pouch_test_sync_fd)(int fd);
 size_t lc_pouch_test_resident_descriptor_count(lc_pouch *pouch);
 void lc_pouch_test_indexer_deadline(lc_pouch *pouch, struct timespec *deadline);
+void lc_pouch_test_compaction_run_pass(lc_pouch *pouch);
+size_t lc_pouch_test_compaction_queue_count(lc_pouch *pouch);
 char *lc_pouch_state_test_crypto_context(const lc_allocator *allocator,
-                                         const char *namespace_name,
-                                         const char *key,
+                                         const char *ns, const char *key,
                                          lc_pouch_generation version,
                                          int object_payload);
 #endif
@@ -375,45 +379,120 @@ int lc_pouch_single_writer_enabled(lc_pouch *pouch);
  */
 int lc_pouch_writer_mode_operation_begin(lc_pouch *pouch, lc_error *error);
 void lc_pouch_writer_mode_operation_end(lc_pouch *pouch);
+/** Queues one namespace-local compaction attempt after a successful mutation.
+ * Terminal transitions additionally leave durable reclaim work for a later
+ * restart; neither path scans the root at open. */
+void lc_pouch_compaction_note_mutation(lc_pouch *pouch, const char *ns,
+                                       int terminal);
 /**
- * Starts a fresh idle-compaction delay after a successful mutation. The worker
- * does not compact at open or while successful mutations keep arriving.
+ * Persists terminal-reclaim work after a durable history cursor advances so a
+ * restart can reclaim newly unpinned history without an open-time sweep.
  */
-void lc_pouch_compaction_note_mutation(lc_pouch *pouch);
+int lc_pouch_compaction_note_history_advanced(lc_pouch *pouch, const char *ns,
+                                              lc_error *error);
+/* Consumes completed terminal-reclaim work while the caller holds the same
+ * namespace mutation authority used to make the reclamation decision. */
+int lc_pouch_terminal_reclaim_marker_remove(lc_pouch *pouch, const char *ns,
+                                            lc_error *error);
+/* Durable, bounded-work hand-off for stateful outbox checkpoint cleanup.
+ * These markers live outside namespace log data: a stateful dispatcher takes
+ * at most one marker per pull, validates the parent terminal record, then
+ * deletes only its paired checkpoint. */
+int lc_pouch_outbox_state_reclaim_marker_write(lc_pouch *pouch, const char *ns,
+                                               const char *marker_id,
+                                               const char *outbox_key,
+                                               const char *state_key,
+                                               lc_error *error);
+int lc_pouch_outbox_state_reclaim_marker_take(lc_pouch *pouch, const char *ns,
+                                              const char *after_marker_id,
+                                              char **marker_id_out,
+                                              char **outbox_key_out,
+                                              char **state_key_out,
+                                              lc_error *error);
+int lc_pouch_outbox_state_reclaim_marker_remove(lc_pouch *pouch, const char *ns,
+                                                const char *marker_id,
+                                                lc_error *error);
+/* One durable Pouch-only outbox dead-letter retention work item. The marker
+ * lives outside namespace log data, so dispatcher maintenance can reclaim an
+ * exact terminal parent without querying or visiting the namespace. */
+typedef struct lc_pouch_outbox_dead_letter_marker {
+  char *marker_id;
+  char *outbox_key;
+  lc_pouch_unix_seconds due_at_unix;
+  uint64_t retained_bytes;
+  size_t queued_count;
+  uint64_t queued_bytes;
+} lc_pouch_outbox_dead_letter_marker;
+int lc_pouch_outbox_dead_letter_marker_write(lc_pouch *pouch, const char *ns,
+                                             const char *marker_id,
+                                             const char *outbox_key,
+                                             lc_pouch_unix_seconds due_at_unix,
+                                             uint64_t retained_bytes,
+                                             lc_error *error);
+int lc_pouch_outbox_dead_letter_marker_take(
+    lc_pouch *pouch, const char *ns, const char *after_marker_id,
+    lc_pouch_unix_seconds now_unix, size_t max_count, uint64_t max_bytes,
+    lc_pouch_outbox_dead_letter_marker *out,
+    lc_pouch_unix_seconds *next_due_unix, lc_error *error);
+int lc_pouch_outbox_dead_letter_marker_remove(lc_pouch *pouch, const char *ns,
+                                              const char *marker_id,
+                                              lc_error *error);
+void lc_pouch_outbox_dead_letter_marker_cleanup(
+    lc_pouch *pouch, lc_pouch_outbox_dead_letter_marker *marker);
+/* Measures current logical bytes for an outbox envelope and optional stateful
+ * checkpoint, including their attachment records. */
+int lc_pouch_outbox_dead_letter_retained_bytes(lc_client_handle *client,
+                                               const char *ns,
+                                               const char *outbox_key,
+                                               const char *state_key,
+                                               uint64_t *out, lc_error *error);
+/* Deletes every attachment belonging to a checkpoint whose paired outbox
+ * parent was already verified terminal by stateful reclaim. */
+int lc_pouch_outbox_state_reclaim_delete_attachments(lc_client_handle *client,
+                                                     const char *ns,
+                                                     const char *key,
+                                                     int *deleted_count,
+                                                     lc_error *error);
+/**
+ * Reads the oldest durable history-consumer acknowledgement for one namespace.
+ * Callers that make a reclamation decision must hold that namespace's mutation
+ * authority for the entire decision.
+ */
+int lc_pouch_history_oldest_acknowledged(lc_pouch *pouch, const char *ns,
+                                         int *has_consumers,
+                                         lc_pouch_generation *out,
+                                         lc_error *error);
 /** Schedules derived index publication after a mutation. The queue and bounded
  * normalized projection never retain a document body, and a failed derived
  * publication cannot revoke an already durable mutation. */
-void lc_pouch_indexer_note_mutation(lc_pouch *pouch,
-                                    const char *namespace_name);
+void lc_pouch_indexer_note_mutation(lc_pouch *pouch, const char *ns);
 /** Marks a durable public operation boundary. In exclusive-writer mode this
  * synchronously publishes a queued namespace once its configured distinct
  * document threshold is reached and no pending key is still active; shared
  * roots retain asynchronous replay. */
-void lc_pouch_indexer_note_operation_complete(lc_pouch *pouch,
-                                              const char *namespace_name,
+void lc_pouch_indexer_note_operation_complete(lc_pouch *pouch, const char *ns,
                                               const char *key,
                                               const char *operation_id);
 /** Removes one matching completed operation from the exclusive writer's
  * pending-operation set. The caller holds `indexer_mutex`; allocation failure
  * is conservative and leaves derived publication queued. */
 int lc_pouch_query_index_pending_operation_complete_locked(
-    lc_pouch *pouch, const char *namespace_name, const char *key,
-    const char *operation_id);
+    lc_pouch *pouch, const char *ns, const char *key, const char *operation_id);
 void lc_pouch_state_source_cache_cleanup(lc_pouch *pouch);
 int lc_pouch_state_metadata_append_worker_init(lc_pouch *pouch,
                                                lc_error *error);
 void lc_pouch_state_metadata_append_worker_close(lc_pouch *pouch);
 void lc_pouch_query_index_cache_cleanup(lc_pouch *pouch);
-int lc_pouch_state_with_namespace_lock(lc_pouch *pouch,
-                                       const char *namespace_name,
+int lc_pouch_state_with_namespace_lock(lc_pouch *pouch, const char *ns,
                                        lc_pouch_state_precondition_fn callback,
                                        void *context, lc_error *error);
-int lc_pouch_state_with_key_lock(lc_pouch *pouch, const char *namespace_name,
+/** Non-zero when this thread currently holds a namespace lock for `pouch`. */
+int lc_pouch_state_namespace_lock_held_by_current_thread(lc_pouch *pouch);
+int lc_pouch_state_with_key_lock(lc_pouch *pouch, const char *ns,
                                  const char *key,
                                  lc_pouch_state_precondition_fn callback,
                                  void *context, lc_error *error);
-int lc_pouch_state_read_metadata_locked(lc_pouch *pouch,
-                                        const char *namespace_name,
+int lc_pouch_state_read_metadata_locked(lc_pouch *pouch, const char *ns,
                                         const char *key,
                                         lc_pouch_state_read_result *out,
                                         lc_error *error);
@@ -423,11 +502,11 @@ int lc_pouch_state_read_metadata_locked(lc_pouch *pouch,
  * process mutex while transaction application validates and updates paired
  * queue records.
  */
-int lc_pouch_state_read_locked(lc_pouch *pouch, const char *namespace_name,
-                               const char *key, lc_pouch_state_read_result *out,
+int lc_pouch_state_read_locked(lc_pouch *pouch, const char *ns, const char *key,
+                               lc_pouch_state_read_result *out,
                                lc_error *error);
 /** Writes a full state record while the caller holds the key mutation lock. */
-int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_state_write_locked(lc_pouch *pouch, const char *ns,
                                 const char *key, lc_source *body,
                                 const lc_pouch_state_write_options *options,
                                 lc_pouch_state_write_result *out,
@@ -437,7 +516,7 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
  * held. This keeps read-transform-write mutations linearizable without
  * materializing the stored body in memory.
  */
-int lc_pouch_state_write_prepared(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_state_write_prepared(lc_pouch *pouch, const char *ns,
                                   const char *key,
                                   const lc_pouch_state_write_options *options,
                                   lc_pouch_state_body_prepare_fn prepare,
@@ -445,14 +524,12 @@ int lc_pouch_state_write_prepared(lc_pouch *pouch, const char *namespace_name,
                                   lc_pouch_state_write_result *out,
                                   lc_error *error);
 /** Commits staged state under target mutation authority. */
-int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
-                                        const char *namespace_name,
+int lc_pouch_state_commit_staged_locked(lc_pouch *pouch, const char *ns,
                                         const char *key, const char *txn_id,
                                         lc_pouch_state_write_result *out,
                                         int operation_active, lc_error *error);
 /** Discards staged state under target mutation authority. */
-int lc_pouch_state_discard_staged_locked(lc_pouch *pouch,
-                                         const char *namespace_name,
+int lc_pouch_state_discard_staged_locked(lc_pouch *pouch, const char *ns,
                                          const char *key, const char *txn_id,
                                          int *discarded, lc_error *error);
 /**
@@ -463,11 +540,11 @@ int lc_pouch_state_discard_staged_locked(lc_pouch *pouch,
  * `owned_fallback`, whose lifetime is managed by the caller.
  */
 int lc_pouch_state_read_metadata_view_locked(
-    lc_pouch *pouch, const char *namespace_name, const char *key,
+    lc_pouch *pouch, const char *ns, const char *key,
     lc_pouch_state_metadata_view *out,
     lc_pouch_state_read_result *owned_fallback, lc_error *error);
 int lc_pouch_state_update_metadata_locked(
-    lc_pouch *pouch, const char *namespace_name, const char *key,
+    lc_pouch *pouch, const char *ns, const char *key,
     const lc_pouch_state_write_options *options,
     lc_pouch_state_write_result *out, lc_error *error);
 /**
@@ -475,7 +552,7 @@ int lc_pouch_state_update_metadata_locked(
  * The caller must already hold the key mutation lock.
  */
 int lc_pouch_state_update_metadata_prepared_locked(
-    lc_pouch *pouch, const char *namespace_name, const char *key,
+    lc_pouch *pouch, const char *ns, const char *key,
     lc_pouch_state_metadata_prepare_fn prepare, void *prepare_context,
     lc_pouch_state_write_result *out, lc_error *error);
 /**
@@ -483,8 +560,8 @@ int lc_pouch_state_update_metadata_prepared_locked(
  * `lease_key` may differ from `key` for queue-state lease updates.
  */
 int lc_pouch_state_stage_write_prepared(
-    lc_pouch *pouch, const char *namespace_name, const char *key,
-    const char *txn_id, const char *lease_key, lc_source *body,
+    lc_pouch *pouch, const char *ns, const char *key, const char *txn_id,
+    const char *lease_key, lc_source *body,
     lc_pouch_state_write_options *options,
     lc_pouch_state_stage_prepare_fn prepare, void *prepare_context,
     lc_pouch_state_stage_body_prepare_fn body_prepare,
@@ -495,30 +572,27 @@ int lc_pouch_state_stage_write_prepared(
  * lease and CAS decision as staged body writes.
  */
 int lc_pouch_state_stage_metadata_prepared(
-    lc_pouch *pouch, const char *namespace_name, const char *key,
-    const char *txn_id, const char *lease_key,
-    lc_pouch_state_write_options *options,
+    lc_pouch *pouch, const char *ns, const char *key, const char *txn_id,
+    const char *lease_key, lc_pouch_state_write_options *options,
     lc_pouch_state_stage_prepare_fn prepare, void *prepare_context,
     lc_pouch_state_write_result *out, lc_error *error);
-int lc_pouch_state_visit_since(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_state_visit_since(lc_pouch *pouch, const char *ns,
                                lc_pouch_generation after_version,
                                lc_pouch_state_change_visit_fn visitor,
                                void *context, lc_error *error);
-int lc_pouch_state_visible_count(lc_pouch *pouch, const char *namespace_name,
-                                 size_t *count, lc_error *error);
-int lc_pouch_state_warm_namespace(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_state_visible_count(lc_pouch *pouch, const char *ns, size_t *count,
+                                 lc_error *error);
+int lc_pouch_state_warm_namespace(lc_pouch *pouch, const char *ns,
                                   lc_error *error);
-int lc_pouch_state_compaction_track_cached_namespaces(lc_pouch *pouch,
-                                                      lc_error *error);
-int lc_pouch_state_scan_summaries(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_state_scan_summaries(lc_pouch *pouch, const char *ns,
                                   const char *start_after, size_t limit,
                                   lc_pouch_state_scan_summary_visit_fn visitor,
                                   void *context,
                                   lc_pouch_state_scan_summaries_result *out,
                                   lc_error *error);
 int lc_pouch_state_scan_summary_read_body(
-    lc_pouch *pouch, const char *namespace_name,
-    const lc_pouch_state_scan_summary_entry *entry,
+    lc_pouch *pouch, const char *ns,
+    const lc_pouch_state_scan_summary_entry *entry, int cache_completed_body,
     lc_pouch_state_read_result *out, lc_error *error);
 void lc_pouch_state_scan_summaries_result_cleanup(
     const lc_allocator *allocator,
@@ -526,13 +600,9 @@ void lc_pouch_state_scan_summaries_result_cleanup(
 int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error);
 int lc_pouch_fsync_batcher_init(lc_pouch *pouch, lc_error *error);
 void lc_pouch_fsync_batcher_close(lc_pouch *pouch);
-int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *ns,
                               const char *queue, uint64_t timeout_ms);
 /** Converts a durable Pouch byte count for generic C API response fields. */
 int lc_pouch_size_to_public_long(uint64_t size, long *out, lc_error *error);
-void lc_pouch_janitor_note_mutation(lc_pouch *pouch);
-int lc_pouch_compaction_track_namespace(lc_pouch *pouch,
-                                        const char *namespace_name,
-                                        lc_error *error);
 
 #endif

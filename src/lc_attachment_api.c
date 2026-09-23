@@ -82,7 +82,7 @@ typedef struct lc_engine_attach_response_json {
 } lc_engine_attach_response_json;
 
 typedef struct lc_engine_list_attachments_response_json {
-  char *namespace_name;
+  char *ns;
   char *key;
   lonejson_object_array attachments;
 } lc_engine_list_attachments_response_json;
@@ -98,7 +98,7 @@ typedef struct lc_engine_delete_all_attachments_response_json {
 } lc_engine_delete_all_attachments_response_json;
 
 typedef struct lc_engine_enqueue_meta_json {
-  char *namespace_name;
+  char *ns;
   char *queue;
   lonejson_int64 delay_seconds;
   lonejson_int64 visibility_timeout_seconds;
@@ -133,8 +133,7 @@ static int lc_engine_validate_update_retry_source(
 }
 
 static const lonejson_field lc_engine_enqueue_meta_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_meta_json, namespace_name,
-                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_meta_json, ns, "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_meta_json, queue, "queue"),
     LONEJSON_FIELD_I64(lc_engine_enqueue_meta_json, delay_seconds,
                        "delay_seconds"),
@@ -177,8 +176,8 @@ LONEJSON_MAP_DEFINE(lc_engine_attach_response_map,
                     lc_engine_attach_response_fields);
 
 static const lonejson_field lc_engine_list_attachments_response_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_list_attachments_response_json,
-                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_list_attachments_response_json, ns,
+                                "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_list_attachments_response_json, key,
                                 "key"),
     LONEJSON_FIELD_OBJECT_ARRAY(
@@ -244,7 +243,7 @@ LONEJSON_MAP_DEFINE(lc_engine_update_response_map,
                     lc_engine_update_response_fields);
 
 typedef struct lc_engine_enqueue_response_json {
-  char *namespace_name;
+  char *ns;
   char *queue;
   char *message_id;
   lonejson_int64 attempts;
@@ -256,7 +255,7 @@ typedef struct lc_engine_enqueue_response_json {
 } lc_engine_enqueue_response_json;
 
 static const lonejson_field lc_engine_enqueue_response_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_response_json, namespace_name,
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_response_json, ns,
                                 "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_enqueue_response_json, queue,
                                 "queue"),
@@ -785,6 +784,14 @@ static int lc_engine_perform_streaming(
 
   for (endpoint_index = 0U; endpoint_index < client->endpoint_count;
        ++endpoint_index) {
+    long request_timeout_ms;
+
+    if (!lc_engine_client_attempt_timeout_ms(client, &request_timeout_ms)) {
+      curl_slist_free_all(headers);
+      lc_engine_stream_state_cleanup(state);
+      return lc_engine_set_transport_error(state->error,
+                                           "request deadline elapsed");
+    }
     memset(&read_state, 0, sizeof(read_state));
     read_state.reader = reader;
     read_state.reader_context = reader_context;
@@ -820,6 +827,8 @@ static int lc_engine_perform_streaming(
     url_length = strlen(client->endpoints[endpoint_index]) + strlen(path) + 1U;
     url = (char *)malloc(url_length);
     if (url == NULL) {
+      curl_slist_free_all(headers);
+      lc_engine_stream_state_cleanup(state);
       return lc_engine_set_client_error(state->error, LC_ENGINE_ERROR_NO_MEMORY,
                                         "failed to allocate request URL");
     }
@@ -828,6 +837,8 @@ static int lc_engine_perform_streaming(
     curl = curl_easy_init();
     if (curl == NULL) {
       free(url);
+      curl_slist_free_all(headers);
+      lc_engine_stream_state_cleanup(state);
       return lc_engine_set_transport_error(state->error,
                                            "failed to initialize curl");
     }
@@ -852,9 +863,7 @@ static int lc_engine_perform_streaming(
                      lc_engine_stream_header_callback);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, state);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    if (client->timeout_ms > 0L) {
-      curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, client->timeout_ms);
-    }
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, request_timeout_ms);
     if (client->unix_socket_path != NULL &&
         client->unix_socket_path[0] != '\0') {
       curl_easy_setopt(curl, CURLOPT_UNIX_SOCKET_PATH,
@@ -968,12 +977,14 @@ static int lc_engine_perform_streaming(
     lc_engine_stream_state_cleanup(state);
   }
 
+  curl_slist_free_all(headers);
+  lc_engine_stream_state_cleanup(state);
   return lc_engine_set_transport_error(state->error,
                                        "all endpoints rejected the request");
 }
 
 static int lc_engine_attachment_build_query(
-    lc_engine_buffer *path, const char *base_path, const char *namespace_name,
+    lc_engine_buffer *path, const char *base_path, const char *ns,
     const char *key, const lc_engine_attachment_selector *selector,
     int public_read, const char *name_override, const char *content_type,
     int prevent_overwrite, long max_bytes, int has_max_bytes,
@@ -995,8 +1006,8 @@ static int lc_engine_attachment_build_query(
   lc_engine_buffer_append_cstr(path, "?key=");
   lc_engine_buffer_append_cstr(path, encoded);
   free(encoded);
-  if (namespace_name != NULL && namespace_name[0] != '\0') {
-    encoded = lc_engine_url_encode(namespace_name);
+  if (ns != NULL && ns[0] != '\0') {
+    encoded = lc_engine_url_encode(ns);
     if (encoded == NULL) {
       lc_engine_buffer_cleanup(path);
       return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
@@ -1297,9 +1308,9 @@ int lc_engine_parse_list_attachments_response_json(
                      &parsed);
     return rc;
   }
-  response->namespace_name = lc_engine_strdup_local(parsed.namespace_name);
+  response->ns = lc_engine_strdup_local(parsed.ns);
   response->key = lc_engine_strdup_local(parsed.key);
-  if ((parsed.namespace_name != NULL && response->namespace_name == NULL) ||
+  if ((parsed.ns != NULL && response->ns == NULL) ||
       (parsed.key != NULL && response->key == NULL)) {
     runtime->cleanup(runtime, &lc_engine_list_attachments_response_map,
                      &parsed);
@@ -1383,7 +1394,7 @@ void lc_engine_list_attachments_response_cleanup(
   if (response == NULL) {
     return;
   }
-  lc_engine_free_string(&response->namespace_name);
+  lc_engine_free_string(&response->ns);
   lc_engine_free_string(&response->key);
   for (index = 0U; index < response->attachment_count; ++index) {
     lc_engine_attachment_info_cleanup(&response->attachments[index]);
@@ -1437,7 +1448,7 @@ int lc_engine_client_get_into(lc_engine_client *client,
   lc_engine_stream_request_state state;
   lc_engine_buffer path;
   struct curl_slist *headers;
-  const char *namespace_name;
+  const char *ns;
   int rc;
 
   if (client == NULL || request == NULL || writer == NULL || response == NULL ||
@@ -1453,11 +1464,10 @@ int lc_engine_client_get_into(lc_engine_client *client,
         "get_into requires lease_id unless public_read is enabled");
   }
 
-  namespace_name =
-      lc_engine_effective_namespace(client, request->namespace_name);
-  rc = lc_engine_attachment_build_query(
-      &path, "/v1/get", namespace_name, request->key, NULL,
-      request->public_read, NULL, NULL, 0, 0L, 0, error);
+  ns = lc_engine_effective_namespace(client, request->ns);
+  rc = lc_engine_attachment_build_query(&path, "/v1/get", ns, request->key,
+                                        NULL, request->public_read, NULL, NULL,
+                                        0, 0L, 0, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
@@ -1497,7 +1507,7 @@ int lc_engine_client_update_from(lc_engine_client *client,
   lc_engine_stream_request_state state;
   lc_engine_buffer path;
   struct curl_slist *headers;
-  const char *namespace_name;
+  const char *ns;
   char if_version_buffer[64];
   lc_engine_update_response_json parsed;
   int rc;
@@ -1512,11 +1522,9 @@ int lc_engine_client_update_from(lc_engine_client *client,
         "and fencing_token");
   }
 
-  namespace_name =
-      lc_engine_effective_namespace(client, request->namespace_name);
-  rc = lc_engine_attachment_build_query(&path, "/v1/update", namespace_name,
-                                        request->key, NULL, 0, NULL, NULL, 0,
-                                        0L, 0, error);
+  ns = lc_engine_effective_namespace(client, request->ns);
+  rc = lc_engine_attachment_build_query(&path, "/v1/update", ns, request->key,
+                                        NULL, 0, NULL, NULL, 0, 0L, 0, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
@@ -1636,8 +1644,7 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
 
   lc_engine_enqueue_response_cleanup(response);
   memset(&meta_src, 0, sizeof(meta_src));
-  meta_src.namespace_name =
-      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  meta_src.ns = (char *)lc_engine_effective_namespace(client, request->ns);
   meta_src.queue = (char *)request->queue;
   meta_src.delay_seconds = request->delay_seconds;
   meta_src.visibility_timeout_seconds = request->visibility_timeout_seconds;
@@ -1758,10 +1765,10 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
                                &parsed);
     return rc;
   }
-  response->namespace_name = lc_engine_strdup_local(parsed.namespace_name);
+  response->ns = lc_engine_strdup_local(parsed.ns);
   response->queue = lc_engine_strdup_local(parsed.queue);
   response->message_id = lc_engine_strdup_local(parsed.message_id);
-  if ((parsed.namespace_name != NULL && response->namespace_name == NULL) ||
+  if ((parsed.ns != NULL && response->ns == NULL) ||
       (parsed.queue != NULL && response->queue == NULL) ||
       (parsed.message_id != NULL && response->message_id == NULL)) {
     lc_engine_lonejson_cleanup(client, &lc_engine_enqueue_response_map,
@@ -1832,7 +1839,7 @@ int lc_engine_client_attach_from(lc_engine_client *client,
   lc_engine_stream_request_state state;
   lc_engine_buffer path;
   struct curl_slist *headers;
-  const char *namespace_name;
+  const char *ns;
   lc_engine_attach_response_json parsed;
   int rc;
 
@@ -1844,12 +1851,11 @@ int lc_engine_client_attach_from(lc_engine_client *client,
         "attach_from requires client, request, reader, response, error, key, "
         "name, lease_id, and txn_id");
   }
-  namespace_name =
-      lc_engine_effective_namespace(client, request->namespace_name);
+  ns = lc_engine_effective_namespace(client, request->ns);
   rc = lc_engine_attachment_build_query(
-      &path, "/v1/attachments", namespace_name, request->key, NULL, 0,
-      request->name, request->content_type, request->prevent_overwrite,
-      request->max_bytes, request->has_max_bytes, error);
+      &path, "/v1/attachments", ns, request->key, NULL, 0, request->name,
+      request->content_type, request->prevent_overwrite, request->max_bytes,
+      request->has_max_bytes, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
@@ -1912,7 +1918,7 @@ int lc_engine_client_list_attachments(
     lc_engine_client *client, const lc_engine_list_attachments_request *request,
     lc_engine_list_attachments_response *response, lc_engine_error *error) {
   lc_engine_buffer path;
-  const char *namespace_name;
+  const char *ns;
   lc_engine_header_pair headers[3];
   size_t header_count;
   lc_engine_http_result result;
@@ -1932,11 +1938,10 @@ int lc_engine_client_list_attachments(
                                       "list_attachments requires lease_id and "
                                       "txn_id unless public_read is enabled");
   }
-  namespace_name =
-      lc_engine_effective_namespace(client, request->namespace_name);
+  ns = lc_engine_effective_namespace(client, request->ns);
   rc = lc_engine_attachment_build_query(
-      &path, "/v1/attachments", namespace_name, request->key, NULL,
-      request->public_read, NULL, NULL, 0, 0L, 0, error);
+      &path, "/v1/attachments", ns, request->key, NULL, request->public_read,
+      NULL, NULL, 0, 0L, 0, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
@@ -1977,9 +1982,9 @@ int lc_engine_client_list_attachments(
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
-  response->namespace_name = lc_engine_strdup_local(parsed.namespace_name);
+  response->ns = lc_engine_strdup_local(parsed.ns);
   response->key = lc_engine_strdup_local(parsed.key);
-  if ((parsed.namespace_name != NULL && response->namespace_name == NULL) ||
+  if ((parsed.ns != NULL && response->ns == NULL) ||
       (parsed.key != NULL && response->key == NULL)) {
     lc_engine_lonejson_cleanup(client, &lc_engine_list_attachments_response_map,
                                &parsed);
@@ -2040,7 +2045,7 @@ int lc_engine_client_get_attachment_into(
   lc_engine_stream_request_state state;
   lc_engine_buffer path;
   struct curl_slist *headers;
-  const char *namespace_name;
+  const char *ns;
   int rc;
 
   if (client == NULL || request == NULL || writer == NULL || response == NULL ||
@@ -2063,10 +2068,9 @@ int lc_engine_client_get_attachment_into(
         "get_attachment_into requires lease_id and txn_id unless public_read "
         "is enabled");
   }
-  namespace_name =
-      lc_engine_effective_namespace(client, request->namespace_name);
+  ns = lc_engine_effective_namespace(client, request->ns);
   rc = lc_engine_attachment_build_query(
-      &path, "/v1/attachment", namespace_name, request->key, &request->selector,
+      &path, "/v1/attachment", ns, request->key, &request->selector,
       request->public_read, NULL, NULL, 0, 0L, 0, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
@@ -2107,7 +2111,7 @@ int lc_engine_client_delete_attachment(
     const lc_engine_delete_attachment_request *request,
     lc_engine_delete_attachment_response *response, lc_engine_error *error) {
   lc_engine_buffer path;
-  const char *namespace_name;
+  const char *ns;
   lc_engine_header_pair headers[3];
   char token_buf[64];
   lc_engine_http_result result;
@@ -2122,9 +2126,8 @@ int lc_engine_client_delete_attachment(
         "delete_attachment requires client, request, response, error, key, "
         "lease_id, and txn_id");
   }
-  namespace_name =
-      lc_engine_effective_namespace(client, request->namespace_name);
-  rc = lc_engine_attachment_build_query(&path, "/v1/attachment", namespace_name,
+  ns = lc_engine_effective_namespace(client, request->ns);
+  rc = lc_engine_attachment_build_query(&path, "/v1/attachment", ns,
                                         request->key, &request->selector, 0,
                                         NULL, NULL, 0, 0L, 0, error);
   if (rc != LC_ENGINE_OK) {
@@ -2176,7 +2179,7 @@ int lc_engine_client_delete_all_attachments(
     lc_engine_delete_all_attachments_response *response,
     lc_engine_error *error) {
   lc_engine_buffer path;
-  const char *namespace_name;
+  const char *ns;
   lc_engine_header_pair headers[3];
   char token_buf[64];
   lc_engine_http_result result;
@@ -2191,11 +2194,10 @@ int lc_engine_client_delete_all_attachments(
         "delete_all_attachments requires client, request, response, error, "
         "key, lease_id, and txn_id");
   }
-  namespace_name =
-      lc_engine_effective_namespace(client, request->namespace_name);
-  rc = lc_engine_attachment_build_query(&path, "/v1/attachments",
-                                        namespace_name, request->key, NULL, 0,
-                                        NULL, NULL, 0, 0L, 0, error);
+  ns = lc_engine_effective_namespace(client, request->ns);
+  rc = lc_engine_attachment_build_query(&path, "/v1/attachments", ns,
+                                        request->key, NULL, 0, NULL, NULL, 0,
+                                        0L, 0, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }

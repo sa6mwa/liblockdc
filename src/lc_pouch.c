@@ -75,7 +75,7 @@ static lc_pouch_writer_root_lock_entry *lc_pouch_writer_root_locks;
 #define LC_POUCH_DEFAULT_INDEXER_FLUSH_INTERVAL_SECONDS 10U
 
 struct lc_pouch_indexer_pending_namespace {
-  char *namespace_name;
+  char *ns;
   uint64_t write_count;
   struct lc_pouch_indexer_pending_namespace *next;
 };
@@ -621,198 +621,1595 @@ static void lc_pouch_compaction_deadline(lc_pouch *pouch,
   }
 }
 
-static void lc_pouch_janitor_deadline(lc_pouch *pouch,
-                                      struct timespec *deadline) {
-  uint64_t seconds;
-
-  if (deadline == NULL) {
-    return;
-  }
-  clock_gettime(CLOCK_REALTIME, deadline);
-  seconds = pouch->janitor_interval_seconds;
-  if (seconds > (uint64_t)(LONG_MAX - deadline->tv_sec)) {
-    deadline->tv_sec = LONG_MAX;
-  } else {
-    deadline->tv_sec += (time_t)seconds;
-  }
-}
-
-int lc_pouch_compaction_track_namespace(lc_pouch *pouch,
-                                        const char *namespace_name,
-                                        lc_error *error) {
-  char **next_namespaces;
+static int lc_pouch_compaction_track_namespace(lc_pouch *pouch, const char *ns,
+                                               int terminal, int *queued,
+                                               lc_error *error) {
   char *name_copy;
   size_t index;
-  size_t next_capacity;
 
-  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+  if (pouch == NULL || ns == NULL || ns[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch compaction namespace requires inputs", NULL,
                         NULL, "pouch");
+  }
+  if (queued != NULL) {
+    *queued = 0;
   }
   if (!pouch->compaction_mutex_initialized) {
     return LC_OK;
   }
   pthread_mutex_lock(&pouch->compaction_mutex);
   for (index = 0U; index < pouch->compaction_namespace_count; ++index) {
-    if (strcmp(pouch->compaction_namespaces[index], namespace_name) == 0) {
+    if (strcmp(pouch->compaction_namespaces[index], ns) == 0) {
+      if (terminal) {
+        pouch->compaction_namespace_terminal[index] = 1U;
+      }
       pthread_mutex_unlock(&pouch->compaction_mutex);
+      if (queued != NULL) {
+        *queued = 1;
+      }
       return LC_OK;
     }
   }
-  if (pouch->compaction_namespace_count >=
-      pouch->compaction_namespace_capacity) {
-    next_capacity = pouch->compaction_namespace_capacity == 0U
-                        ? 8U
-                        : pouch->compaction_namespace_capacity * 2U;
-    if (next_capacity <= pouch->compaction_namespace_capacity ||
-        next_capacity > (size_t)-1 / sizeof(*next_namespaces)) {
+  if (pouch->compaction_namespace_capacity == 0U) {
+    pouch->compaction_namespaces = (char **)lc_alloc_with_allocator(
+        &pouch->allocator, LC_POUCH_COMPACTION_QUEUE_MAX_NAMESPACES *
+                               sizeof(*pouch->compaction_namespaces));
+    pouch->compaction_namespace_terminal =
+        (unsigned char *)lc_alloc_with_allocator(
+            &pouch->allocator,
+            LC_POUCH_COMPACTION_QUEUE_MAX_NAMESPACES *
+                sizeof(*pouch->compaction_namespace_terminal));
+    if (pouch->compaction_namespaces == NULL ||
+        pouch->compaction_namespace_terminal == NULL) {
+      lc_free_with_allocator(&pouch->allocator, pouch->compaction_namespaces);
+      lc_free_with_allocator(&pouch->allocator,
+                             pouch->compaction_namespace_terminal);
+      pouch->compaction_namespaces = NULL;
+      pouch->compaction_namespace_terminal = NULL;
       pthread_mutex_unlock(&pouch->compaction_mutex);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "pouch compaction namespace count exceeds limit",
-                          NULL, NULL, NULL);
-    }
-    next_namespaces = (char **)lc_realloc_with_allocator(
-        &pouch->allocator, pouch->compaction_namespaces,
-        next_capacity * sizeof(*next_namespaces));
-    if (next_namespaces == NULL) {
-      pthread_mutex_unlock(&pouch->compaction_mutex);
-      return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to grow pouch compaction namespaces", NULL,
+                          "failed to allocate pouch compaction queue", NULL,
                           NULL, NULL);
     }
-    pouch->compaction_namespaces = next_namespaces;
-    pouch->compaction_namespace_capacity = next_capacity;
+    pouch->compaction_namespace_capacity =
+        LC_POUCH_COMPACTION_QUEUE_MAX_NAMESPACES;
   }
-  name_copy = lc_strdup_with_allocator(&pouch->allocator, namespace_name);
+  if (pouch->compaction_namespace_count >=
+      pouch->compaction_namespace_capacity) {
+    pthread_mutex_unlock(&pouch->compaction_mutex);
+    return LC_OK;
+  }
+  name_copy = lc_strdup_with_allocator(&pouch->allocator, ns);
   if (name_copy == NULL) {
     pthread_mutex_unlock(&pouch->compaction_mutex);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to copy pouch compaction namespace", NULL, NULL,
                         NULL);
   }
-  pouch->compaction_namespaces[pouch->compaction_namespace_count++] = name_copy;
+  pouch->compaction_namespaces[pouch->compaction_namespace_count] = name_copy;
+  pouch->compaction_namespace_terminal[pouch->compaction_namespace_count] =
+      terminal ? 1U : 0U;
+  ++pouch->compaction_namespace_count;
   pthread_mutex_unlock(&pouch->compaction_mutex);
+  if (queued != NULL) {
+    *queued = 1;
+  }
   return LC_OK;
 }
 
-static int lc_pouch_compaction_copy_namespaces(lc_pouch *pouch,
-                                               char ***out_namespaces,
-                                               size_t *out_count,
-                                               lc_error *error) {
-  char **namespaces;
-  size_t count;
-  size_t index;
+static int lc_pouch_terminal_reclaim_directory(lc_pouch *pouch, int create,
+                                               char **out, lc_error *error) {
+  char *control_path;
+  char *marker_path;
+  int rc;
 
-  *out_namespaces = NULL;
-  *out_count = 0U;
-  pthread_mutex_lock(&pouch->compaction_mutex);
-  count = pouch->compaction_namespace_count;
-  namespaces = count > 0U ? (char **)lc_calloc_with_allocator(
-                                &pouch->allocator, count, sizeof(*namespaces))
-                          : NULL;
-  if (count > 0U && namespaces == NULL) {
-    pthread_mutex_unlock(&pouch->compaction_mutex);
+  *out = NULL;
+  control_path =
+      lc_pouch_path_join(&pouch->allocator, pouch->root_path, ".lockd");
+  marker_path = control_path != NULL
+                    ? lc_pouch_path_join(&pouch->allocator, control_path,
+                                         "terminal-reclaim")
+                    : NULL;
+  if (control_path == NULL || marker_path == NULL) {
+    lc_free_with_allocator(&pouch->allocator, control_path);
+    lc_free_with_allocator(&pouch->allocator, marker_path);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to copy pouch compaction namespaces", NULL,
-                        NULL, NULL);
+                        "failed to allocate pouch terminal reclaim path", NULL,
+                        NULL, "pouch");
   }
-  for (index = 0U; index < count; ++index) {
-    namespaces[index] = lc_strdup_with_allocator(
-        &pouch->allocator, pouch->compaction_namespaces[index]);
-    if (namespaces[index] == NULL) {
-      while (index > 0U) {
-        lc_free_with_allocator(&pouch->allocator, namespaces[--index]);
-      }
-      lc_free_with_allocator(&pouch->allocator, namespaces);
-      pthread_mutex_unlock(&pouch->compaction_mutex);
-      return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to copy pouch compaction namespace", NULL,
-                          NULL, NULL);
+  rc = LC_OK;
+  if (create) {
+    rc = lc_pouch_path_ensure_directory(
+        control_path, "failed to create pouch control directory", error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_path_ensure_directory(
+          marker_path, "failed to create pouch terminal reclaim directory",
+          error);
     }
   }
-  pthread_mutex_unlock(&pouch->compaction_mutex);
-  *out_namespaces = namespaces;
-  *out_count = count;
+  lc_free_with_allocator(&pouch->allocator, control_path);
+  if (rc != LC_OK) {
+    lc_free_with_allocator(&pouch->allocator, marker_path);
+    return rc;
+  }
+  *out = marker_path;
   return LC_OK;
 }
 
-static void lc_pouch_compaction_namespaces_cleanup(lc_pouch *pouch,
-                                                   char **namespaces,
-                                                   size_t count) {
-  size_t index;
+static int lc_pouch_terminal_reclaim_marker_path(lc_pouch *pouch,
+                                                 const char *ns, int create,
+                                                 char **directory, char **path,
+                                                 lc_error *error) {
+  char *leaf;
+  int rc;
 
-  for (index = 0U; index < count; ++index) {
-    lc_free_with_allocator(&pouch->allocator, namespaces[index]);
+  *directory = NULL;
+  *path = NULL;
+  rc = lc_pouch_terminal_reclaim_directory(pouch, create, directory, error);
+  if (rc != LC_OK) {
+    return rc;
   }
-  lc_free_with_allocator(&pouch->allocator, namespaces);
+  leaf = lc_pouch_path_escape_name(&pouch->allocator, ns);
+  if (leaf == NULL) {
+    lc_free_with_allocator(&pouch->allocator, *directory);
+    *directory = NULL;
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to encode pouch terminal reclaim namespace",
+                        NULL, NULL, "pouch");
+  }
+  *path = lc_pouch_path_join(&pouch->allocator, *directory, leaf);
+  lc_free_with_allocator(&pouch->allocator, leaf);
+  if (*path == NULL) {
+    lc_free_with_allocator(&pouch->allocator, *directory);
+    *directory = NULL;
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch terminal reclaim marker",
+                        NULL, NULL, "pouch");
+  }
+  return LC_OK;
 }
 
-static int lc_pouch_track_root_namespaces(lc_pouch *pouch, lc_error *error) {
-  char *namespaces_path;
+static int lc_pouch_terminal_reclaim_marker_write(lc_pouch *pouch,
+                                                  const char *ns,
+                                                  lc_error *error) {
+  char *directory;
+  char *path;
+  int fd;
+  int rc;
+
+  directory = NULL;
+  path = NULL;
+  rc = lc_pouch_terminal_reclaim_marker_path(pouch, ns, 1, &directory, &path,
+                                             error);
+  if (rc == LC_OK) {
+    fd = open(path, O_WRONLY | O_CREAT, 0666);
+    if (fd < 0) {
+      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to create pouch terminal reclaim marker",
+                        strerror(errno), path, "pouch");
+    } else {
+      if (fsync(fd) != 0) {
+        rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to sync pouch terminal reclaim marker",
+                          strerror(errno), path, "pouch");
+      }
+      if (close(fd) != 0 && rc == LC_OK) {
+        rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to close pouch terminal reclaim marker",
+                          strerror(errno), path, "pouch");
+      }
+      if (rc == LC_OK) {
+        rc = lc_pouch_path_fsync_directory(
+            directory, "failed to sync pouch terminal reclaim directory",
+            error);
+      }
+    }
+  }
+  lc_free_with_allocator(&pouch->allocator, directory);
+  lc_free_with_allocator(&pouch->allocator, path);
+  return rc;
+}
+
+static int lc_pouch_terminal_reclaim_marker_take(lc_pouch *pouch, char **ns,
+                                                 lc_error *error) {
+  char *directory;
+  char *after_cursor_leaf;
+  char *after_cursor_namespace;
+  char *first_leaf;
+  char *first_namespace;
   DIR *dir;
   struct dirent *entry;
   int rc;
 
-  if (pouch == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch namespace tracking requires pouch", NULL, NULL,
-                        "pouch");
+  *ns = NULL;
+  directory = NULL;
+  first_leaf = NULL;
+  first_namespace = NULL;
+  after_cursor_leaf = NULL;
+  after_cursor_namespace = NULL;
+  rc = lc_pouch_terminal_reclaim_directory(pouch, 0, &directory, error);
+  if (rc != LC_OK) {
+    return rc;
   }
-  namespaces_path =
-      lc_pouch_path_join(&pouch->allocator, pouch->root_path, "namespaces");
-  if (namespaces_path == NULL) {
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch namespaces path", NULL, NULL,
-                        "pouch");
-  }
-  dir = opendir(namespaces_path);
-  lc_free_with_allocator(&pouch->allocator, namespaces_path);
+  dir = opendir(directory);
   if (dir == NULL) {
-    if (errno == ENOENT) {
-      return LC_OK;
-    }
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to scan pouch namespaces", strerror(errno),
-                        NULL, "pouch");
+    rc = errno == ENOENT
+             ? LC_OK
+             : lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                            "failed to open pouch terminal reclaim directory",
+                            strerror(errno), directory, "pouch");
+    lc_free_with_allocator(&pouch->allocator, directory);
+    return rc;
   }
   rc = LC_OK;
-  while (rc == LC_OK) {
-    char *namespace_name;
+  while ((entry = readdir(dir)) != NULL) {
+    if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+      char *entry_namespace;
+      char *entry_leaf;
+      int select_after_cursor;
+      int select_first;
 
-    errno = 0;
-    entry = readdir(dir);
-    if (entry == NULL) {
-      if (errno != 0) {
-        rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                          "failed to scan pouch namespaces", strerror(errno),
-                          NULL, "pouch");
+      select_first =
+          first_leaf == NULL || strcmp(entry->d_name, first_leaf) < 0;
+      select_after_cursor =
+          pouch->terminal_reclaim_marker_cursor != NULL &&
+          strcmp(entry->d_name, pouch->terminal_reclaim_marker_cursor) > 0 &&
+          (after_cursor_leaf == NULL ||
+           strcmp(entry->d_name, after_cursor_leaf) < 0);
+      if (!select_first && !select_after_cursor) {
+        continue;
       }
-      break;
+      entry_namespace =
+          lc_pouch_path_unescape_name(&pouch->allocator, entry->d_name);
+      if (entry_namespace == NULL) {
+        continue;
+      }
+      if (select_first) {
+        entry_leaf = lc_strdup_with_allocator(&pouch->allocator, entry->d_name);
+        if (entry_leaf != NULL) {
+          lc_free_with_allocator(&pouch->allocator, first_leaf);
+          lc_free_with_allocator(&pouch->allocator, first_namespace);
+          first_leaf = entry_leaf;
+          first_namespace = entry_namespace;
+          entry_namespace = NULL;
+        }
+      }
+      if (select_after_cursor) {
+        if (entry_namespace == NULL) {
+          entry_namespace =
+              lc_pouch_path_unescape_name(&pouch->allocator, entry->d_name);
+        }
+        entry_leaf = lc_strdup_with_allocator(&pouch->allocator, entry->d_name);
+        if (entry_namespace != NULL && entry_leaf != NULL) {
+          lc_free_with_allocator(&pouch->allocator, after_cursor_leaf);
+          lc_free_with_allocator(&pouch->allocator, after_cursor_namespace);
+          after_cursor_leaf = entry_leaf;
+          after_cursor_namespace = entry_namespace;
+          entry_namespace = NULL;
+        } else {
+          lc_free_with_allocator(&pouch->allocator, entry_leaf);
+          lc_free_with_allocator(&pouch->allocator, entry_namespace);
+          entry_namespace = NULL;
+        }
+      }
+      lc_free_with_allocator(&pouch->allocator, entry_namespace);
     }
-    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-      continue;
-    }
-    namespace_name =
-        lc_pouch_path_unescape_name(&pouch->allocator, entry->d_name);
-    if (namespace_name == NULL) {
-      continue;
-    }
-    rc = lc_pouch_compaction_track_namespace(pouch, namespace_name, error);
-    lc_free_with_allocator(&pouch->allocator, namespace_name);
   }
   if (closedir(dir) != 0 && rc == LC_OK) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                      "failed to close pouch namespaces", strerror(errno), NULL,
-                      "pouch");
+                      "failed to close pouch terminal reclaim directory",
+                      strerror(errno), directory, "pouch");
   }
+  if (rc == LC_OK) {
+    if (after_cursor_namespace != NULL) {
+      *ns = after_cursor_namespace;
+      after_cursor_namespace = NULL;
+      lc_free_with_allocator(&pouch->allocator,
+                             pouch->terminal_reclaim_marker_cursor);
+      pouch->terminal_reclaim_marker_cursor = after_cursor_leaf;
+      after_cursor_leaf = NULL;
+    } else if (first_namespace != NULL) {
+      *ns = first_namespace;
+      first_namespace = NULL;
+      lc_free_with_allocator(&pouch->allocator,
+                             pouch->terminal_reclaim_marker_cursor);
+      pouch->terminal_reclaim_marker_cursor = first_leaf;
+      first_leaf = NULL;
+    }
+  }
+  lc_free_with_allocator(&pouch->allocator, after_cursor_leaf);
+  lc_free_with_allocator(&pouch->allocator, after_cursor_namespace);
+  lc_free_with_allocator(&pouch->allocator, first_leaf);
+  lc_free_with_allocator(&pouch->allocator, first_namespace);
+  lc_free_with_allocator(&pouch->allocator, directory);
   return rc;
 }
 
+int lc_pouch_terminal_reclaim_marker_remove(lc_pouch *pouch, const char *ns,
+                                            lc_error *error) {
+  char *directory;
+  char *path;
+  int rc;
+
+  directory = NULL;
+  path = NULL;
+  rc = lc_pouch_terminal_reclaim_marker_path(pouch, ns, 0, &directory, &path,
+                                             error);
+  if (rc == LC_OK) {
+    if (unlink(path) != 0 && errno != ENOENT) {
+      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to remove pouch terminal reclaim marker",
+                        strerror(errno), path, "pouch");
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_path_fsync_directory(
+          directory, "failed to sync pouch terminal reclaim directory", error);
+    }
+  }
+  lc_free_with_allocator(&pouch->allocator, directory);
+  lc_free_with_allocator(&pouch->allocator, path);
+  return rc;
+}
+
+#define LC_POUCH_OUTBOX_STATE_RECLAIM_MAGIC "LOR1"
+#define LC_POUCH_OUTBOX_STATE_RECLAIM_HEADER_BYTES 12U
+#define LC_POUCH_OUTBOX_STATE_RECLAIM_MAX_BYTES 4096U
+
+static int lc_pouch_outbox_state_reclaim_marker_id_valid(const char *id) {
+  const unsigned char *cursor;
+
+  if (id == NULL || id[0] == '\0') {
+    return 0;
+  }
+  cursor = (const unsigned char *)id;
+  while (*cursor != '\0') {
+    if (!((*cursor >= (unsigned char)'A' && *cursor <= (unsigned char)'Z') ||
+          (*cursor >= (unsigned char)'a' && *cursor <= (unsigned char)'z') ||
+          (*cursor >= (unsigned char)'0' && *cursor <= (unsigned char)'9') ||
+          *cursor == (unsigned char)'_' || *cursor == (unsigned char)'-')) {
+      return 0;
+    }
+    ++cursor;
+  }
+  return 1;
+}
+
+static int lc_pouch_outbox_state_reclaim_directory(lc_pouch *pouch,
+                                                   const char *ns, int create,
+                                                   char **out,
+                                                   lc_error *error) {
+  char *control;
+  char *root;
+  char *leaf;
+  char *directory;
+  int rc;
+
+  if (pouch == NULL || ns == NULL || ns[0] == '\0' || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch outbox state reclaim requires namespace and "
+                        "output",
+                        NULL, NULL, "pouch");
+  }
+  *out = NULL;
+  control = lc_pouch_path_join(&pouch->allocator, pouch->root_path, ".lockd");
+  root = control != NULL ? lc_pouch_path_join(&pouch->allocator, control,
+                                              "outbox-state-reclaim")
+                         : NULL;
+  leaf = lc_pouch_path_escape_name(&pouch->allocator, ns);
+  directory = root != NULL && leaf != NULL
+                  ? lc_pouch_path_join(&pouch->allocator, root, leaf)
+                  : NULL;
+  lc_free_with_allocator(&pouch->allocator, leaf);
+  if (control == NULL || root == NULL || directory == NULL) {
+    lc_free_with_allocator(&pouch->allocator, control);
+    lc_free_with_allocator(&pouch->allocator, root);
+    lc_free_with_allocator(&pouch->allocator, directory);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch outbox state reclaim path",
+                        NULL, NULL, "pouch");
+  }
+  rc = LC_OK;
+  if (create) {
+    rc = lc_pouch_path_ensure_directory(
+        control, "failed to create pouch control directory", error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_path_ensure_directory(
+          root, "failed to create pouch outbox state reclaim directory", error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_path_ensure_directory(
+          directory, "failed to create pouch outbox state reclaim namespace",
+          error);
+    }
+  }
+  lc_free_with_allocator(&pouch->allocator, control);
+  lc_free_with_allocator(&pouch->allocator, root);
+  if (rc != LC_OK) {
+    lc_free_with_allocator(&pouch->allocator, directory);
+    return rc;
+  }
+  *out = directory;
+  return LC_OK;
+}
+
+static int lc_pouch_outbox_state_reclaim_marker_path(
+    lc_pouch *pouch, const char *ns, const char *marker_id, int create,
+    char **directory_out, char **path_out, lc_error *error) {
+  char *directory;
+  char *path;
+  int rc;
+
+  if (directory_out == NULL || path_out == NULL ||
+      !lc_pouch_outbox_state_reclaim_marker_id_valid(marker_id)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "invalid pouch outbox state reclaim marker", NULL, NULL,
+                        "pouch");
+  }
+  *directory_out = NULL;
+  *path_out = NULL;
+  directory = NULL;
+  path = NULL;
+  rc = lc_pouch_outbox_state_reclaim_directory(pouch, ns, create, &directory,
+                                               error);
+  if (rc == LC_OK) {
+    path = lc_pouch_path_join(&pouch->allocator, directory, marker_id);
+    if (path == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch outbox state reclaim marker",
+                        NULL, NULL, "pouch");
+    }
+  }
+  if (rc != LC_OK) {
+    lc_free_with_allocator(&pouch->allocator, directory);
+    lc_free_with_allocator(&pouch->allocator, path);
+    return rc;
+  }
+  *directory_out = directory;
+  *path_out = path;
+  return LC_OK;
+}
+
+static int lc_pouch_outbox_state_reclaim_write_all(int fd,
+                                                   const unsigned char *bytes,
+                                                   size_t length,
+                                                   lc_error *error) {
+  size_t offset;
+
+  offset = 0U;
+  while (offset < length) {
+    ssize_t written = write(fd, bytes + offset, length - offset);
+
+    if (written < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to write pouch outbox state reclaim marker",
+                          strerror(errno), NULL, "pouch");
+    }
+    if (written == 0) {
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "pouch outbox state reclaim marker short write", NULL,
+                          NULL, "pouch");
+    }
+    offset += (size_t)written;
+  }
+  return LC_OK;
+}
+
+static unsigned long
+lc_pouch_outbox_state_reclaim_u32_read(const unsigned char *bytes) {
+  return ((unsigned long)bytes[0] << 24U) | ((unsigned long)bytes[1] << 16U) |
+         ((unsigned long)bytes[2] << 8U) | (unsigned long)bytes[3];
+}
+
+static void lc_pouch_outbox_state_reclaim_u32_write(unsigned char *bytes,
+                                                    unsigned long value) {
+  bytes[0] = (unsigned char)((value >> 24U) & 0xffUL);
+  bytes[1] = (unsigned char)((value >> 16U) & 0xffUL);
+  bytes[2] = (unsigned char)((value >> 8U) & 0xffUL);
+  bytes[3] = (unsigned char)(value & 0xffUL);
+}
+
+int lc_pouch_outbox_state_reclaim_marker_write(lc_pouch *pouch, const char *ns,
+                                               const char *marker_id,
+                                               const char *outbox_key,
+                                               const char *state_key,
+                                               lc_error *error) {
+  unsigned char *contents;
+  char *directory;
+  char *path;
+  char *temporary;
+  size_t outbox_length;
+  size_t state_length;
+  size_t contents_length;
+  size_t temporary_length;
+  unsigned long attempt;
+  int fd;
+  int rc;
+
+  if (outbox_key == NULL || outbox_key[0] == '\0' || state_key == NULL ||
+      state_key[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch outbox state reclaim marker requires keys", NULL,
+                        NULL, "pouch");
+  }
+  outbox_length = strlen(outbox_key);
+  state_length = strlen(state_key);
+  if (outbox_length > 0xffffffffUL || state_length > 0xffffffffUL ||
+      outbox_length + state_length >
+          LC_POUCH_OUTBOX_STATE_RECLAIM_MAX_BYTES -
+              LC_POUCH_OUTBOX_STATE_RECLAIM_HEADER_BYTES) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch outbox state reclaim marker is too large", NULL,
+                        NULL, "pouch");
+  }
+  directory = NULL;
+  path = NULL;
+  temporary = NULL;
+  contents = NULL;
+  fd = -1;
+  rc = lc_pouch_outbox_state_reclaim_marker_path(pouch, ns, marker_id, 1,
+                                                 &directory, &path, error);
+  contents_length =
+      LC_POUCH_OUTBOX_STATE_RECLAIM_HEADER_BYTES + outbox_length + state_length;
+  if (rc == LC_OK) {
+    contents = (unsigned char *)lc_alloc_with_allocator(&pouch->allocator,
+                                                        contents_length);
+    if (contents == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch outbox state reclaim marker",
+                        NULL, NULL, "pouch");
+    }
+  }
+  if (rc == LC_OK) {
+    memcpy(contents, LC_POUCH_OUTBOX_STATE_RECLAIM_MAGIC, 4U);
+    lc_pouch_outbox_state_reclaim_u32_write(contents + 4U,
+                                            (unsigned long)outbox_length);
+    lc_pouch_outbox_state_reclaim_u32_write(contents + 8U,
+                                            (unsigned long)state_length);
+    memcpy(contents + LC_POUCH_OUTBOX_STATE_RECLAIM_HEADER_BYTES, outbox_key,
+           outbox_length);
+    memcpy(contents + LC_POUCH_OUTBOX_STATE_RECLAIM_HEADER_BYTES +
+               outbox_length,
+           state_key, state_length);
+    temporary_length = strlen(path) + 64U;
+    temporary =
+        (char *)lc_alloc_with_allocator(&pouch->allocator, temporary_length);
+    if (temporary == NULL) {
+      rc = lc_error_set(
+          error, LC_ERR_NOMEM, 0L,
+          "failed to allocate pouch outbox state reclaim temporary", NULL, NULL,
+          "pouch");
+    }
+  }
+  for (attempt = 0UL; rc == LC_OK && attempt < 32UL; ++attempt) {
+    snprintf(temporary, temporary_length, "%s.tmp.%ld.%lu", path,
+             (long)getpid(), attempt);
+    fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd >= 0) {
+      break;
+    }
+    if (errno != EEXIST) {
+      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to create pouch outbox state reclaim marker",
+                        strerror(errno), temporary, "pouch");
+    }
+  }
+  if (rc == LC_OK && fd < 0) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to allocate pouch outbox state reclaim temporary",
+                      NULL, NULL, "pouch");
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_outbox_state_reclaim_write_all(fd, contents, contents_length,
+                                                 error);
+  }
+  if (rc == LC_OK && fsync(fd) != 0) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to sync pouch outbox state reclaim marker",
+                      strerror(errno), temporary, "pouch");
+  }
+  if (fd >= 0 && close(fd) != 0 && rc == LC_OK) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to close pouch outbox state reclaim marker",
+                      strerror(errno), temporary, "pouch");
+  }
+  fd = -1;
+  if (rc == LC_OK && rename(temporary, path) != 0) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to publish pouch outbox state reclaim marker",
+                      strerror(errno), path, "pouch");
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_path_fsync_directory(
+        directory, "failed to sync pouch outbox state reclaim directory",
+        error);
+  }
+  if (rc != LC_OK && temporary != NULL) {
+    (void)unlink(temporary);
+  }
+  lc_free_with_allocator(&pouch->allocator, contents);
+  lc_free_with_allocator(&pouch->allocator, directory);
+  lc_free_with_allocator(&pouch->allocator, path);
+  lc_free_with_allocator(&pouch->allocator, temporary);
+  return rc;
+}
+
+static int lc_pouch_outbox_state_reclaim_read_all(int fd, unsigned char *bytes,
+                                                  size_t length,
+                                                  lc_error *error) {
+  size_t offset;
+
+  offset = 0U;
+  while (offset < length) {
+    ssize_t got = read(fd, bytes + offset, length - offset);
+
+    if (got < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to read pouch outbox state reclaim marker",
+                          strerror(errno), NULL, "pouch");
+    }
+    if (got == 0) {
+      return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "truncated pouch outbox state reclaim marker", NULL,
+                          NULL, "pouch");
+    }
+    offset += (size_t)got;
+  }
+  return LC_OK;
+}
+
+int lc_pouch_outbox_state_reclaim_marker_take(lc_pouch *pouch, const char *ns,
+                                              const char *after_marker_id,
+                                              char **marker_id_out,
+                                              char **outbox_key_out,
+                                              char **state_key_out,
+                                              lc_error *error) {
+  char *directory;
+  char *first;
+  char *after;
+  char *selected;
+  char *path;
+  unsigned char *contents;
+  struct dirent *entry;
+  struct stat st;
+  DIR *dir;
+  size_t contents_length;
+  unsigned long outbox_length;
+  unsigned long state_length;
+  int fd;
+  int rc;
+
+  if (marker_id_out == NULL || outbox_key_out == NULL ||
+      state_key_out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch outbox state reclaim take requires outputs",
+                        NULL, NULL, "pouch");
+  }
+  *marker_id_out = NULL;
+  *outbox_key_out = NULL;
+  *state_key_out = NULL;
+  directory = NULL;
+  first = NULL;
+  after = NULL;
+  selected = NULL;
+  path = NULL;
+  contents = NULL;
+  dir = NULL;
+  fd = -1;
+  rc = lc_pouch_outbox_state_reclaim_directory(pouch, ns, 0, &directory, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  dir = opendir(directory);
+  if (dir == NULL) {
+    rc = errno == ENOENT
+             ? LC_OK
+             : lc_error_set(
+                   error, LC_ERR_TRANSPORT, 0L,
+                   "failed to open pouch outbox state reclaim directory",
+                   strerror(errno), directory, "pouch");
+    goto cleanup;
+  }
+  while ((entry = readdir(dir)) != NULL) {
+    if (!lc_pouch_outbox_state_reclaim_marker_id_valid(entry->d_name)) {
+      continue;
+    }
+    if (first == NULL || strcmp(entry->d_name, first) < 0) {
+      char *copy = lc_strdup_with_allocator(&pouch->allocator, entry->d_name);
+
+      if (copy == NULL) {
+        rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to retain pouch outbox state reclaim marker",
+                          NULL, NULL, "pouch");
+        goto cleanup;
+      }
+      lc_free_with_allocator(&pouch->allocator, first);
+      first = copy;
+    }
+    if (after_marker_id != NULL && after_marker_id[0] != '\0' &&
+        strcmp(entry->d_name, after_marker_id) > 0 &&
+        (after == NULL || strcmp(entry->d_name, after) < 0)) {
+      char *copy = lc_strdup_with_allocator(&pouch->allocator, entry->d_name);
+
+      if (copy == NULL) {
+        rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to retain pouch outbox state reclaim marker",
+                          NULL, NULL, "pouch");
+        goto cleanup;
+      }
+      lc_free_with_allocator(&pouch->allocator, after);
+      after = copy;
+    }
+  }
+  selected = after != NULL ? after : first;
+  if (selected != NULL) {
+    if (selected == after) {
+      after = NULL;
+    } else {
+      first = NULL;
+    }
+    path = lc_pouch_path_join(&pouch->allocator, directory, selected);
+    if (path == NULL || lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_size < (off_t)LC_POUCH_OUTBOX_STATE_RECLAIM_HEADER_BYTES ||
+        st.st_size > (off_t)LC_POUCH_OUTBOX_STATE_RECLAIM_MAX_BYTES) {
+      rc = path == NULL
+               ? lc_error_set(error, LC_ERR_NOMEM, 0L,
+                              "failed to allocate pouch outbox state reclaim "
+                              "marker path",
+                              NULL, NULL, "pouch")
+               : lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                              "invalid pouch outbox state reclaim marker", NULL,
+                              NULL, "pouch");
+      goto cleanup;
+    }
+    contents_length = (size_t)st.st_size;
+    contents = (unsigned char *)lc_alloc_with_allocator(&pouch->allocator,
+                                                        contents_length);
+    if (contents == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to read pouch outbox state reclaim marker",
+                        NULL, NULL, "pouch");
+      goto cleanup;
+    }
+    fd = open(path, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) {
+      rc =
+          errno == ENOENT
+              ? LC_OK
+              : lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                             "failed to open pouch outbox state reclaim marker",
+                             strerror(errno), path, "pouch");
+      goto cleanup;
+    }
+    rc = lc_pouch_outbox_state_reclaim_read_all(fd, contents, contents_length,
+                                                error);
+    if (rc != LC_OK) {
+      goto cleanup;
+    }
+    if (memcmp(contents, LC_POUCH_OUTBOX_STATE_RECLAIM_MAGIC, 4U) != 0) {
+      rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "invalid pouch outbox state reclaim marker", NULL, NULL,
+                        "pouch");
+      goto cleanup;
+    }
+    outbox_length = lc_pouch_outbox_state_reclaim_u32_read(contents + 4U);
+    state_length = lc_pouch_outbox_state_reclaim_u32_read(contents + 8U);
+    if (outbox_length == 0UL || state_length == 0UL ||
+        outbox_length >
+            contents_length - LC_POUCH_OUTBOX_STATE_RECLAIM_HEADER_BYTES ||
+        state_length != contents_length -
+                            LC_POUCH_OUTBOX_STATE_RECLAIM_HEADER_BYTES -
+                            outbox_length) {
+      rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "invalid pouch outbox state reclaim marker lengths",
+                        NULL, NULL, "pouch");
+      goto cleanup;
+    }
+    *marker_id_out = selected;
+    selected = NULL;
+    *outbox_key_out = (char *)lc_alloc_with_allocator(
+        &pouch->allocator, (size_t)outbox_length + 1U);
+    *state_key_out = (char *)lc_alloc_with_allocator(&pouch->allocator,
+                                                     (size_t)state_length + 1U);
+    if (*outbox_key_out == NULL || *state_key_out == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy pouch outbox state reclaim marker",
+                        NULL, NULL, "pouch");
+      goto cleanup;
+    }
+    memcpy(*outbox_key_out,
+           contents + LC_POUCH_OUTBOX_STATE_RECLAIM_HEADER_BYTES,
+           (size_t)outbox_length);
+    (*outbox_key_out)[outbox_length] = '\0';
+    memcpy(*state_key_out,
+           contents + LC_POUCH_OUTBOX_STATE_RECLAIM_HEADER_BYTES +
+               outbox_length,
+           (size_t)state_length);
+    (*state_key_out)[state_length] = '\0';
+  }
+
+cleanup:
+  if (fd >= 0) {
+    (void)close(fd);
+  }
+  if (dir != NULL) {
+    (void)closedir(dir);
+  }
+  if (rc != LC_OK) {
+    lc_free_with_allocator(&pouch->allocator, *marker_id_out);
+    lc_free_with_allocator(&pouch->allocator, *outbox_key_out);
+    lc_free_with_allocator(&pouch->allocator, *state_key_out);
+    *marker_id_out = NULL;
+    *outbox_key_out = NULL;
+    *state_key_out = NULL;
+  }
+  lc_free_with_allocator(&pouch->allocator, directory);
+  lc_free_with_allocator(&pouch->allocator, first);
+  lc_free_with_allocator(&pouch->allocator, after);
+  lc_free_with_allocator(&pouch->allocator, selected);
+  lc_free_with_allocator(&pouch->allocator, path);
+  lc_free_with_allocator(&pouch->allocator, contents);
+  return rc;
+}
+
+int lc_pouch_outbox_state_reclaim_marker_remove(lc_pouch *pouch, const char *ns,
+                                                const char *marker_id,
+                                                lc_error *error) {
+  char *directory;
+  char *path;
+  int rc;
+
+  directory = NULL;
+  path = NULL;
+  rc = lc_pouch_outbox_state_reclaim_marker_path(pouch, ns, marker_id, 0,
+                                                 &directory, &path, error);
+  if (rc == LC_OK && unlink(path) != 0) {
+    if (errno == ENOENT) {
+      /* The marker directory is created only for stateful completion. A
+       * normal stateless dead-letter has nothing to retire, so there is no
+       * directory entry to persist. */
+      goto cleanup;
+    }
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to remove pouch outbox state reclaim marker",
+                      strerror(errno), path, "pouch");
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_path_fsync_directory(
+        directory, "failed to sync pouch outbox state reclaim directory",
+        error);
+  }
+cleanup:
+  lc_free_with_allocator(&pouch->allocator, directory);
+  lc_free_with_allocator(&pouch->allocator, path);
+  return rc;
+}
+
+/* Dead-letter retention has its own small control directory.  It is
+ * deliberately outside the namespace log so reclaim never needs the query
+ * engine, a namespace visit, or a derived-index warmup. */
+#define LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MAGIC "LDR1"
+#define LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_HEADER_BYTES 24U
+#define LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MAX_BYTES 8192U
+#define LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MISSING (-1002)
+
+static void lc_pouch_outbox_dead_letter_reclaim_u64_write(unsigned char *bytes,
+                                                          uint64_t value) {
+  unsigned int index;
+
+  for (index = 0U; index < 8U; ++index) {
+    bytes[7U - index] = (unsigned char)(value & 0xffU);
+    value >>= 8U;
+  }
+}
+
+static uint64_t
+lc_pouch_outbox_dead_letter_reclaim_u64_read(const unsigned char *bytes) {
+  uint64_t value;
+  unsigned int index;
+
+  value = 0U;
+  for (index = 0U; index < 8U; ++index)
+    value = (value << 8U) | (uint64_t)bytes[index];
+  return value;
+}
+
+static int lc_pouch_outbox_dead_letter_reclaim_directory(lc_pouch *pouch,
+                                                         const char *ns,
+                                                         int create, char **out,
+                                                         lc_error *error) {
+  char *control;
+  char *root;
+  char *leaf;
+  char *directory;
+  int rc;
+
+  if (pouch == NULL || ns == NULL || ns[0] == '\0' || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch dead-letter retention requires namespace", NULL,
+                        NULL, "pouch");
+  }
+  *out = NULL;
+  control = lc_pouch_path_join(&pouch->allocator, pouch->root_path, ".lockd");
+  root = control != NULL ? lc_pouch_path_join(&pouch->allocator, control,
+                                              "outbox-dead-letter-reclaim")
+                         : NULL;
+  leaf = lc_pouch_path_escape_name(&pouch->allocator, ns);
+  directory = root != NULL && leaf != NULL
+                  ? lc_pouch_path_join(&pouch->allocator, root, leaf)
+                  : NULL;
+  if (control == NULL || root == NULL || leaf == NULL || directory == NULL) {
+    lc_free_with_allocator(&pouch->allocator, control);
+    lc_free_with_allocator(&pouch->allocator, root);
+    lc_free_with_allocator(&pouch->allocator, leaf);
+    lc_free_with_allocator(&pouch->allocator, directory);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch dead-letter retention path",
+                        NULL, NULL, "pouch");
+  }
+  rc = LC_OK;
+  if (create) {
+    rc = lc_pouch_path_ensure_directory(
+        control, "failed to create pouch control directory", error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_path_fsync_directory(
+          pouch->root_path,
+          "failed to sync pouch root dead-letter retention directory", error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_path_ensure_directory(
+          root, "failed to create pouch dead-letter retention directory",
+          error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_path_fsync_directory(
+          control,
+          "failed to sync pouch dead-letter retention control "
+          "directory",
+          error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_path_ensure_directory(
+          directory, "failed to create pouch dead-letter namespace directory",
+          error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_path_fsync_directory(
+          root, "failed to sync pouch dead-letter retention namespace root",
+          error);
+    }
+  }
+  lc_free_with_allocator(&pouch->allocator, control);
+  lc_free_with_allocator(&pouch->allocator, root);
+  lc_free_with_allocator(&pouch->allocator, leaf);
+  if (rc != LC_OK) {
+    lc_free_with_allocator(&pouch->allocator, directory);
+    return rc;
+  }
+  *out = directory;
+  return LC_OK;
+}
+
+static int lc_pouch_outbox_dead_letter_marker_path(
+    lc_pouch *pouch, const char *ns, const char *marker_id, int create,
+    char **directory_out, char **path_out, lc_error *error) {
+  char *directory;
+  char *path;
+  int rc;
+
+  if (marker_id == NULL || !lc_xid_is_valid(marker_id)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "invalid pouch dead-letter retention marker", NULL,
+                        NULL, "pouch");
+  }
+  *directory_out = NULL;
+  *path_out = NULL;
+  directory = NULL;
+  path = NULL;
+  rc = lc_pouch_outbox_dead_letter_reclaim_directory(pouch, ns, create,
+                                                     &directory, error);
+  if (rc == LC_OK) {
+    path = lc_pouch_path_join(&pouch->allocator, directory, marker_id);
+    if (path == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch dead-letter retention marker",
+                        NULL, NULL, "pouch");
+    }
+  }
+  if (rc != LC_OK) {
+    lc_free_with_allocator(&pouch->allocator, directory);
+    lc_free_with_allocator(&pouch->allocator, path);
+    return rc;
+  }
+  *directory_out = directory;
+  *path_out = path;
+  return LC_OK;
+}
+
+void lc_pouch_outbox_dead_letter_marker_cleanup(
+    lc_pouch *pouch, lc_pouch_outbox_dead_letter_marker *marker) {
+  if (pouch == NULL || marker == NULL)
+    return;
+  lc_free_with_allocator(&pouch->allocator, marker->marker_id);
+  lc_free_with_allocator(&pouch->allocator, marker->outbox_key);
+  memset(marker, 0, sizeof(*marker));
+}
+
+static int lc_pouch_outbox_dead_letter_marker_clone(
+    lc_pouch *pouch, const lc_pouch_outbox_dead_letter_marker *source,
+    lc_pouch_outbox_dead_letter_marker *out, lc_error *error) {
+  if (pouch == NULL || source == NULL || out == NULL ||
+      source->marker_id == NULL || source->outbox_key == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "invalid pouch dead-letter retention marker", NULL,
+                        NULL, "pouch");
+  }
+  memset(out, 0, sizeof(*out));
+  out->marker_id =
+      lc_strdup_with_allocator(&pouch->allocator, source->marker_id);
+  out->outbox_key =
+      lc_strdup_with_allocator(&pouch->allocator, source->outbox_key);
+  if (out->marker_id == NULL || out->outbox_key == NULL) {
+    lc_pouch_outbox_dead_letter_marker_cleanup(pouch, out);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy pouch dead-letter retention marker",
+                        NULL, NULL, "pouch");
+  }
+  out->due_at_unix = source->due_at_unix;
+  out->retained_bytes = source->retained_bytes;
+  return LC_OK;
+}
+
+static int lc_pouch_outbox_dead_letter_marker_keep_lexical_first(
+    lc_pouch *pouch, const lc_pouch_outbox_dead_letter_marker *candidate,
+    lc_pouch_outbox_dead_letter_marker *selected, lc_error *error) {
+  int rc;
+
+  if (selected->marker_id != NULL &&
+      strcmp(selected->marker_id, candidate->marker_id) <= 0) {
+    return LC_OK;
+  }
+  lc_pouch_outbox_dead_letter_marker_cleanup(pouch, selected);
+  rc = lc_pouch_outbox_dead_letter_marker_clone(pouch, candidate, selected,
+                                                error);
+  return rc;
+}
+
+static int lc_pouch_outbox_dead_letter_marker_read(
+    lc_pouch *pouch, const char *directory, const char *marker_id,
+    lc_pouch_outbox_dead_letter_marker *out, lc_error *error) {
+  unsigned char *contents;
+  char *path;
+  struct stat st;
+  uint64_t due_bits;
+  uint64_t retained_bytes;
+  unsigned long key_length;
+  int fd;
+  int rc;
+
+  if (pouch == NULL || directory == NULL || marker_id == NULL || out == NULL ||
+      !lc_xid_is_valid(marker_id)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "invalid pouch dead-letter retention marker", NULL,
+                        NULL, "pouch");
+  }
+  memset(out, 0, sizeof(*out));
+  contents = NULL;
+  path = lc_pouch_path_join(&pouch->allocator, directory, marker_id);
+  fd = -1;
+  rc = path == NULL
+           ? lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch dead-letter retention path",
+                          NULL, NULL, "pouch")
+           : LC_OK;
+  if (rc == LC_OK && lstat(path, &st) != 0) {
+    rc = errno == ENOENT
+             ? LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MISSING
+             : lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                            "failed to inspect pouch dead-letter retention "
+                            "marker",
+                            strerror(errno), path, "pouch");
+  }
+  if (rc == LC_OK &&
+      (!S_ISREG(st.st_mode) ||
+       st.st_size < (off_t)LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_HEADER_BYTES ||
+       st.st_size > (off_t)LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MAX_BYTES)) {
+    rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                      "invalid pouch dead-letter retention marker", NULL, NULL,
+                      "pouch");
+  }
+  if (rc == LC_OK) {
+    contents = (unsigned char *)lc_alloc_with_allocator(&pouch->allocator,
+                                                        (size_t)st.st_size);
+    if (contents == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to read pouch dead-letter retention marker",
+                        NULL, NULL, "pouch");
+    }
+  }
+  if (rc == LC_OK) {
+    fd = open(path, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) {
+      rc = errno == ENOENT
+               ? LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MISSING
+               : lc_error_set(
+                     error, LC_ERR_TRANSPORT, 0L,
+                     "failed to open pouch dead-letter retention marker",
+                     strerror(errno), path, "pouch");
+    }
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_outbox_state_reclaim_read_all(fd, contents,
+                                                (size_t)st.st_size, error);
+  }
+  if (fd >= 0 && close(fd) != 0 && rc == LC_OK) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to close pouch dead-letter retention marker",
+                      strerror(errno), path, "pouch");
+  }
+  fd = -1;
+  if (rc == LC_OK &&
+      memcmp(contents, LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MAGIC, 4U) != 0) {
+    rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                      "invalid pouch dead-letter retention marker", NULL, NULL,
+                      "pouch");
+  }
+  due_bits = rc == LC_OK
+                 ? lc_pouch_outbox_dead_letter_reclaim_u64_read(contents + 4U)
+                 : 0U;
+  retained_bytes =
+      rc == LC_OK ? lc_pouch_outbox_dead_letter_reclaim_u64_read(contents + 12U)
+                  : 0U;
+  key_length = rc == LC_OK
+                   ? lc_pouch_outbox_state_reclaim_u32_read(contents + 20U)
+                   : 0UL;
+  if (rc == LC_OK &&
+      (key_length == 0UL ||
+       key_length !=
+           (unsigned long)((size_t)st.st_size -
+                           LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_HEADER_BYTES))) {
+    rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                      "invalid pouch dead-letter retention marker", NULL, NULL,
+                      "pouch");
+  }
+  if (rc == LC_OK) {
+    out->marker_id = lc_strdup_with_allocator(&pouch->allocator, marker_id);
+    out->outbox_key = (char *)lc_alloc_with_allocator(&pouch->allocator,
+                                                      (size_t)key_length + 1U);
+    if (out->marker_id == NULL || out->outbox_key == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy pouch dead-letter retention marker",
+                        NULL, NULL, "pouch");
+    }
+  }
+  if (rc == LC_OK) {
+    memcpy(out->outbox_key,
+           contents + LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_HEADER_BYTES,
+           (size_t)key_length);
+    out->outbox_key[key_length] = '\0';
+    out->due_at_unix = (lc_pouch_unix_seconds)(int64_t)due_bits;
+    out->retained_bytes = retained_bytes;
+    if (out->due_at_unix <= 0 || out->outbox_key[0] == '\0') {
+      rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "invalid pouch dead-letter retention marker", NULL,
+                        NULL, "pouch");
+    }
+  }
+  if (rc != LC_OK)
+    lc_pouch_outbox_dead_letter_marker_cleanup(pouch, out);
+  lc_free_with_allocator(&pouch->allocator, contents);
+  lc_free_with_allocator(&pouch->allocator, path);
+  return rc;
+}
+
+int lc_pouch_outbox_dead_letter_marker_write(lc_pouch *pouch, const char *ns,
+                                             const char *marker_id,
+                                             const char *outbox_key,
+                                             lc_pouch_unix_seconds due_at_unix,
+                                             uint64_t retained_bytes,
+                                             lc_error *error) {
+  unsigned char *contents;
+  char *directory;
+  char *path;
+  char *temporary;
+  size_t key_length;
+  size_t contents_length;
+  size_t temporary_length;
+  unsigned long attempt;
+  int fd;
+  int rc;
+
+  if (outbox_key == NULL || outbox_key[0] == '\0' || due_at_unix <= 0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch dead-letter retention marker requires key and "
+                        "deadline",
+                        NULL, NULL, "pouch");
+  }
+  key_length = strlen(outbox_key);
+  if (key_length > 0xffffffffUL ||
+      key_length > LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MAX_BYTES -
+                       LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_HEADER_BYTES) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch dead-letter retention marker is too large", NULL,
+                        NULL, "pouch");
+  }
+  directory = NULL;
+  path = NULL;
+  temporary = NULL;
+  contents = NULL;
+  fd = -1;
+  rc = lc_pouch_outbox_dead_letter_marker_path(pouch, ns, marker_id, 1,
+                                               &directory, &path, error);
+  contents_length =
+      LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_HEADER_BYTES + key_length;
+  if (rc == LC_OK) {
+    contents = (unsigned char *)lc_alloc_with_allocator(&pouch->allocator,
+                                                        contents_length);
+    if (contents == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch dead-letter retention marker",
+                        NULL, NULL, "pouch");
+    }
+  }
+  if (rc == LC_OK) {
+    memcpy(contents, LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MAGIC, 4U);
+    lc_pouch_outbox_dead_letter_reclaim_u64_write(
+        contents + 4U, (uint64_t)(int64_t)due_at_unix);
+    lc_pouch_outbox_dead_letter_reclaim_u64_write(contents + 12U,
+                                                  retained_bytes);
+    lc_pouch_outbox_state_reclaim_u32_write(contents + 20U,
+                                            (unsigned long)key_length);
+    memcpy(contents + LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_HEADER_BYTES,
+           outbox_key, key_length);
+    temporary_length = strlen(path) + 64U;
+    temporary =
+        (char *)lc_alloc_with_allocator(&pouch->allocator, temporary_length);
+    if (temporary == NULL) {
+      rc = lc_error_set(
+          error, LC_ERR_NOMEM, 0L,
+          "failed to allocate pouch dead-letter retention temporary", NULL,
+          NULL, "pouch");
+    }
+  }
+  for (attempt = 0UL; rc == LC_OK && attempt < 32UL; ++attempt) {
+    snprintf(temporary, temporary_length, "%s.tmp.%ld.%lu", path,
+             (long)getpid(), attempt);
+    fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd >= 0)
+      break;
+    if (errno != EEXIST) {
+      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to create pouch dead-letter retention marker",
+                        strerror(errno), temporary, "pouch");
+    }
+  }
+  if (rc == LC_OK && fd < 0) {
+    rc =
+        lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                     "failed to allocate pouch dead-letter retention temporary",
+                     NULL, NULL, "pouch");
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_outbox_state_reclaim_write_all(fd, contents, contents_length,
+                                                 error);
+  }
+  if (rc == LC_OK && fsync(fd) != 0) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to sync pouch dead-letter retention marker",
+                      strerror(errno), temporary, "pouch");
+  }
+  if (fd >= 0 && close(fd) != 0 && rc == LC_OK) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to close pouch dead-letter retention marker",
+                      strerror(errno), temporary, "pouch");
+  }
+  fd = -1;
+  if (rc == LC_OK && rename(temporary, path) != 0) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to publish pouch dead-letter retention marker",
+                      strerror(errno), path, "pouch");
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_path_fsync_directory(
+        directory, "failed to sync pouch dead-letter retention directory",
+        error);
+  }
+  if (rc != LC_OK && temporary != NULL)
+    (void)unlink(temporary);
+  lc_free_with_allocator(&pouch->allocator, contents);
+  lc_free_with_allocator(&pouch->allocator, directory);
+  lc_free_with_allocator(&pouch->allocator, path);
+  lc_free_with_allocator(&pouch->allocator, temporary);
+  return rc;
+}
+
+int lc_pouch_outbox_dead_letter_marker_take(
+    lc_pouch *pouch, const char *ns, const char *after_marker_id,
+    lc_pouch_unix_seconds now_unix, size_t max_count, uint64_t max_bytes,
+    lc_pouch_outbox_dead_letter_marker *out,
+    lc_pouch_unix_seconds *next_due_unix, lc_error *error) {
+  char *directory;
+  DIR *dir;
+  struct dirent *entry;
+  lc_pouch_outbox_dead_letter_marker oldest;
+  lc_pouch_outbox_dead_letter_marker oldest_after;
+  lc_pouch_outbox_dead_letter_marker oldest_other;
+  lc_pouch_outbox_dead_letter_marker earliest;
+  lc_pouch_outbox_dead_letter_marker due_first;
+  lc_pouch_outbox_dead_letter_marker due_after;
+  char later_name[LC_XID_STRING_SIZE];
+  char other_name[LC_XID_STRING_SIZE];
+  size_t count;
+  uint64_t bytes;
+  int capacity_exceeded;
+  int rc;
+
+  if (out == NULL || next_due_unix == NULL || now_unix <= 0 ||
+      (after_marker_id != NULL && !lc_xid_is_valid(after_marker_id))) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch dead-letter retention take requires outputs",
+                        NULL, NULL, "pouch");
+  }
+  memset(out, 0, sizeof(*out));
+  *next_due_unix = 0;
+  memset(&oldest, 0, sizeof(oldest));
+  memset(&oldest_after, 0, sizeof(oldest_after));
+  memset(&oldest_other, 0, sizeof(oldest_other));
+  memset(&earliest, 0, sizeof(earliest));
+  memset(&due_first, 0, sizeof(due_first));
+  memset(&due_after, 0, sizeof(due_after));
+  later_name[0] = '\0';
+  other_name[0] = '\0';
+  directory = NULL;
+  dir = NULL;
+  count = 0U;
+  bytes = 0U;
+  capacity_exceeded = 0;
+  rc = lc_pouch_outbox_dead_letter_reclaim_directory(pouch, ns, 0, &directory,
+                                                     error);
+  if (rc != LC_OK)
+    goto cleanup;
+  dir = opendir(directory);
+  if (dir == NULL) {
+    rc = errno == ENOENT
+             ? LC_OK
+             : lc_error_set(
+                   error, LC_ERR_TRANSPORT, 0L,
+                   "failed to open pouch dead-letter retention directory",
+                   strerror(errno), directory, "pouch");
+    goto cleanup;
+  }
+  while (rc == LC_OK && (entry = readdir(dir)) != NULL) {
+    lc_pouch_outbox_dead_letter_marker candidate;
+
+    if (!lc_xid_is_valid(entry->d_name))
+      continue;
+    /* The capacity decision needs only a bounded prefix of marker bodies.
+     * Finish the directory-name walk to find the true lexical successor;
+     * choosing the first successor in readdir order can cycle among blocked
+     * parents and starve a marker later in that order. */
+    if (capacity_exceeded && after_marker_id != NULL) {
+      if (strcmp(entry->d_name, after_marker_id) > 0 &&
+          (later_name[0] == '\0' || strcmp(entry->d_name, later_name) < 0))
+        strcpy(later_name, entry->d_name);
+      if (strcmp(entry->d_name, after_marker_id) != 0 &&
+          (other_name[0] == '\0' || strcmp(entry->d_name, other_name) < 0))
+        strcpy(other_name, entry->d_name);
+      continue;
+    }
+    memset(&candidate, 0, sizeof(candidate));
+    rc = lc_pouch_outbox_dead_letter_marker_read(
+        pouch, directory, entry->d_name, &candidate, error);
+    if (rc == LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MISSING) {
+      lc_error_cleanup(error);
+      lc_error_init(error);
+      rc = LC_OK;
+      continue;
+    }
+    if (rc != LC_OK) {
+      lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &candidate);
+      break;
+    }
+    if (count != SIZE_MAX)
+      ++count;
+    if (~(uint64_t)0U - bytes < candidate.retained_bytes)
+      bytes = ~(uint64_t)0U;
+    else
+      bytes += candidate.retained_bytes;
+    rc = lc_pouch_outbox_dead_letter_marker_keep_lexical_first(
+        pouch, &candidate, &oldest, error);
+    if (rc == LC_OK && after_marker_id != NULL &&
+        strcmp(candidate.marker_id, after_marker_id) > 0) {
+      rc = lc_pouch_outbox_dead_letter_marker_keep_lexical_first(
+          pouch, &candidate, &oldest_after, error);
+    }
+    if (rc == LC_OK && after_marker_id != NULL &&
+        strcmp(candidate.marker_id, after_marker_id) != 0) {
+      rc = lc_pouch_outbox_dead_letter_marker_keep_lexical_first(
+          pouch, &candidate, &oldest_other, error);
+    }
+    if (rc == LC_OK && (earliest.marker_id == NULL ||
+                        candidate.due_at_unix < earliest.due_at_unix)) {
+      lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &earliest);
+      rc = lc_pouch_outbox_dead_letter_marker_clone(pouch, &candidate,
+                                                    &earliest, error);
+    }
+    if (rc == LC_OK && candidate.due_at_unix <= now_unix) {
+      rc = lc_pouch_outbox_dead_letter_marker_keep_lexical_first(
+          pouch, &candidate, &due_first, error);
+      if (rc == LC_OK && after_marker_id != NULL &&
+          strcmp(candidate.marker_id, after_marker_id) > 0) {
+        rc = lc_pouch_outbox_dead_letter_marker_keep_lexical_first(
+            pouch, &candidate, &due_after, error);
+      }
+    }
+    lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &candidate);
+    /* A capacity breach is a service-protection event, not an inventory
+     * report. Read no more marker bodies after this bounded prefix; when a
+     * cursor exists, finish only the directory-name walk to select its true
+     * lexical successor, then yield after one reclaim attempt. */
+    if (rc == LC_OK && ((max_count != SIZE_MAX && count > max_count) ||
+                        (max_bytes != ~(uint64_t)0U && bytes > max_bytes))) {
+      capacity_exceeded = 1;
+      /* A new turn without a cursor can yield immediately. With a cursor,
+       * inspect the remaining names without reading their marker bodies. */
+      if (after_marker_id == NULL) {
+        break;
+      }
+    }
+  }
+  if (dir != NULL && closedir(dir) != 0 && rc == LC_OK) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to close pouch dead-letter retention directory",
+                      strerror(errno), directory, "pouch");
+  }
+  dir = NULL;
+  if (rc != LC_OK)
+    goto cleanup;
+  if (later_name[0] != '\0' &&
+      (oldest_after.marker_id == NULL ||
+       strcmp(later_name, oldest_after.marker_id) < 0)) {
+    lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &oldest_after);
+    rc = lc_pouch_outbox_dead_letter_marker_read(pouch, directory, later_name,
+                                                 &oldest_after, error);
+    if (rc == LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MISSING) {
+      lc_error_cleanup(error);
+      lc_error_init(error);
+      rc = LC_OK;
+    }
+  }
+  if (rc == LC_OK && other_name[0] != '\0' &&
+      (oldest_other.marker_id == NULL ||
+       strcmp(other_name, oldest_other.marker_id) < 0)) {
+    lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &oldest_other);
+    rc = lc_pouch_outbox_dead_letter_marker_read(pouch, directory, other_name,
+                                                 &oldest_other, error);
+    if (rc == LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MISSING) {
+      lc_error_cleanup(error);
+      lc_error_init(error);
+      rc = LC_OK;
+    }
+  }
+  if (rc != LC_OK)
+    goto cleanup;
+  capacity_exceeded = capacity_exceeded ||
+                      (max_count != SIZE_MAX && count > max_count) ||
+                      (max_bytes != ~(uint64_t)0U && bytes > max_bytes);
+  if (earliest.marker_id != NULL)
+    *next_due_unix = earliest.due_at_unix;
+  if (capacity_exceeded &&
+      (oldest_after.marker_id != NULL || oldest_other.marker_id != NULL ||
+       oldest.marker_id != NULL)) {
+    if (oldest_after.marker_id != NULL) {
+      *out = oldest_after;
+      memset(&oldest_after, 0, sizeof(oldest_after));
+    } else if (oldest_other.marker_id != NULL) {
+      *out = oldest_other;
+      memset(&oldest_other, 0, sizeof(oldest_other));
+    } else {
+      *out = oldest;
+      memset(&oldest, 0, sizeof(oldest));
+    }
+  } else if (due_after.marker_id != NULL || due_first.marker_id != NULL) {
+    if (due_after.marker_id != NULL) {
+      *out = due_after;
+      memset(&due_after, 0, sizeof(due_after));
+    } else {
+      *out = due_first;
+      memset(&due_first, 0, sizeof(due_first));
+    }
+  }
+  out->queued_count = count;
+  out->queued_bytes = bytes;
+
+cleanup:
+  if (dir != NULL)
+    (void)closedir(dir);
+  lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &oldest);
+  lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &oldest_after);
+  lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &oldest_other);
+  lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &earliest);
+  lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &due_first);
+  lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &due_after);
+  lc_free_with_allocator(&pouch->allocator, directory);
+  return rc;
+}
+
+int lc_pouch_outbox_dead_letter_marker_remove(lc_pouch *pouch, const char *ns,
+                                              const char *marker_id,
+                                              lc_error *error) {
+  char *directory;
+  char *path;
+  int rc;
+
+  directory = NULL;
+  path = NULL;
+  rc = lc_pouch_outbox_dead_letter_marker_path(pouch, ns, marker_id, 0,
+                                               &directory, &path, error);
+  if (rc == LC_OK && unlink(path) != 0 && errno != ENOENT) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to remove pouch dead-letter retention marker",
+                      strerror(errno), path, "pouch");
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_path_fsync_directory(
+        directory, "failed to sync pouch dead-letter retention directory",
+        error);
+  }
+  lc_free_with_allocator(&pouch->allocator, directory);
+  lc_free_with_allocator(&pouch->allocator, path);
+  return rc;
+}
+
+static int lc_pouch_compaction_take_namespace(lc_pouch *pouch,
+                                              char **out_namespace,
+                                              int *terminal_out) {
+  char *ns;
+
+  *out_namespace = NULL;
+  *terminal_out = 0;
+  pthread_mutex_lock(&pouch->compaction_mutex);
+  if (pouch->compaction_namespace_count == 0U) {
+    pthread_mutex_unlock(&pouch->compaction_mutex);
+    return LC_OK;
+  }
+  ns = pouch->compaction_namespaces[0];
+  *terminal_out = pouch->compaction_namespace_terminal[0] != 0U;
+  if (pouch->compaction_namespace_count > 1U) {
+    memmove(pouch->compaction_namespaces, pouch->compaction_namespaces + 1U,
+            (pouch->compaction_namespace_count - 1U) *
+                sizeof(pouch->compaction_namespaces[0]));
+    memmove(pouch->compaction_namespace_terminal,
+            pouch->compaction_namespace_terminal + 1U,
+            (pouch->compaction_namespace_count - 1U) *
+                sizeof(pouch->compaction_namespace_terminal[0]));
+  }
+  --pouch->compaction_namespace_count;
+  pthread_mutex_unlock(&pouch->compaction_mutex);
+  *out_namespace = ns;
+  return LC_OK;
+}
+
+static int lc_pouch_compaction_take_marker_turn(lc_pouch *pouch) {
+  int marker_turn;
+
+  pthread_mutex_lock(&pouch->compaction_mutex);
+  marker_turn = pouch->compaction_marker_turn;
+  pouch->compaction_marker_turn = !pouch->compaction_marker_turn;
+  pthread_mutex_unlock(&pouch->compaction_mutex);
+  return marker_turn;
+}
+
 static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
-  char **namespaces;
-  size_t namespace_count;
-  size_t index;
+  char *ns;
+  int terminal_reclaim;
+  int marker_turn;
   lc_error error;
   int rc;
 
@@ -821,8 +2218,25 @@ static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
     return;
   }
   lc_error_init(&error);
-  rc = lc_pouch_compaction_copy_namespaces(pouch, &namespaces, &namespace_count,
-                                           &error);
+  ns = NULL;
+  terminal_reclaim = 0;
+  rc = LC_OK;
+  marker_turn = lc_pouch_compaction_take_marker_turn(pouch);
+  if (marker_turn) {
+    rc = lc_pouch_terminal_reclaim_marker_take(pouch, &ns, &error);
+    if (rc == LC_OK && ns != NULL) {
+      terminal_reclaim = 1;
+    }
+  }
+  if (rc == LC_OK && ns == NULL) {
+    rc = lc_pouch_compaction_take_namespace(pouch, &ns, &terminal_reclaim);
+  }
+  if (!marker_turn && rc == LC_OK && ns == NULL) {
+    rc = lc_pouch_terminal_reclaim_marker_take(pouch, &ns, &error);
+    if (rc == LC_OK && ns != NULL) {
+      terminal_reclaim = 1;
+    }
+  }
   if (rc != LC_OK) {
     pslog_field fields[2];
 
@@ -834,26 +2248,84 @@ static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
     return;
   }
   lc_error_cleanup(&error);
-  for (index = 0U; index < namespace_count; ++index) {
+  if (ns != NULL) {
     lc_pouch_maintenance_options options;
+    lc_pouch_maintenance_result result;
     lc_error maintenance_error;
 
+    if (terminal_reclaim) {
+      lc_error marker_error;
+
+      lc_error_init(&marker_error);
+      rc = lc_pouch_terminal_reclaim_marker_write(pouch, ns, &marker_error);
+      if (rc != LC_OK) {
+        pslog_field fields[3];
+
+        fields[0] = lc_log_str_field("ns", ns);
+        fields[1] = lc_log_error_field("error", &marker_error);
+        fields[2] = lc_log_code_field(&marker_error);
+        lc_log_warn(pouch->logger, "compaction.terminal.marker.error", fields,
+                    3U);
+        lc_error_cleanup(&marker_error);
+        lc_free_with_allocator(&pouch->allocator, ns);
+        return;
+      }
+      lc_error_cleanup(&marker_error);
+    }
     memset(&options, 0, sizeof(options));
-    options.namespace_name = namespaces[index];
+    memset(&result, 0, sizeof(result));
+    options.ns = ns;
+    options.terminal_reclaim = terminal_reclaim;
     lc_error_init(&maintenance_error);
-    rc = lc_pouch_maintenance_run(pouch, &options, NULL, &maintenance_error);
+    rc = lc_pouch_maintenance_run(pouch, &options, &result, &maintenance_error);
     if (rc != LC_OK) {
       pslog_field fields[3];
 
-      fields[0] = lc_log_str_field("ns", namespaces[index]);
+      fields[0] = lc_log_str_field("ns", ns);
       fields[1] = lc_log_error_field("error", &maintenance_error);
       fields[2] = lc_log_code_field(&maintenance_error);
       lc_log_warn(pouch->logger, "compaction.background.error", fields, 3U);
+    } else if (result.cleanup_pending_count != 0UL) {
+      lc_error queue_error;
+      int queued;
+
+      lc_error_init(&queue_error);
+      queued = 0;
+      if (lc_pouch_compaction_track_namespace(pouch, ns, terminal_reclaim,
+                                              &queued, &queue_error) != LC_OK) {
+        pslog_field fields[3];
+
+        fields[0] = lc_log_str_field("ns", ns);
+        fields[1] = lc_log_error_field("error", &queue_error);
+        fields[2] = lc_log_code_field(&queue_error);
+        lc_log_warn(pouch->logger, "compaction.background.queue.error", fields,
+                    3U);
+      }
+      lc_error_cleanup(&queue_error);
     }
     lc_error_cleanup(&maintenance_error);
+    lc_pouch_maintenance_result_cleanup(&pouch->allocator, &result);
+    lc_free_with_allocator(&pouch->allocator, ns);
   }
-  lc_pouch_compaction_namespaces_cleanup(pouch, namespaces, namespace_count);
 }
+
+#ifdef LOCKDC_TEST_BUILD
+void lc_pouch_test_compaction_run_pass(lc_pouch *pouch) {
+  lc_pouch_compaction_run_pass(pouch);
+}
+
+size_t lc_pouch_test_compaction_queue_count(lc_pouch *pouch) {
+  size_t count;
+
+  if (pouch == NULL || !pouch->compaction_mutex_initialized) {
+    return 0U;
+  }
+  pthread_mutex_lock(&pouch->compaction_mutex);
+  count = pouch->compaction_namespace_count;
+  pthread_mutex_unlock(&pouch->compaction_mutex);
+  return count;
+}
+#endif
 
 static void *lc_pouch_compaction_worker(void *arg) {
   lc_pouch *pouch;
@@ -880,18 +2352,17 @@ static void *lc_pouch_compaction_worker(void *arg) {
     }
     lc_pouch_compaction_deadline(pouch, &deadline);
     wait_rc = 0;
-    while (!pouch->compaction_stop && !pouch->compaction_pending &&
-           wait_rc != ETIMEDOUT) {
+    while (!pouch->compaction_stop && wait_rc != ETIMEDOUT) {
       wait_rc = pthread_cond_timedwait(&pouch->compaction_cond,
                                        &pouch->compaction_mutex, &deadline);
+      if (pouch->compaction_pending) {
+        /* Work is coalesced, but later writes never postpone an already
+         * scheduled bounded maintenance turn. */
+        pouch->compaction_pending = 0;
+      }
     }
     if (pouch->compaction_stop) {
       break;
-    }
-    if (pouch->compaction_pending) {
-      /* A later mutation restarts the full idle delay before maintenance. */
-      pouch->compaction_pending = 0;
-      continue;
     }
     pthread_mutex_unlock(&pouch->compaction_mutex);
     lc_pouch_compaction_run_pass(pouch);
@@ -902,7 +2373,10 @@ static void *lc_pouch_compaction_worker(void *arg) {
 }
 
 static int lc_pouch_compaction_worker_init(lc_pouch *pouch, lc_error *error) {
+  char *pending_namespace;
+  lc_error marker_error;
   int pthread_rc;
+  int queued;
   int rc;
 
   if (pouch == NULL) {
@@ -922,18 +2396,38 @@ static int lc_pouch_compaction_worker_init(lc_pouch *pouch, lc_error *error) {
                         strerror(pthread_rc), NULL, "pouch");
   }
   pouch->compaction_cond_initialized = 1;
-  rc = lc_pouch_state_compaction_track_cached_namespaces(pouch, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  rc = lc_pouch_track_root_namespaces(pouch, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
   if (!pouch->background_compaction_enabled ||
       pouch->compaction_interval_seconds == 0U) {
     return LC_OK;
   }
+  pending_namespace = NULL;
+  queued = 0;
+  lc_error_init(&marker_error);
+  rc = lc_pouch_terminal_reclaim_marker_take(pouch, &pending_namespace,
+                                             &marker_error);
+  if (rc != LC_OK) {
+    pslog_field fields[2];
+
+    fields[0] = lc_log_error_field("error", &marker_error);
+    fields[1] = lc_log_code_field(&marker_error);
+    lc_log_warn(pouch->logger, "compaction.terminal.marker.scan.error", fields,
+                2U);
+  } else if (pending_namespace != NULL) {
+    rc = lc_pouch_compaction_track_namespace(pouch, pending_namespace, 1,
+                                             &queued, &marker_error);
+    if (rc != LC_OK) {
+      pslog_field fields[2];
+
+      fields[0] = lc_log_error_field("error", &marker_error);
+      fields[1] = lc_log_code_field(&marker_error);
+      lc_log_warn(pouch->logger, "compaction.terminal.marker.queue.error",
+                  fields, 2U);
+    } else if (queued) {
+      pouch->compaction_pending = 1;
+    }
+  }
+  lc_error_cleanup(&marker_error);
+  lc_free_with_allocator(&pouch->allocator, pending_namespace);
   pthread_rc = pthread_create(&pouch->compaction_thread, NULL,
                               lc_pouch_compaction_worker, pouch);
   if (pthread_rc != 0) {
@@ -965,23 +2459,79 @@ static void lc_pouch_compaction_worker_close(lc_pouch *pouch) {
     pthread_mutex_destroy(&pouch->compaction_mutex);
     pouch->compaction_mutex_initialized = 0;
   }
-  lc_pouch_compaction_namespaces_cleanup(pouch, pouch->compaction_namespaces,
-                                         pouch->compaction_namespace_count);
+  while (pouch->compaction_namespace_count > 0U) {
+    lc_free_with_allocator(
+        &pouch->allocator,
+        pouch->compaction_namespaces[--pouch->compaction_namespace_count]);
+  }
+  lc_free_with_allocator(&pouch->allocator, pouch->compaction_namespaces);
   pouch->compaction_namespaces = NULL;
+  lc_free_with_allocator(&pouch->allocator,
+                         pouch->compaction_namespace_terminal);
+  pouch->compaction_namespace_terminal = NULL;
+  lc_free_with_allocator(&pouch->allocator,
+                         pouch->terminal_reclaim_marker_cursor);
+  pouch->terminal_reclaim_marker_cursor = NULL;
   pouch->compaction_namespace_count = 0U;
   pouch->compaction_namespace_capacity = 0U;
 }
 
-void lc_pouch_compaction_note_mutation(lc_pouch *pouch) {
-  if (pouch == NULL || !pouch->background_compaction_enabled ||
-      pouch->compaction_interval_seconds == 0U || pouch->aborted ||
-      !pouch->compaction_thread_started) {
+void lc_pouch_compaction_note_mutation(lc_pouch *pouch, const char *ns,
+                                       int terminal) {
+  lc_error error;
+  int queued;
+
+  if (pouch == NULL || ns == NULL || ns[0] == '\0') {
     return;
   }
+  lc_error_init(&error);
+  queued = 0;
+  if (!pouch->background_compaction_enabled ||
+      pouch->compaction_interval_seconds == 0U || pouch->aborted ||
+      !pouch->compaction_thread_started) {
+    lc_error_cleanup(&error);
+    return;
+  }
+  if (lc_pouch_compaction_track_namespace(pouch, ns, terminal, &queued,
+                                          &error) != LC_OK) {
+    pslog_field fields[3];
+
+    fields[0] = lc_log_str_field("ns", ns);
+    fields[1] = lc_log_error_field("error", &error);
+    fields[2] = lc_log_code_field(&error);
+    lc_log_warn(pouch->logger, "compaction.background.queue.error", fields, 3U);
+  } else if (terminal && !queued &&
+             lc_pouch_terminal_reclaim_marker_write(pouch, ns, &error) !=
+                 LC_OK) {
+    pslog_field fields[3];
+
+    fields[0] = lc_log_str_field("ns", ns);
+    fields[1] = lc_log_error_field("error", &error);
+    fields[2] = lc_log_code_field(&error);
+    lc_log_warn(pouch->logger, "compaction.terminal.marker.error", fields, 3U);
+  }
+  lc_error_cleanup(&error);
   pthread_mutex_lock(&pouch->compaction_mutex);
   pouch->compaction_pending = 1;
   pthread_cond_signal(&pouch->compaction_cond);
   pthread_mutex_unlock(&pouch->compaction_mutex);
+}
+
+int lc_pouch_compaction_note_history_advanced(lc_pouch *pouch, const char *ns,
+                                              lc_error *error) {
+  int rc;
+
+  if (pouch == NULL || ns == NULL || ns[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "history compaction notification requires pouch and "
+                        "namespace",
+                        NULL, NULL, "pouch");
+  }
+  rc = lc_pouch_terminal_reclaim_marker_write(pouch, ns, error);
+  if (rc == LC_OK) {
+    lc_pouch_compaction_note_mutation(pouch, ns, 1);
+  }
+  return rc;
 }
 
 static void lc_pouch_indexer_deadline(const lc_pouch *pouch,
@@ -1014,8 +2564,8 @@ static void lc_pouch_indexer_cap_deadline_for_operation_expiry_locked(
        entry = entry->next) {
     lc_pouch_unix_seconds expires_at_unix;
 
-    expires_at_unix = lc_pouch_query_index_next_operation_expiry_locked(
-        pouch, entry->namespace_name);
+    expires_at_unix =
+        lc_pouch_query_index_next_operation_expiry_locked(pouch, entry->ns);
     if (expires_at_unix <= 0L || (lc_u64)expires_at_unix > (lc_u64)LONG_MAX) {
       continue;
     }
@@ -1039,19 +2589,19 @@ static void lc_pouch_indexer_pending_namespaces_cleanup(
     lc_pouch_indexer_pending_namespace *next;
 
     next = namespaces->next;
-    lc_free_with_allocator(&pouch->allocator, namespaces->namespace_name);
+    lc_free_with_allocator(&pouch->allocator, namespaces->ns);
     lc_free_with_allocator(&pouch->allocator, namespaces);
     namespaces = next;
   }
 }
 
 static int lc_pouch_indexer_queue_namespace_locked(lc_pouch *pouch,
-                                                   const char *namespace_name) {
+                                                   const char *ns) {
   lc_pouch_indexer_pending_namespace *entry;
 
   for (entry = pouch->indexer_pending_namespaces; entry != NULL;
        entry = entry->next) {
-    if (strcmp(entry->namespace_name, namespace_name) == 0) {
+    if (strcmp(entry->ns, ns) == 0) {
       if (entry->write_count != LC_U64_MAX) {
         ++entry->write_count;
       }
@@ -1063,9 +2613,8 @@ static int lc_pouch_indexer_queue_namespace_locked(lc_pouch *pouch,
   if (entry == NULL) {
     return LC_ERR_NOMEM;
   }
-  entry->namespace_name =
-      lc_strdup_with_allocator(&pouch->allocator, namespace_name);
-  if (entry->namespace_name == NULL) {
+  entry->ns = lc_strdup_with_allocator(&pouch->allocator, ns);
+  if (entry->ns == NULL) {
     lc_free_with_allocator(&pouch->allocator, entry);
     return LC_ERR_NOMEM;
   }
@@ -1075,21 +2624,21 @@ static int lc_pouch_indexer_queue_namespace_locked(lc_pouch *pouch,
   return LC_OK;
 }
 
-static int lc_pouch_indexer_namespace_flush_limit_reached_locked(
-    lc_pouch *pouch, const char *namespace_name) {
+static int
+lc_pouch_indexer_namespace_flush_limit_reached_locked(lc_pouch *pouch,
+                                                      const char *ns) {
   lc_pouch_indexer_pending_namespace *entry;
 
-  if (pouch == NULL || namespace_name == NULL ||
-      pouch->indexer_flush_docs == 0U) {
+  if (pouch == NULL || ns == NULL || pouch->indexer_flush_docs == 0U) {
     return 0;
   }
   for (entry = pouch->indexer_pending_namespaces; entry != NULL;
        entry = entry->next) {
-    if (strcmp(entry->namespace_name, namespace_name) == 0) {
+    if (strcmp(entry->ns, ns) == 0) {
       return entry->write_count >= pouch->indexer_flush_docs &&
              (!lc_pouch_single_writer_enabled(pouch) ||
               lc_pouch_query_index_pending_document_limit_reached_locked(
-                  pouch, namespace_name, pouch->indexer_flush_docs));
+                  pouch, ns, pouch->indexer_flush_docs));
     }
   }
   return 0;
@@ -1099,11 +2648,10 @@ static int lc_pouch_indexer_namespace_flush_limit_reached_locked(
  * then establish their own debounce window while publication runs. A failed
  * or deferred attempt requeues this entry under the same mutex. */
 static lc_pouch_indexer_pending_namespace *
-lc_pouch_indexer_take_namespace_locked(lc_pouch *pouch,
-                                       const char *namespace_name) {
+lc_pouch_indexer_take_namespace_locked(lc_pouch *pouch, const char *ns) {
   lc_pouch_indexer_pending_namespace **link;
 
-  if (pouch == NULL || namespace_name == NULL) {
+  if (pouch == NULL || ns == NULL) {
     return NULL;
   }
   link = &pouch->indexer_pending_namespaces;
@@ -1111,7 +2659,7 @@ lc_pouch_indexer_take_namespace_locked(lc_pouch *pouch,
     lc_pouch_indexer_pending_namespace *entry;
 
     entry = *link;
-    if (strcmp(entry->namespace_name, namespace_name) == 0) {
+    if (strcmp(entry->ns, ns) == 0) {
       *link = entry->next;
       entry->next = NULL;
       return entry;
@@ -1133,8 +2681,8 @@ static int lc_pouch_indexer_flush_limit_reached_locked(lc_pouch *pouch) {
   }
   for (entry = pouch->indexer_pending_namespaces; entry != NULL;
        entry = entry->next) {
-    if (lc_pouch_indexer_namespace_flush_limit_reached_locked(
-            pouch, entry->namespace_name)) {
+    if (lc_pouch_indexer_namespace_flush_limit_reached_locked(pouch,
+                                                              entry->ns)) {
       return 1;
     }
   }
@@ -1150,13 +2698,13 @@ static void lc_pouch_indexer_requeue(lc_pouch *pouch,
     next = list->next;
     for (entry = pouch->indexer_pending_namespaces; entry != NULL;
          entry = entry->next) {
-      if (strcmp(entry->namespace_name, list->namespace_name) == 0) {
+      if (strcmp(entry->ns, list->ns) == 0) {
         if (entry->write_count > LC_U64_MAX - list->write_count) {
           entry->write_count = LC_U64_MAX;
         } else {
           entry->write_count += list->write_count;
         }
-        lc_free_with_allocator(&pouch->allocator, list->namespace_name);
+        lc_free_with_allocator(&pouch->allocator, list->ns);
         lc_free_with_allocator(&pouch->allocator, list);
         list = next;
         break;
@@ -1192,28 +2740,27 @@ lc_pouch_indexer_run_batch(lc_pouch *pouch,
     state_index_seq = 0UL;
     deferred_for_active_operation = 0;
     lc_error_init(&error);
-    rc = lc_pouch_state_query_index_seq(pouch, entry->namespace_name,
-                                        &state_index_seq, &error);
+    rc = lc_pouch_state_query_index_seq(pouch, entry->ns, &state_index_seq,
+                                        &error);
     if (rc == LC_OK) {
       if (lc_pouch_single_writer_enabled(pouch)) {
         /* An exclusive worker must preserve the same final-version-only
          * boundary as foreground threshold publication. A zero result with a
          * nonzero public sequence means active keys deferred this batch. */
-        rc = lc_pouch_query_index_flush_threshold(pouch, entry->namespace_name,
-                                                  state_index_seq,
-                                                  &flush_result, &error);
+        rc = lc_pouch_query_index_flush_threshold(
+            pouch, entry->ns, state_index_seq, &flush_result, &error);
         deferred_for_active_operation = rc == LC_OK && state_index_seq != 0UL &&
                                         flush_result.index_seq == 0UL;
       } else {
-        rc = lc_pouch_query_index_flush(pouch, entry->namespace_name,
-                                        state_index_seq, &flush_result, &error);
+        rc = lc_pouch_query_index_flush(pouch, entry->ns, state_index_seq,
+                                        &flush_result, &error);
       }
     }
     if (rc != LC_OK || deferred_for_active_operation) {
       if (rc != LC_OK) {
         pslog_field fields[3];
 
-        fields[0] = lc_log_str_field("ns", entry->namespace_name);
+        fields[0] = lc_log_str_field("ns", entry->ns);
         fields[1] = lc_log_error_field("error", &error);
         fields[2] = lc_log_code_field(&error);
         lc_log_warn(pouch->logger, "index.background.error", fields, 3U);
@@ -1221,7 +2768,7 @@ lc_pouch_indexer_run_batch(lc_pouch *pouch,
       entry->next = failed;
       failed = entry;
     } else {
-      lc_free_with_allocator(&pouch->allocator, entry->namespace_name);
+      lc_free_with_allocator(&pouch->allocator, entry->ns);
       lc_free_with_allocator(&pouch->allocator, entry);
     }
     lc_error_cleanup(&error);
@@ -1332,8 +2879,7 @@ static void lc_pouch_indexer_worker_close(lc_pouch *pouch) {
   }
 }
 
-static int lc_pouch_indexer_publish_threshold(lc_pouch *pouch,
-                                              const char *namespace_name) {
+static int lc_pouch_indexer_publish_threshold(lc_pouch *pouch, const char *ns) {
   lc_pouch_query_index_flush_result flush_result;
   lc_pouch_generation state_index_seq;
   lc_error error;
@@ -1348,11 +2894,10 @@ static int lc_pouch_indexer_publish_threshold(lc_pouch *pouch,
   state_index_seq = 0UL;
   published = 0;
   lc_error_init(&error);
-  rc = lc_pouch_state_query_index_seq(pouch, namespace_name, &state_index_seq,
-                                      &error);
+  rc = lc_pouch_state_query_index_seq(pouch, ns, &state_index_seq, &error);
   if (rc == LC_OK) {
-    rc = lc_pouch_query_index_flush_threshold(
-        pouch, namespace_name, state_index_seq, &flush_result, &error);
+    rc = lc_pouch_query_index_flush_threshold(pouch, ns, state_index_seq,
+                                              &flush_result, &error);
   }
   if (rc == LC_OK && flush_result.index_seq != 0UL) {
     published = 1;
@@ -1360,7 +2905,7 @@ static int lc_pouch_indexer_publish_threshold(lc_pouch *pouch,
   if (rc != LC_OK) {
     pslog_field fields[3];
 
-    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[0] = lc_log_str_field("ns", ns);
     fields[1] = lc_log_error_field("error", &error);
     fields[2] = lc_log_code_field(&error);
     lc_log_warn(pouch->logger, "index.threshold.error", fields, 3U);
@@ -1369,18 +2914,16 @@ static int lc_pouch_indexer_publish_threshold(lc_pouch *pouch,
   return published;
 }
 
-void lc_pouch_indexer_note_mutation(lc_pouch *pouch,
-                                    const char *namespace_name) {
+void lc_pouch_indexer_note_mutation(lc_pouch *pouch, const char *ns) {
   int rc;
 
-  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
-      pouch->aborted || !pouch->indexer_thread_started) {
+  if (pouch == NULL || ns == NULL || ns[0] == '\0' || pouch->aborted ||
+      !pouch->indexer_thread_started) {
     return;
   }
   pthread_mutex_lock(&pouch->indexer_mutex);
-  rc = pouch->indexer_stop
-           ? LC_ERR_INVALID
-           : lc_pouch_indexer_queue_namespace_locked(pouch, namespace_name);
+  rc = pouch->indexer_stop ? LC_ERR_INVALID
+                           : lc_pouch_indexer_queue_namespace_locked(pouch, ns);
   if (rc == LC_OK) {
     pthread_cond_signal(&pouch->indexer_cond);
   }
@@ -1388,21 +2931,20 @@ void lc_pouch_indexer_note_mutation(lc_pouch *pouch,
   if (rc != LC_OK && rc != LC_ERR_INVALID) {
     pslog_field fields[1];
 
-    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[0] = lc_log_str_field("ns", ns);
     lc_log_warn(pouch->logger, "index.background.queue.error", fields, 1U);
   }
 }
 
-void lc_pouch_indexer_note_operation_complete(lc_pouch *pouch,
-                                              const char *namespace_name,
+void lc_pouch_indexer_note_operation_complete(lc_pouch *pouch, const char *ns,
                                               const char *key,
                                               const char *operation_id) {
   lc_pouch_indexer_pending_namespace *threshold_batch;
   int eager_publish;
   int published;
 
-  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
-      key == NULL || key[0] == '\0' || pouch->aborted || operation_id == NULL ||
+  if (pouch == NULL || ns == NULL || ns[0] == '\0' || key == NULL ||
+      key[0] == '\0' || pouch->aborted || operation_id == NULL ||
       operation_id[0] == '\0' || !pouch->indexer_thread_started) {
     return;
   }
@@ -1410,20 +2952,19 @@ void lc_pouch_indexer_note_operation_complete(lc_pouch *pouch,
   threshold_batch = NULL;
   pthread_mutex_lock(&pouch->indexer_mutex);
   if (!pouch->indexer_stop && lc_pouch_single_writer_enabled(pouch)) {
-    if (lc_pouch_query_index_pending_operation_complete_locked(
-            pouch, namespace_name, key, operation_id)) {
-      eager_publish = lc_pouch_indexer_namespace_flush_limit_reached_locked(
-          pouch, namespace_name);
+    if (lc_pouch_query_index_pending_operation_complete_locked(pouch, ns, key,
+                                                               operation_id)) {
+      eager_publish =
+          lc_pouch_indexer_namespace_flush_limit_reached_locked(pouch, ns);
       if (eager_publish) {
-        threshold_batch =
-            lc_pouch_indexer_take_namespace_locked(pouch, namespace_name);
+        threshold_batch = lc_pouch_indexer_take_namespace_locked(pouch, ns);
         eager_publish = threshold_batch != NULL;
       }
     }
   }
   pthread_mutex_unlock(&pouch->indexer_mutex);
   if (eager_publish) {
-    published = lc_pouch_indexer_publish_threshold(pouch, namespace_name);
+    published = lc_pouch_indexer_publish_threshold(pouch, ns);
     if (published) {
       lc_pouch_indexer_pending_namespaces_cleanup(pouch, threshold_batch);
     } else {
@@ -1433,163 +2974,6 @@ void lc_pouch_indexer_note_operation_complete(lc_pouch *pouch,
       pthread_mutex_unlock(&pouch->indexer_mutex);
     }
   }
-}
-
-static void lc_pouch_janitor_run_pass(lc_pouch *pouch) {
-  char **namespaces;
-  size_t namespace_count;
-  size_t index;
-  time_t wall_now;
-  lc_pouch_unix_seconds now;
-  lc_pouch_unix_seconds cutoff;
-  lc_error error;
-  int rc;
-
-  if (pouch == NULL || pouch->retention_seconds == 0U) {
-    return;
-  }
-  wall_now = time(NULL);
-  now = wall_now > 0 ? (lc_pouch_unix_seconds)wall_now : 0L;
-  if (now <= 0L || (uint64_t)now <= pouch->retention_seconds) {
-    return;
-  }
-  cutoff = (lc_pouch_unix_seconds)((uint64_t)now - pouch->retention_seconds);
-  lc_error_init(&error);
-  rc = lc_pouch_compaction_copy_namespaces(pouch, &namespaces, &namespace_count,
-                                           &error);
-  if (rc != LC_OK) {
-    pslog_field fields[2];
-
-    fields[0] = lc_log_error_field("error", &error);
-    fields[1] = lc_log_code_field(&error);
-    lc_log_warn(pouch->logger, "janitor.namespaces.error", fields, 2U);
-    lc_error_cleanup(&error);
-    return;
-  }
-  lc_error_cleanup(&error);
-  for (index = 0U; index < namespace_count; ++index) {
-    lc_pouch_maintenance_options options;
-    lc_error maintenance_error;
-
-    memset(&options, 0, sizeof(options));
-    options.namespace_name = namespaces[index];
-    options.retention_updated_before_unix = cutoff;
-    lc_error_init(&maintenance_error);
-    rc = lc_pouch_maintenance_run(pouch, &options, NULL, &maintenance_error);
-    if (rc != LC_OK) {
-      pslog_field fields[3];
-
-      fields[0] = lc_log_str_field("ns", namespaces[index]);
-      fields[1] = lc_log_error_field("error", &maintenance_error);
-      fields[2] = lc_log_code_field(&maintenance_error);
-      lc_log_warn(pouch->logger, "janitor.retention.error", fields, 3U);
-    }
-    lc_error_cleanup(&maintenance_error);
-  }
-  lc_pouch_compaction_namespaces_cleanup(pouch, namespaces, namespace_count);
-}
-
-static void *lc_pouch_janitor_worker(void *arg) {
-  lc_pouch *pouch;
-
-  pouch = (lc_pouch *)arg;
-  pthread_mutex_lock(&pouch->janitor_mutex);
-  while (!pouch->janitor_stop) {
-    struct timespec deadline;
-    int wait_rc;
-
-    while (!pouch->janitor_stop && !pouch->janitor_pending) {
-      pthread_cond_wait(&pouch->janitor_cond, &pouch->janitor_mutex);
-    }
-    if (pouch->janitor_stop) {
-      break;
-    }
-    lc_pouch_janitor_deadline(pouch, &deadline);
-    wait_rc = 0;
-    while (!pouch->janitor_stop && wait_rc != ETIMEDOUT) {
-      wait_rc = pthread_cond_timedwait(&pouch->janitor_cond,
-                                       &pouch->janitor_mutex, &deadline);
-    }
-    if (pouch->janitor_stop) {
-      break;
-    }
-    pouch->janitor_pending = 0;
-    pthread_mutex_unlock(&pouch->janitor_mutex);
-    lc_pouch_janitor_run_pass(pouch);
-    pthread_mutex_lock(&pouch->janitor_mutex);
-  }
-  pthread_mutex_unlock(&pouch->janitor_mutex);
-  return NULL;
-}
-
-static int lc_pouch_janitor_worker_init(lc_pouch *pouch, lc_error *error) {
-  int pthread_rc;
-
-  if (pouch == NULL || pouch->retention_seconds == 0U) {
-    return LC_OK;
-  }
-  pthread_rc = pthread_mutex_init(&pouch->janitor_mutex, NULL);
-  if (pthread_rc != 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to initialize pouch janitor mutex",
-                        strerror(pthread_rc), NULL, "pouch");
-  }
-  pouch->janitor_mutex_initialized = 1;
-  pthread_rc = pthread_cond_init(&pouch->janitor_cond, NULL);
-  if (pthread_rc != 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to initialize pouch janitor condition",
-                        strerror(pthread_rc), NULL, "pouch");
-  }
-  pouch->janitor_cond_initialized = 1;
-  pthread_rc = pthread_create(&pouch->janitor_thread, NULL,
-                              lc_pouch_janitor_worker, pouch);
-  if (pthread_rc != 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to start pouch janitor worker",
-                        strerror(pthread_rc), NULL, "pouch");
-  }
-  pouch->janitor_thread_started = 1;
-  return LC_OK;
-}
-
-static void lc_pouch_janitor_worker_close(lc_pouch *pouch) {
-  if (pouch == NULL) {
-    return;
-  }
-  if (pouch->janitor_thread_started) {
-    pthread_mutex_lock(&pouch->janitor_mutex);
-    pouch->janitor_stop = 1;
-    pthread_cond_broadcast(&pouch->janitor_cond);
-    pthread_mutex_unlock(&pouch->janitor_mutex);
-    pthread_join(pouch->janitor_thread, NULL);
-    pouch->janitor_thread_started = 0;
-  }
-  if (pouch->janitor_cond_initialized) {
-    pthread_cond_destroy(&pouch->janitor_cond);
-    pouch->janitor_cond_initialized = 0;
-  }
-  if (pouch->janitor_mutex_initialized) {
-    pthread_mutex_destroy(&pouch->janitor_mutex);
-    pouch->janitor_mutex_initialized = 0;
-  }
-}
-
-void lc_pouch_janitor_note_mutation(lc_pouch *pouch) {
-  if (pouch == NULL) {
-    return;
-  }
-  lc_pouch_compaction_note_mutation(pouch);
-  if (pouch->retention_seconds == 0U || pouch->aborted ||
-      !pouch->janitor_mutex_initialized) {
-    return;
-  }
-  pthread_mutex_lock(&pouch->janitor_mutex);
-  if (!pouch->janitor_stop) {
-    pouch->janitor_pending = 1;
-    pthread_cond_signal(&pouch->janitor_cond);
-  }
-  pthread_mutex_unlock(&pouch->janitor_mutex);
 }
 
 int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error) {
@@ -1663,7 +3047,7 @@ int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error) {
   return LC_OK;
 }
 
-int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *ns,
                               const char *queue, uint64_t timeout_ms) {
 #if defined(__linux__)
   char *namespace_path;
@@ -1691,12 +3075,11 @@ int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *namespace_name,
   int clock_started;
 
   if (pouch == NULL || !pouch->queue_watch_enabled || pouch->aborted ||
-      namespace_name == NULL || namespace_name[0] == '\0' || queue == NULL ||
-      queue[0] == '\0') {
+      ns == NULL || ns[0] == '\0' || queue == NULL || queue[0] == '\0') {
     return -1;
   }
-  namespace_path = lc_pouch_namespace_path(&pouch->allocator, pouch->root_path,
-                                           namespace_name);
+  namespace_path =
+      lc_pouch_namespace_path(&pouch->allocator, pouch->root_path, ns);
   notify_dir = namespace_path != NULL
                    ? lc_pouch_path_join(&pouch->allocator, namespace_path,
                                         "queue-notify")
@@ -1801,7 +3184,7 @@ cleanup:
   return result;
 #else
   (void)pouch;
-  (void)namespace_name;
+  (void)ns;
   (void)queue;
   (void)timeout_ms;
   return -1;
@@ -1872,11 +3255,10 @@ static void lc_pouch_init_options(lc_pouch *pouch,
       options != NULL && options->background_compaction_enabled_set
           ? (options->background_compaction_enabled ? 1 : 0)
           : 1;
-  pouch->retention_seconds = options != NULL ? options->retention_seconds : 0U;
-  pouch->janitor_interval_seconds =
-      options != NULL && options->janitor_interval_seconds != 0U
-          ? options->janitor_interval_seconds
-          : LC_POUCH_DEFAULT_JANITOR_INTERVAL_SECONDS;
+  pouch->terminal_reclaim_min_bytes =
+      options != NULL && options->terminal_reclaim_min_bytes != 0U
+          ? options->terminal_reclaim_min_bytes
+          : LC_POUCH_DEFAULT_TERMINAL_RECLAIM_MIN_BYTES;
   pouch->single_writer = options != NULL && options->single_writer_set
                              ? (options->single_writer != 0 ? 1 : 0)
                              : 1;
@@ -1891,6 +3273,10 @@ static void lc_pouch_init_options(lc_pouch *pouch,
       &pouch->allocator,
       lc_pouch_option_string(
           options != NULL ? options->query_fallback_engine : NULL, ""));
+  pouch->query_indexing_enabled =
+      options != NULL && options->query_indexing_enabled_set
+          ? (options->query_indexing_enabled != 0 ? 1 : 0)
+          : 1;
   pouch->compression = lc_strdup_with_allocator(
       &pouch->allocator, lc_pouch_compression_option(options));
 }
@@ -2303,7 +3689,7 @@ static int lc_pouch_warm_open_namespaces(lc_pouch *pouch, lc_error *error) {
     lc_log_debug(pouch->logger, "cache.load.start", fields, 2U);
   }
   while (rc == LC_OK) {
-    char *namespace_name;
+    char *ns;
     lc_error warm_error;
     int index_rc;
     int state_rc;
@@ -2317,30 +3703,30 @@ static int lc_pouch_warm_open_namespaces(lc_pouch *pouch, lc_error *error) {
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
     }
-    namespace_name =
-        lc_pouch_path_unescape_name(&pouch->allocator, entry->d_name);
-    if (namespace_name == NULL) {
+    ns = lc_pouch_path_unescape_name(&pouch->allocator, entry->d_name);
+    if (ns == NULL) {
       continue;
     }
     lc_error_init(&warm_error);
-    state_rc =
-        lc_pouch_state_warm_namespace(pouch, namespace_name, &warm_error);
+    state_rc = lc_pouch_state_warm_namespace(pouch, ns, &warm_error);
     if (state_rc != LC_OK) {
       pslog_field fields[3];
 
-      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[0] = lc_log_str_field("ns", ns);
       fields[1] = lc_log_error_field("error", &warm_error);
       fields[2] = lc_log_code_field(&warm_error);
       lc_log_warn(pouch->logger, "cache.load.state.error", fields, 3U);
     }
     lc_error_cleanup(&warm_error);
     lc_error_init(&warm_error);
-    index_rc =
-        lc_pouch_query_index_warm_namespace(pouch, namespace_name, &warm_error);
+    index_rc = LC_OK;
+    if (pouch->query_indexing_enabled) {
+      index_rc = lc_pouch_query_index_warm_namespace(pouch, ns, &warm_error);
+    }
     if (index_rc != LC_OK) {
       pslog_field fields[3];
 
-      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[0] = lc_log_str_field("ns", ns);
       fields[1] = lc_log_error_field("error", &warm_error);
       fields[2] = lc_log_code_field(&warm_error);
       lc_log_warn(pouch->logger, "cache.load.index.error", fields, 3U);
@@ -2349,13 +3735,13 @@ static int lc_pouch_warm_open_namespaces(lc_pouch *pouch, lc_error *error) {
     {
       pslog_field fields[3];
 
-      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[0] = lc_log_str_field("ns", ns);
       fields[1] = lc_log_bool_field("state_ok", state_rc == LC_OK);
       fields[2] = lc_log_bool_field("index_ok", index_rc == LC_OK);
       lc_log_debug(pouch->logger, "cache.load.namespace", fields, 3U);
     }
     namespace_count++;
-    lc_free_with_allocator(&pouch->allocator, namespace_name);
+    lc_free_with_allocator(&pouch->allocator, ns);
   }
   if (closedir(dir) != 0 && rc == LC_OK) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
@@ -3375,19 +4761,16 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
     lc_pouch_close(pouch);
     return rc;
   }
-  rc = lc_pouch_indexer_worker_init(pouch, error);
-  if (rc != LC_OK) {
-    lc_pouch_close(pouch);
-    return rc;
-  }
-  rc = lc_pouch_janitor_worker_init(pouch, error);
-  if (rc != LC_OK) {
-    lc_pouch_close(pouch);
-    return rc;
+  if (pouch->query_indexing_enabled) {
+    rc = lc_pouch_indexer_worker_init(pouch, error);
+    if (rc != LC_OK) {
+      lc_pouch_close(pouch);
+      return rc;
+    }
   }
   *out = pouch;
   {
-    pslog_field fields[11];
+    pslog_field fields[12];
 
     fields[0] = lc_log_str_field("path", pouch->root_path);
     fields[1] = lc_log_str_field("query_engine", pouch->query_engine);
@@ -3407,7 +4790,9 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
         lc_log_u64_field("indexer_flush_docs", pouch->indexer_flush_docs);
     fields[10] = lc_log_u64_field("indexer_flush_interval_seconds",
                                   pouch->indexer_flush_interval_seconds);
-    lc_log_info(pouch->logger, "open", fields, 11U);
+    fields[11] =
+        lc_log_bool_field("query_indexing", pouch->query_indexing_enabled);
+    lc_log_info(pouch->logger, "open", fields, 12U);
   }
   return LC_OK;
 }
@@ -3430,7 +4815,6 @@ void lc_pouch_close(lc_pouch *pouch) {
   } else {
     lc_pouch_writer_presence_stop(pouch);
   }
-  lc_pouch_janitor_worker_close(pouch);
   lc_pouch_indexer_worker_close(pouch);
   lc_pouch_compaction_worker_close(pouch);
   lc_pouch_state_metadata_append_worker_close(pouch);
@@ -3505,7 +4889,6 @@ int lc_pouch_abort(lc_pouch *pouch, lc_error *error) {
   pouch->aborted = 1;
   pthread_mutex_unlock(&pouch->single_writer_mutex);
   lc_pouch_writer_presence_stop_abrupt(pouch);
-  lc_pouch_janitor_worker_close(pouch);
   lc_pouch_indexer_worker_close(pouch);
   lc_pouch_compaction_worker_close(pouch);
   lc_pouch_state_metadata_append_worker_close(pouch);
@@ -4119,11 +5502,9 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
   out->compaction_interval_seconds = pouch->compaction_interval_seconds;
   out->compaction_delete_grace_seconds = pouch->compaction_delete_grace_seconds;
   out->compaction_max_io_bytes_per_sec = pouch->compaction_max_io_bytes_per_sec;
+  out->terminal_reclaim_min_bytes = pouch->terminal_reclaim_min_bytes;
   out->background_compaction_enabled = pouch->background_compaction_enabled;
   out->compaction_throttling_disabled = pouch->compaction_throttling_disabled;
-  out->retention_seconds = pouch->retention_seconds;
-  out->janitor_interval_seconds = pouch->janitor_interval_seconds;
-  out->janitor_running = pouch->janitor_thread_started;
   out->single_writer = lc_pouch_single_writer_enabled(pouch);
   out->supports_concurrent_writes = lc_pouch_supports_concurrent_writes(pouch);
   out->aborted = pouch->aborted;
@@ -4140,6 +5521,7 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
       lc_strdup_with_allocator(&pouch->allocator, pouch->query_engine);
   out->query_fallback_engine =
       lc_strdup_with_allocator(&pouch->allocator, pouch->query_fallback_engine);
+  out->query_indexing_enabled = pouch->query_indexing_enabled;
   out->compression =
       lc_strdup_with_allocator(&pouch->allocator, pouch->compression);
   out->crypto_enabled = lc_pouch_crypto_enabled(pouch->crypto);
@@ -4190,7 +5572,7 @@ void lc_pouch_status_cleanup(const lc_allocator *allocator,
   memset(status, 0, sizeof(*status));
 }
 
-int lc_pouch_ensure_namespace(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_ensure_namespace(lc_pouch *pouch, const char *ns,
                               lc_error *error) {
   int rc;
 
@@ -4199,27 +5581,27 @@ int lc_pouch_ensure_namespace(lc_pouch *pouch, const char *namespace_name,
                         "lc_pouch_ensure_namespace requires pouch", NULL, NULL,
                         NULL);
   }
-  rc = lc_pouch_namespace_ensure(&pouch->allocator, pouch->root_path,
-                                 namespace_name, error);
+  rc =
+      lc_pouch_namespace_ensure(&pouch->allocator, pouch->root_path, ns, error);
   if (rc != LC_OK) {
     pslog_field fields[3];
 
-    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[0] = lc_log_str_field("ns", ns);
     fields[1] = lc_log_error_field("error", error);
     fields[2] = lc_log_code_field(error);
     lc_log_error(pouch->logger, "manifest.ensure_namespace.error", fields, 3U);
     return rc;
   }
-  rc = lc_pouch_state_recover_staged_decisions(pouch, namespace_name, error);
+  rc = lc_pouch_state_recover_staged_decisions(pouch, ns, error);
   if (rc == LC_OK) {
     pslog_field fields[1];
 
-    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[0] = lc_log_str_field("ns", ns);
     lc_log_trace(pouch->logger, "manifest.ensure_namespace", fields, 1U);
   } else {
     pslog_field fields[3];
 
-    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[0] = lc_log_str_field("ns", ns);
     fields[1] = lc_log_error_field("error", error);
     fields[2] = lc_log_code_field(error);
     lc_log_error(pouch->logger, "manifest.recover_staged.error", fields, 3U);

@@ -9,6 +9,7 @@
 #include <pslog.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <time.h>
 
 #ifndef LONEJSON_WITH_CURL
 #define LONEJSON_WITH_CURL
@@ -66,6 +67,8 @@ struct lc_engine_client {
   char *unix_socket_path;
   char *default_namespace;
   long timeout_ms;
+  struct timespec request_deadline;
+  int request_deadline_set;
   int disable_mtls;
   int insecure_skip_verify;
   int prefer_http_2;
@@ -82,6 +85,8 @@ struct lc_engine_client {
 };
 
 void lc_engine_error_reset(lc_engine_error *error);
+int lc_engine_client_attempt_timeout_ms(const lc_engine_client *client,
+                                        long *out);
 int lc_engine_set_client_error(lc_engine_error *error, int code,
                                const char *message);
 int lc_engine_set_transport_error(lc_engine_error *error, const char *message);
@@ -174,7 +179,7 @@ int lc_engine_load_bundle(lc_engine_client *client, lc_source *bundle_source,
 void lc_engine_free_bundle(lc_engine_tls_bundle *bundle);
 
 const char *lc_engine_effective_namespace(lc_engine_client *client,
-                                          const char *namespace_name);
+                                          const char *ns);
 char *lc_engine_url_encode(const char *value);
 
 #endif

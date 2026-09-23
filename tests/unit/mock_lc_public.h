@@ -81,6 +81,37 @@ typedef struct lc_public_mock_message {
   int close_calls;
 } lc_public_mock_message;
 
+typedef struct lc_public_mock_outbox_participant {
+  lc_outbox_participant pub;
+  int rc;
+  int deleted_value;
+  int deleted_count_value;
+  lc_public_mock_call describe_call;
+  lc_public_mock_call get_call;
+  lc_public_mock_call update_call;
+  lc_public_mock_call mutate_call;
+  lc_public_mock_call mutate_local_call;
+  lc_public_mock_call metadata_call;
+  lc_public_mock_call remove_call;
+  lc_public_mock_call keepalive_call;
+  lc_public_mock_call attach_call;
+  lc_public_mock_call list_attachments_call;
+  lc_public_mock_call get_attachment_call;
+  lc_public_mock_call delete_attachment_call;
+  lc_public_mock_call delete_all_attachments_call;
+  int close_calls;
+} lc_public_mock_outbox_participant;
+
+typedef struct lc_public_mock_history_consumer {
+  lc_history_consumer pub;
+  int rc;
+  lc_index_seq acknowledged_index_seq;
+  lc_public_mock_call position_call;
+  lc_public_mock_call advance_call;
+  lc_public_mock_call unregister_call;
+  int close_calls;
+} lc_public_mock_history_consumer;
+
 typedef struct lc_public_mock_client {
   lc_client pub;
   int rc;
@@ -90,8 +121,10 @@ typedef struct lc_public_mock_client {
   int deleted_value;
   int deleted_count_value;
   lc_public_mock_call acquire_call;
+  lc_public_mock_call acquire_for_update_call;
   lc_public_mock_call describe_call;
   lc_public_mock_call get_call;
+  lc_public_mock_call get_in_namespace_call;
   lc_public_mock_call load_call;
   lc_public_mock_call load_in_namespace_call;
   lc_public_mock_call update_call;
@@ -135,6 +168,9 @@ typedef struct lc_public_mock_client {
   lc_public_mock_call subscribe_call;
   lc_public_mock_call subscribe_with_state_call;
   lc_public_mock_call new_consumer_service_call;
+  lc_public_mock_call new_outbox_call;
+  lc_public_mock_call new_outbox_with_dispatcher_call;
+  lc_public_mock_call new_history_consumer_call;
   lc_public_mock_call watch_queue_call;
   int close_calls;
 } lc_public_mock_client;
@@ -144,6 +180,10 @@ void lc_public_mock_sink_init(lc_public_mock_sink *mock);
 void lc_public_mock_client_init(lc_public_mock_client *mock);
 void lc_public_mock_lease_init(lc_public_mock_lease *mock);
 void lc_public_mock_message_init(lc_public_mock_message *mock);
+void lc_public_mock_outbox_participant_init(
+    lc_public_mock_outbox_participant *mock);
+void lc_public_mock_history_consumer_init(
+    lc_public_mock_history_consumer *mock);
 void lc_public_mock_consumer_service_init(
     lc_public_mock_consumer_service *mock);
 

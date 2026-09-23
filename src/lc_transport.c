@@ -3,6 +3,7 @@
 
 #include <ctype.h>
 #include <lc/version.h>
+#include <limits.h>
 #include <openssl/err.h>
 #include <openssl/x509v3.h>
 #include <stdio.h>
@@ -11,6 +12,23 @@
 
 static const char *LC_ENGINE_VERSION_STRING = LC_VERSION_STRING;
 #define LC_ENGINE_HTTP_ERROR_BODY_LIMIT_DEFAULT (8U * 1024U)
+
+#ifdef LOCKDC_TEST_BUILD
+int (*lc_transport_test_clock_gettime)(clockid_t clock_id, struct timespec *out,
+                                       void *context) = NULL;
+void *lc_transport_test_clock_context = NULL;
+
+static int lc_transport_clock_gettime(clockid_t clock_id,
+                                      struct timespec *out) {
+  if (lc_transport_test_clock_gettime != NULL) {
+    return lc_transport_test_clock_gettime(clock_id, out,
+                                           lc_transport_test_clock_context);
+  }
+  return clock_gettime(clock_id, out);
+}
+#else
+#define lc_transport_clock_gettime clock_gettime
+#endif
 
 static size_t lc_engine_lonejson_curl_upload_read_callback(char *ptr,
                                                            size_t size,
@@ -98,6 +116,56 @@ static size_t lc_engine_json_http_write_callback(char *contents, size_t size,
 static int lc_engine_json_http_init_parser(lc_engine_json_http_state *state);
 static void lc_engine_json_http_state_cleanup(lc_engine_json_http_state *state);
 
+/* A clone used by a bounded higher-level operation may have more than one
+ * endpoint. Recalculate before every attempt so a failover cannot restart the
+ * operation's deadline. */
+int lc_engine_client_attempt_timeout_ms(const lc_engine_client *client,
+                                        long *out) {
+  struct timespec now;
+  time_t seconds;
+  long nanoseconds;
+  long remaining;
+  long configured;
+
+  if (client == NULL || out == NULL)
+    return 0;
+  configured = client->timeout_ms > 0L ? client->timeout_ms : 30000L;
+  if (!client->request_deadline_set) {
+    *out = configured;
+    return 1;
+  }
+  if (lc_transport_clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+    return 0;
+  if (now.tv_sec > client->request_deadline.tv_sec ||
+      (now.tv_sec == client->request_deadline.tv_sec &&
+       now.tv_nsec >= client->request_deadline.tv_nsec))
+    return 0;
+  seconds = client->request_deadline.tv_sec - now.tv_sec;
+  nanoseconds = client->request_deadline.tv_nsec - now.tv_nsec;
+  if (nanoseconds < 0L) {
+    --seconds;
+    nanoseconds += 1000000000L;
+  }
+  if (seconds < 0)
+    return 0;
+  if (seconds > (time_t)(LONG_MAX / 1000L)) {
+    remaining = LONG_MAX;
+  } else {
+    remaining = (long)seconds * 1000L;
+    if (nanoseconds > 0L) {
+      long milliseconds = (nanoseconds + 999999L) / 1000000L;
+
+      remaining = remaining > LONG_MAX - milliseconds
+                      ? LONG_MAX
+                      : remaining + milliseconds;
+    }
+  }
+  if (remaining < 1L)
+    return 0;
+  *out = remaining < configured ? remaining : configured;
+  return 1;
+}
+
 static int lc_engine_transport_cancel_requested(lc_engine_client *client) {
   return client != NULL && client->cancel_check != NULL &&
          client->cancel_check(client->cancel_context);
@@ -123,6 +191,19 @@ void lc_engine_client_config_init(lc_engine_client_config *config) {
   config->timeout_ms = 30000L;
   config->prefer_http_2 = 1;
   config->http_json_response_limit_bytes = 0U;
+}
+
+void lc_engine_client_set_request_deadline(lc_engine_client *client,
+                                           const struct timespec *deadline) {
+  if (client == NULL)
+    return;
+  if (deadline == NULL) {
+    memset(&client->request_deadline, 0, sizeof(client->request_deadline));
+    client->request_deadline_set = 0;
+    return;
+  }
+  client->request_deadline = *deadline;
+  client->request_deadline_set = 1;
 }
 
 void lc_engine_error_init(lc_engine_error *error) {
@@ -153,7 +234,7 @@ void lc_engine_acquire_response_cleanup(lc_engine_acquire_response *response) {
   if (response == NULL) {
     return;
   }
-  lc_engine_free_string(&response->namespace_name);
+  lc_engine_free_string(&response->ns);
   lc_engine_free_string(&response->lease_id);
   lc_engine_free_string(&response->txn_id);
   lc_engine_free_string(&response->key);
@@ -205,7 +286,7 @@ void lc_engine_enqueue_response_cleanup(lc_engine_enqueue_response *response) {
   if (response == NULL) {
     return;
   }
-  lc_engine_free_string(&response->namespace_name);
+  lc_engine_free_string(&response->ns);
   lc_engine_free_string(&response->queue);
   lc_engine_free_string(&response->message_id);
   lc_engine_free_string(&response->correlation_id);
@@ -216,7 +297,7 @@ void lc_engine_dequeue_response_cleanup(lc_engine_dequeue_response *response) {
   if (response == NULL) {
     return;
   }
-  lc_engine_free_string(&response->namespace_name);
+  lc_engine_free_string(&response->ns);
   lc_engine_free_string(&response->queue);
   lc_engine_free_string(&response->message_id);
   lc_engine_free_string(&response->payload_content_type);
@@ -854,7 +935,13 @@ int lc_engine_http_json_request(
     char error_buffer[CURL_ERROR_SIZE];
     CURLcode curl_code;
     int should_retry;
+    long request_timeout_ms;
     lc_engine_json_http_state state;
+
+    if (!lc_engine_client_attempt_timeout_ms(client, &request_timeout_ms)) {
+      lc_engine_http_result_cleanup(result);
+      return lc_engine_set_transport_error(error, "request deadline elapsed");
+    }
     lc_engine_http_result_cleanup(result);
     lc_engine_buffer_init(&url);
     lc_engine_build_url(client, client->endpoints[endpoint_index], path, &url);
@@ -909,8 +996,7 @@ int lc_engine_http_json_request(
     curl_easy_setopt(easy, CURLOPT_XFERINFOFUNCTION,
                      lc_engine_transport_progress);
     curl_easy_setopt(easy, CURLOPT_XFERINFODATA, client);
-    curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,
-                     client->timeout_ms > 0L ? client->timeout_ms : 30000L);
+    curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, request_timeout_ms);
     if (client->unix_socket_path != NULL &&
         client->unix_socket_path[0] != '\0') {
       curl_easy_setopt(easy, CURLOPT_UNIX_SOCKET_PATH,
@@ -1177,6 +1263,12 @@ int lc_engine_http_json_request_stream(
     lonejson_curl_upload body_upload;
     size_t measured_body_length;
     int has_measured_body_length;
+    long request_timeout_ms;
+
+    if (!lc_engine_client_attempt_timeout_ms(client, &request_timeout_ms)) {
+      lc_engine_http_result_cleanup(result);
+      return lc_engine_set_transport_error(error, "request deadline elapsed");
+    }
 
     lc_engine_http_result_cleanup(result);
     lc_engine_buffer_init(&url);
@@ -1235,8 +1327,7 @@ int lc_engine_http_json_request_stream(
     curl_easy_setopt(easy, CURLOPT_XFERINFOFUNCTION,
                      lc_engine_transport_progress);
     curl_easy_setopt(easy, CURLOPT_XFERINFODATA, client);
-    curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,
-                     client->timeout_ms > 0L ? client->timeout_ms : 30000L);
+    curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, request_timeout_ms);
     if (client->unix_socket_path != NULL &&
         client->unix_socket_path[0] != '\0') {
       curl_easy_setopt(easy, CURLOPT_UNIX_SOCKET_PATH,
@@ -1745,9 +1836,9 @@ void lc_engine_free_bundle(lc_engine_tls_bundle *bundle) {
 }
 
 const char *lc_engine_effective_namespace(lc_engine_client *client,
-                                          const char *namespace_name) {
-  if (namespace_name != NULL && namespace_name[0] != '\0') {
-    return namespace_name;
+                                          const char *ns) {
+  if (ns != NULL && ns[0] != '\0') {
+    return ns;
   }
   if (client != NULL && client->default_namespace != NULL &&
       client->default_namespace[0] != '\0') {

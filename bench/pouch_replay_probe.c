@@ -34,7 +34,7 @@ static void check(int rc) {
 static void sample(const char *phase) {
   struct timespec wall;
   struct timespec cpu;
-  double bytes = 0, calls = 0;
+  double bytes = 0, calls = 0, resident_kib = 0, peak_resident_kib = 0;
   char line[128];
   FILE *fp = fopen("/proc/self/io", "r");
   if (fp == NULL) {
@@ -48,14 +48,27 @@ static void sample(const char *phase) {
     (void)sscanf(line, "syscr: %lf", &calls);
   }
   fclose(fp);
+  fp = fopen("/proc/self/status", "r");
+  if (fp == NULL) {
+    perror("/proc/self/status");
+    exit(1);
+  }
+  while (fgets(line, sizeof(line), fp) != NULL) {
+    if (sscanf(line, "VmRSS: %lf kB", &resident_kib) == 1) {
+      continue;
+    }
+    (void)sscanf(line, "VmHWM: %lf kB", &peak_resident_kib);
+  }
+  fclose(fp);
   if (clock_gettime(CLOCK_MONOTONIC, &wall) != 0 ||
       clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu) != 0) {
     perror("clock_gettime");
     exit(1);
   }
-  printf("%s %.9f %.9f %.0f %.0f\n", phase,
+  printf("%s %.9f %.9f %.0f %.0f %.0f %.0f\n", phase,
          (double)wall.tv_sec + (double)wall.tv_nsec / 1e9,
-         (double)cpu.tv_sec + (double)cpu.tv_nsec / 1e9, bytes, calls);
+         (double)cpu.tv_sec + (double)cpu.tv_nsec / 1e9, bytes, calls,
+         resident_kib * 1024.0, peak_resident_kib * 1024.0);
   fflush(stdout);
 }
 
@@ -65,11 +78,38 @@ int main(int argc, char **argv) {
   const char *endpoint;
   size_t keys, updates, namespaces, i, total;
   int seed;
+  int open_only;
+  open_only = argc == 4 && strcmp(argv[1], "open") == 0;
+  if (open_only) {
+    const char *key;
+    lc_error_init(&error);
+    lc_client_config_init(&config);
+    endpoint = argv[2];
+    config.endpoints = &endpoint;
+    config.endpoint_count = 1;
+    if (strcmp(argv[3], "-") != 0) {
+      key = getenv(argv[3]);
+      if (key == NULL || *key == '\0') {
+        fprintf(stderr, "Pouch key environment variable is not set: %s\n",
+                argv[3]);
+        return 2;
+      }
+      config.pouch_crypto_key = key;
+    }
+    sample("before");
+    check(lc_client_open(&config, &client, &error));
+    sample("open");
+    client->close(client);
+    sample("close");
+    lc_error_cleanup(&error);
+    return 0;
+  }
   if (argc != 8) {
     fprintf(stderr,
-            "usage: %s seed|probe ENDPOINT KEYS UPDATES NAMESPACES "
+            "usage: %s open ENDPOINT KEY_ENV|-\n"
+            "       %s seed|probe ENDPOINT KEYS UPDATES NAMESPACES "
             "KEYFILE clean|unclean|staged\n",
-            argv[0]);
+            argv[0], argv[0]);
     return 2;
   }
   seed = strcmp(argv[1], "seed") == 0;
@@ -109,7 +149,7 @@ int main(int argc, char **argv) {
              (unsigned long)(i % keys), (unsigned long)generation);
     lc_acquire_req_init(&acquire);
     acquire.key = key;
-    acquire.namespace_name = ns;
+    acquire.ns = ns;
     acquire.owner = "replay-probe";
     acquire.ttl_seconds = 60;
     check(client->acquire(client, &acquire, &lease, &error));
@@ -148,7 +188,7 @@ int main(int argc, char **argv) {
     lc_source *source = NULL;
     lc_acquire_req_init(&acquire);
     acquire.key = "pending";
-    acquire.namespace_name = "namespace-0";
+    acquire.ns = "namespace-0";
     acquire.owner = "interrupted-writer";
     acquire.ttl_seconds = 86400;
     check(client->acquire(client, &acquire, &lease, &error));

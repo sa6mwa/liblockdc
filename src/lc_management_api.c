@@ -10,13 +10,13 @@ typedef struct lc_engine_namespace_query_json {
 } lc_engine_namespace_query_json;
 
 typedef struct lc_engine_namespace_config_response_json {
-  char *namespace_name;
+  char *ns;
   lc_engine_namespace_query_json query;
   char *etag;
 } lc_engine_namespace_config_response_json;
 
 typedef struct lc_engine_index_flush_response_json {
-  char *namespace_name;
+  char *ns;
   char *mode;
   char *flush_id;
   bool accepted;
@@ -65,8 +65,7 @@ typedef struct lc_engine_tcrm_list_response_json {
   lonejson_int64 updated_at_unix;
 } lc_engine_tcrm_list_response_json;
 static const lonejson_field lc_engine_txn_participant_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_participant, namespace_name,
-                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_participant, ns, "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_participant, key, "key"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_participant, backend_hash,
                                 "backend_hash")};
@@ -92,8 +91,8 @@ LONEJSON_MAP_DEFINE(lc_engine_namespace_query_map,
                     lc_engine_namespace_query_fields);
 
 static const lonejson_field lc_engine_namespace_config_response_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_namespace_config_response_json,
-                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_namespace_config_response_json, ns,
+                                "namespace"),
     LONEJSON_FIELD_OBJECT(lc_engine_namespace_config_response_json, query,
                           "query", &lc_engine_namespace_query_map),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_namespace_config_response_json, etag,
@@ -104,8 +103,8 @@ LONEJSON_MAP_DEFINE(lc_engine_namespace_config_response_map,
                     lc_engine_namespace_config_response_fields);
 
 static const lonejson_field lc_engine_index_flush_response_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_index_flush_response_json,
-                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_index_flush_response_json, ns,
+                                "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_index_flush_response_json, mode,
                                 "mode"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_index_flush_response_json, flush_id,
@@ -128,14 +127,13 @@ static const lonejson_field lc_engine_txn_response_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_response_json, state, "state")};
 
 static const lonejson_field lc_engine_namespace_config_body_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_namespace_config_response_json,
-                                namespace_name, "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_namespace_config_response_json, ns,
+                                "namespace"),
     LONEJSON_FIELD_OBJECT(lc_engine_namespace_config_response_json, query,
                           "query", &lc_engine_namespace_query_map)};
 
 static const lonejson_field lc_engine_index_flush_body_fields[] = {
-    LONEJSON_FIELD_STRING_ALLOC(lc_engine_index_flush_request, namespace_name,
-                                "namespace"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_index_flush_request, ns, "namespace"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_index_flush_request, mode, "mode")};
 
 static const lonejson_field lc_engine_txn_replay_body_fields[] = {
@@ -353,7 +351,7 @@ void lc_engine_namespace_config_response_cleanup(
   if (response == NULL) {
     return;
   }
-  lc_engine_free_string(&response->namespace_name);
+  lc_engine_free_string(&response->ns);
   lc_engine_free_string(&response->preferred_engine);
   lc_engine_free_string(&response->fallback_engine);
   lc_engine_free_string(&response->etag);
@@ -365,7 +363,7 @@ void lc_engine_index_flush_response_cleanup(
   if (response == NULL) {
     return;
   }
-  lc_engine_free_string(&response->namespace_name);
+  lc_engine_free_string(&response->ns);
   lc_engine_free_string(&response->mode);
   lc_engine_free_string(&response->flush_id);
   lc_engine_free_string(&response->correlation_id);
@@ -485,13 +483,13 @@ lc_engine_parse_namespace_response(const void *parsed_json,
   (void)error;
   response = (lc_engine_namespace_config_response *)out_response;
   parsed = (const lc_engine_namespace_config_response_json *)parsed_json;
-  response->namespace_name = lc_engine_strdup_local(parsed->namespace_name);
+  response->ns = lc_engine_strdup_local(parsed->ns);
   response->preferred_engine =
       lc_engine_strdup_local(parsed->query.preferred_engine);
   response->fallback_engine =
       lc_engine_strdup_local(parsed->query.fallback_engine);
   response->etag = lc_engine_strdup_local(result->etag);
-  if ((parsed->namespace_name != NULL && response->namespace_name == NULL) ||
+  if ((parsed->ns != NULL && response->ns == NULL) ||
       (parsed->query.preferred_engine != NULL &&
        response->preferred_engine == NULL) ||
       (parsed->query.fallback_engine != NULL &&
@@ -514,10 +512,10 @@ static int lc_engine_parse_index_flush_response(
   (void)error;
   response = (lc_engine_index_flush_response *)out_response;
   parsed = (const lc_engine_index_flush_response_json *)parsed_json;
-  response->namespace_name = lc_engine_strdup_local(parsed->namespace_name);
+  response->ns = lc_engine_strdup_local(parsed->ns);
   response->mode = lc_engine_strdup_local(parsed->mode);
   response->flush_id = lc_engine_strdup_local(parsed->flush_id);
-  if ((parsed->namespace_name != NULL && response->namespace_name == NULL) ||
+  if ((parsed->ns != NULL && response->ns == NULL) ||
       (parsed->mode != NULL && response->mode == NULL) ||
       (parsed->flush_id != NULL && response->flush_id == NULL)) {
     lc_engine_index_flush_response_cleanup(response);
@@ -800,7 +798,7 @@ lc_engine_parse_tcrm_list_response(const void *parsed_json,
 }
 
 int lc_engine_client_get_namespace_config(
-    lc_engine_client *client, const char *namespace_name,
+    lc_engine_client *client, const char *ns,
     lc_engine_namespace_config_response *response, lc_engine_error *error) {
   lc_engine_buffer path;
   char *encoded;
@@ -819,8 +817,8 @@ int lc_engine_client_get_namespace_config(
                                       "failed to allocate namespace path");
   }
   memset(&parsed, 0, sizeof(parsed));
-  if (namespace_name != NULL && namespace_name[0] != '\0') {
-    encoded = lc_engine_url_encode(namespace_name);
+  if (ns != NULL && ns[0] != '\0') {
+    encoded = lc_engine_url_encode(ns);
     if (encoded == NULL) {
       lc_engine_buffer_cleanup(&path);
       return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
@@ -854,14 +852,13 @@ int lc_engine_client_update_namespace_config(
                                       "client, request, response, and error");
   }
   if (request->preferred_engine == NULL && request->fallback_engine == NULL) {
-    return lc_engine_client_get_namespace_config(
-        client, request->namespace_name, response, error);
+    return lc_engine_client_get_namespace_config(client, request->ns, response,
+                                                 error);
   }
   memset(&body_src, 0, sizeof(body_src));
   memset(&parsed, 0, sizeof(parsed));
   memset(&result, 0, sizeof(result));
-  body_src.namespace_name =
-      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  body_src.ns = (char *)lc_engine_effective_namespace(client, request->ns);
   body_src.query.preferred_engine = (char *)request->preferred_engine;
   body_src.query.fallback_engine = (char *)request->fallback_engine;
   header_count = 0U;
@@ -912,11 +909,10 @@ int lc_engine_client_index_flush(lc_engine_client *client,
   }
   memset(&body_src, 0, sizeof(body_src));
   memset(&parsed, 0, sizeof(parsed));
-  body_src.namespace_name =
-      (char *)lc_engine_effective_namespace(client, request->namespace_name);
+  body_src.ns = (char *)lc_engine_effective_namespace(client, request->ns);
   body_src.mode = (char *)request->mode;
   body_field_count = 0U;
-  if (body_src.namespace_name != NULL && body_src.namespace_name[0] != '\0') {
+  if (body_src.ns != NULL && body_src.ns[0] != '\0') {
     body_fields[body_field_count++] = lc_engine_index_flush_body_fields[0];
   }
   if (body_src.mode != NULL && body_src.mode[0] != '\0') {

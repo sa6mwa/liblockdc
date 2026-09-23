@@ -71,7 +71,7 @@ func benchmarkMediumLQL(b *testing.B, documents bool) {
 		"OrSparseOrFlag",
 		"RecursiveExists",
 		"TenantEnterprise",
-		"WorkflowEscalated",
+		"OutboxEscalated",
 		"AmountBand",
 		"RiskSignal",
 		"NarrativeSummary",

@@ -22,17 +22,22 @@ not for a normal `luarocks install` flow.
 declared by `lockdc` rather than repackaging a separate `lockd` Lua client or a
 competing JSON binding.
 
-For this release line, the `lockdc` rock declares `lonejson == 0.43.0-1`. That
-matches the native `lonejson 0.43.0` dependency used by the C SDK for mapped
+For this release line, the `lockdc` rock declares `lonejson == 0.44.0-1`. That
+matches the native `lonejson 0.44.0` dependency used by the C SDK for mapped
 state load/save and internal JSON response parsing.
 
-When running from this repository after building and staging the SDK locally,
-one workable path is:
+When running from this repository after installing `lockdc` and `lonejson` into
+a local LuaRocks tree, run examples with the project-built Bootlin Lua runner:
 
 ```bash
 eval "$(make -s lua-env)"
-export LD_LIBRARY_PATH="$PWD/build/install-tree-sdk-test/prefix/lib:${LD_LIBRARY_PATH:-}"
+eval "$(luarocks --tree /path/to/lua-tree --lua-version 5.5 path)"
+"$LOCKDC_LUA_BIN" examples/lua/acquire_update_json.lua
 ```
+
+`make lua-env` does not install rocks; it supplies the Bootlin runner and
+repository paths. The LuaRocks export supplies the installed `lonejson` module.
+Do not use `LD_LIBRARY_PATH` or a host Lua interpreter for this flow.
 
 ## Common environment
 
@@ -66,21 +71,44 @@ make dev-up
   read namespace engine configuration and trigger an index flush
 - `pouch_local_storage.lua`
   open encrypted, compressed local Pouch storage with first-run key generation
-  through Lua's `pouch_*` client configuration fields
+  through Lua's typed `pouch` configuration table
 - `consumer_handler.lua`
   run a stateful queue consumer with explicit message and lease handling
+- `../outbox_producer.c` and `outbox_dispatcher.lua`
+  demonstrate the transactional-outbox deployment boundary: the C producer
+  commits an effect into a shared-root Pouch store and exits; a dedicated Lua
+  dispatcher process later claims and completes it. Set `LOCKDC_POUCH_ROOT` to
+  the same absolute root for both commands. The producer prints its
+  commit-published outbox key; a real supervisor may forward that key as a
+  bounded latency hint, but restart reconciliation remains authoritative.
+
+For a one-shot local demonstration, run the producer first and then the Lua
+dispatcher with `LOCKDC_OUTBOX_ONCE=1`. Without that variable,
+`outbox_dispatcher.lua` is the blocking dedicated worker process. Both
+processes deliberately use `single_writer=false`; default Pouch mode permits
+only one live writer and is the preferred setting when producer and dispatcher
+are in one process.
 
 ## Consumer model
 
 The Lua consumer path is intentionally simple and single-threaded.
 
-- `client:start_consumer(...)` is blocking
-- `client:new_consumer_service(...):run()` is blocking
-- `client:new_consumer_service(...):start()` is also blocking
-- each blocking Lua consumer service takes exactly one consumer config
+- `client:subscribe(req, handler)` and `client:subscribe_with_state(req, handler)`
+  directly use the C streaming subscriptions; handlers must terminalize each
+  borrowed message before returning
+- `client:watch_queue(req, handler)` directly uses the C streaming queue watch
+- `client:new_consumer_service(config):run()` is the single-consumer, blocking
+  Lua-managed adaptation; a normal handler return acknowledges, while
+  `nil, err`, `false, err`, or an exception nacks and stops it
+- each Lua managed service takes exactly one C-shaped config with `name`,
+  `request`, optional `with_state`, and `handle`
 - one message is consumed at a time
 - the Lua handler runs to completion on the calling Lua state
 - after the handler completes, the next message is consumed
+
+A handler may explicitly `ack()`, `nack()`, or `close()` its message and then
+return normally. The managed service only acknowledges an still-open message;
+it never applies a second terminal operation.
 
 This is deliberate. The Lua binding does not expose the native threaded C
 consumer callback model because calling back into the same Lua state from
@@ -88,7 +116,7 @@ multiple native threads would be unsafe.
 
 In practical terms, the intended Lua DX is:
 
-1. start one blocking consumer loop
+1. construct one blocking consumer service or subscription
 2. handle one message
 3. update state or attachments if needed
 4. ack or nack

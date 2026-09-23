@@ -74,6 +74,7 @@ done
 # Source and Lua artifacts are produced from the native, pinned Bootlin GNU
 # build; never select release artifacts from an ambient host compiler.
 host_release_preset=x86_64-linux-gnu-release
+host_lua_runner="$repo_root/build/$host_release_preset/lockdc_lua_runner"
 "$timed_bin" "release-matrix package source" cmake \
     -DLOCKDC_ROOT="$repo_root" \
     -DLOCKDC_BINARY_DIR="$repo_root/build/$host_release_preset" \
@@ -109,6 +110,7 @@ source_archive="$repo_root/dist/liblockdc-$(sed -n 's/^set(LOCKDC_VERSION "\(.*\
     -DLOCKDC_BINARY_DIR="$repo_root/build/$host_release_preset" \
     -DLOCKDC_DIST_DIR="$repo_root/dist" \
     -DLOCKDC_USE_EXISTING_ARCHIVE=ON \
+    -DLOCKDC_LUA_BIN="$host_lua_runner" \
     -P "$repo_root/tests/lua_release_package_test.cmake"
 "$timed_bin" "release-matrix package archive-verify" cmake \
     -DLOCKDC_ROOT="$repo_root" \

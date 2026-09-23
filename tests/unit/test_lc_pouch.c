@@ -21,6 +21,7 @@
 #include "lc_intcompat.h"
 #include "lc_pouch.h"
 #include "lc_pouch_crypto.h"
+#include "lc_pouch_format.h"
 #include "lc_pouch_index.h"
 #include "lc_pouch_internal.h"
 #include "lc_pouch_namespace.h"
@@ -181,6 +182,8 @@ typedef struct pouch_fail_allocator_state {
   size_t calls;
   size_t fail_at;
   size_t free_calls;
+  size_t large_allocation_minimum;
+  size_t large_allocations;
 } pouch_fail_allocator_state;
 
 typedef struct pouch_acquire_poll_hook_state {
@@ -376,6 +379,19 @@ typedef struct pouch_body_cache_retire_context {
   int write_rc;
 } pouch_body_cache_retire_context;
 
+typedef struct pouch_history_marker_race_context {
+  lc_pouch *pouch;
+  lc_history_consumer *consumer;
+  lc_index_seq acknowledged_index_seq;
+  pthread_mutex_t mutex;
+  pthread_cond_t cond;
+  int removal_ready;
+  int advance_started;
+  int allow_removal;
+  int advance_rc;
+  lc_error advance_error;
+} pouch_history_marker_race_context;
+
 typedef struct pouch_maintenance_barrier_context {
   lc_pouch *pouch;
   pthread_mutex_t mutex;
@@ -388,7 +404,7 @@ typedef struct pouch_maintenance_barrier_context {
 
 typedef struct pouch_query_watermark_overlap {
   lc_pouch *pouch;
-  const char *namespace_name;
+  const char *ns;
   pthread_mutex_t mutex;
   pthread_cond_t cond;
   int mutation_entered;
@@ -413,12 +429,11 @@ static void open_pouch_client_shared(const char *root, lc_client **out,
                                      lc_error *error);
 static void open_pouch_client_endpoint(const char *endpoint, lc_client **out,
                                        lc_error *error);
-static void pouch_state_segment_path(const char *root,
-                                     const char *namespace_name,
+static void pouch_state_segment_path(const char *root, const char *ns,
                                      unsigned long segment_id, char *out,
                                      size_t out_size);
 static unsigned long pouch_state_segment_count(const char *root,
-                                               const char *namespace_name);
+                                               const char *ns);
 
 static void *pouch_write_queue_notification(void *context) {
   pouch_queue_notification_write *write;
@@ -684,22 +699,21 @@ static void *pouch_projection_overlap_second_write(void *context) {
   return NULL;
 }
 
-static void pouch_metadata_worker_overlap_hook(void *context,
-                                               const char *namespace_name) {
+static void pouch_metadata_worker_overlap_hook(void *context, const char *ns) {
   pouch_metadata_worker_overlap *overlap;
 
   overlap = (pouch_metadata_worker_overlap *)context;
-  if (overlap == NULL || namespace_name == NULL) {
+  if (overlap == NULL || ns == NULL) {
     return;
   }
   assert_int_equal(pthread_mutex_lock(&overlap->mutex), 0);
-  if (strcmp(namespace_name, "default") == 0) {
+  if (strcmp(ns, "default") == 0) {
     overlap->default_worker_entered = 1;
     assert_int_equal(pthread_cond_broadcast(&overlap->cond), 0);
     while (!overlap->release_default_worker) {
       assert_int_equal(pthread_cond_wait(&overlap->cond, &overlap->mutex), 0);
     }
-  } else if (strcmp(namespace_name, "other") == 0) {
+  } else if (strcmp(ns, "other") == 0) {
     overlap->other_worker_entered = 1;
     assert_int_equal(pthread_cond_broadcast(&overlap->cond), 0);
   }
@@ -1150,7 +1164,7 @@ static void *pouch_maintenance_wait_for_key(void *context) {
 
   maintenance = (pouch_maintenance_barrier_context *)context;
   memset(&options, 0, sizeof(options));
-  options.namespace_name = "default";
+  options.ns = "default";
   options.cleanup_only = 1;
   lc_error_init(&maintenance->error);
   if (pthread_mutex_lock(&maintenance->mutex) != 0) {
@@ -1203,8 +1217,8 @@ static void *pouch_query_watermark_hold_mutation_thread(void *context) {
   overlap = (pouch_query_watermark_overlap *)context;
   lc_error_init(&overlap->mutation_error);
   overlap->mutation_rc = lc_pouch_state_with_namespace_lock(
-      overlap->pouch, overlap->namespace_name,
-      pouch_query_watermark_hold_mutation, overlap, &overlap->mutation_error);
+      overlap->pouch, overlap->ns, pouch_query_watermark_hold_mutation, overlap,
+      &overlap->mutation_error);
   return NULL;
 }
 
@@ -1218,8 +1232,7 @@ static void *pouch_query_watermark_read_thread(void *context) {
   assert_int_equal(pthread_cond_broadcast(&overlap->cond), 0);
   assert_int_equal(pthread_mutex_unlock(&overlap->mutex), 0);
   overlap->query_rc = lc_pouch_state_query_index_seq(
-      overlap->pouch, overlap->namespace_name, &overlap->query_seq,
-      &overlap->query_error);
+      overlap->pouch, overlap->ns, &overlap->query_seq, &overlap->query_error);
   assert_int_equal(pthread_mutex_lock(&overlap->mutex), 0);
   overlap->query_finished = 1;
   assert_int_equal(pthread_cond_broadcast(&overlap->cond), 0);
@@ -1492,6 +1505,10 @@ static void *pouch_fail_malloc(void *context, size_t size) {
 
   state = (pouch_fail_allocator_state *)context;
   state->calls += 1U;
+  if (state->large_allocation_minimum > 0U &&
+      size >= state->large_allocation_minimum) {
+    state->large_allocations += 1U;
+  }
   if (state->fail_at != 0U && state->calls == state->fail_at) {
     return NULL;
   }
@@ -1503,6 +1520,10 @@ static void *pouch_fail_realloc(void *context, void *ptr, size_t size) {
 
   state = (pouch_fail_allocator_state *)context;
   state->calls += 1U;
+  if (state->large_allocation_minimum > 0U &&
+      size >= state->large_allocation_minimum) {
+    state->large_allocations += 1U;
+  }
   if (state->fail_at != 0U && state->calls == state->fail_at) {
     return NULL;
   }
@@ -2557,9 +2578,8 @@ static void test_index_term_generation_roundtrips_typed_postings(void **state) {
   bytes = NULL;
   length = 0U;
 
-  generation.namespace_name =
-      lc_strdup_with_allocator(&allocator, "docs/exact-generation");
-  assert_non_null(generation.namespace_name);
+  generation.ns = lc_strdup_with_allocator(&allocator, "docs/exact-generation");
+  assert_non_null(generation.ns);
   generation.index_seq = 17UL;
   generation.row_count = 6UL;
   generation.row_hash = 12345UL;
@@ -2611,7 +2631,7 @@ static void test_index_term_generation_roundtrips_typed_postings(void **state) {
   rc = lc_pouch_index_term_generation_decode(&allocator, bytes, length, 17UL,
                                              6UL, 12345UL, &decoded, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(decoded.namespace_name, "docs/exact-generation");
+  assert_string_equal(decoded.ns, "docs/exact-generation");
   assert_int_equal(decoded.index_seq, 17);
   assert_int_equal(decoded.row_count, 6);
   assert_int_equal(decoded.row_hash, 12345);
@@ -2678,9 +2698,9 @@ static void test_index_term_generation_sorts_trusted_terms_without_changing_ids(
   length = 0U;
   doc_ids[0] = 7UL;
 
-  generation.namespace_name =
+  generation.ns =
       lc_strdup_with_allocator(&allocator, "docs/sorted-generation");
-  assert_non_null(generation.namespace_name);
+  assert_non_null(generation.ns);
   generation.index_seq = 23UL;
   generation.row_count = 1UL;
   generation.row_hash = 99UL;
@@ -2872,7 +2892,7 @@ static void test_index_term_generation_reads_v1_artifact(void **state) {
       &allocator, (const char *)legacy_bytes, sizeof(legacy_bytes), 17UL, 1UL,
       2UL, &generation, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(generation.namespace_name, "v1");
+  assert_string_equal(generation.ns, "v1");
   assert_true(lc_pouch_index_term_table_find(&generation.terms, "2f76", "31",
                                              's', &term_id));
   assert_int_equal(term_id, 1);
@@ -2909,9 +2929,8 @@ test_index_term_generation_rejects_corrupt_identity_and_payload(void **state) {
   corrupt = NULL;
   length = 0U;
 
-  generation.namespace_name =
-      lc_strdup_with_allocator(&allocator, "docs/exact-generation");
-  assert_non_null(generation.namespace_name);
+  generation.ns = lc_strdup_with_allocator(&allocator, "docs/exact-generation");
+  assert_non_null(generation.ns);
   generation.index_seq = 9UL;
   generation.row_count = 2UL;
   generation.row_hash = 88UL;
@@ -3186,7 +3205,7 @@ static void test_index_posting_selects_adaptive_encoding(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void pouch_write_json_state(lc_pouch *pouch, const char *namespace_name,
+static void pouch_write_json_state(lc_pouch *pouch, const char *ns,
                                    const char *key, const char *json,
                                    const lc_pouch_state_write_options *options,
                                    lc_error *error) {
@@ -3198,8 +3217,8 @@ static void pouch_write_json_state(lc_pouch *pouch, const char *namespace_name,
   memset(&write_result, 0, sizeof(write_result));
   rc = lc_source_from_memory(json, strlen(json), &source, error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, namespace_name, key, source, options,
-                            &write_result, error);
+  rc = lc_pouch_state_write(pouch, ns, key, source, options, &write_result,
+                            error);
   lc_source_close(source);
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
@@ -3898,6 +3917,47 @@ static int pouch_compaction_process_wait_hook(void *context, lc_error *error) {
   return LC_OK;
 }
 
+static int pouch_history_marker_remove_wait_hook(void *context,
+                                                 lc_error *error) {
+  pouch_history_marker_race_context *race;
+
+  (void)error;
+  race = (pouch_history_marker_race_context *)context;
+  assert_non_null(race);
+  assert_int_equal(pthread_mutex_lock(&race->mutex), 0);
+  race->removal_ready = 1;
+  assert_int_equal(pthread_cond_broadcast(&race->cond), 0);
+  while (!race->allow_removal) {
+    assert_int_equal(pthread_cond_wait(&race->cond, &race->mutex), 0);
+  }
+  assert_int_equal(pthread_mutex_unlock(&race->mutex), 0);
+  return LC_OK;
+}
+
+static void *pouch_history_marker_run_pass(void *context) {
+  pouch_history_marker_race_context *race;
+
+  race = (pouch_history_marker_race_context *)context;
+  lc_pouch_test_compaction_run_pass(race->pouch);
+  return NULL;
+}
+
+static void *pouch_history_marker_advance_consumer(void *context) {
+  pouch_history_marker_race_context *race;
+  lc_history_consumer_position position;
+
+  race = (pouch_history_marker_race_context *)context;
+  memset(&position, 0, sizeof(position));
+  assert_int_equal(pthread_mutex_lock(&race->mutex), 0);
+  race->advance_started = 1;
+  assert_int_equal(pthread_cond_broadcast(&race->cond), 0);
+  assert_int_equal(pthread_mutex_unlock(&race->mutex), 0);
+  race->advance_rc =
+      race->consumer->advance(race->consumer, race->acknowledged_index_seq,
+                              &position, &race->advance_error);
+  return NULL;
+}
+
 typedef struct test_binary_buffer {
   unsigned char *bytes;
   size_t length;
@@ -4004,7 +4064,7 @@ static void test_write_binary_txn_record(
   test_binary_buffer_string(&buffer, target_backend_hash);
   test_binary_buffer_u64(&buffer, (uint64_t)participant_count);
   for (i = 0U; i < participant_count; ++i) {
-    test_binary_buffer_string(&buffer, participants[i].namespace_name);
+    test_binary_buffer_string(&buffer, participants[i].ns);
     test_binary_buffer_string(&buffer, participants[i].key);
     test_binary_buffer_string(&buffer, participants[i].backend_hash);
     {
@@ -4051,7 +4111,7 @@ static void test_write_binary_txn_record_voting(
   test_binary_buffer_string(&buffer, target_backend_hash);
   test_binary_buffer_u64(&buffer, (uint64_t)participant_count);
   for (i = 0U; i < participant_count; ++i) {
-    test_binary_buffer_string(&buffer, participants[i].namespace_name);
+    test_binary_buffer_string(&buffer, participants[i].ns);
     test_binary_buffer_string(&buffer, participants[i].key);
     test_binary_buffer_string(&buffer, participants[i].backend_hash);
     test_binary_buffer_append(&buffer, &vote, sizeof(vote));
@@ -4696,9 +4756,8 @@ static void assert_encrypted_query_index_segment_artifact(
                                         leaf + strlen(index_prefix), needle);
 }
 
-static void find_single_marker_path(const char *root,
-                                    const char *namespace_name, char *path,
-                                    size_t path_size) {
+static void find_single_marker_path(const char *root, const char *ns,
+                                    char *path, size_t path_size) {
   char *namespace_path;
   char markers_path[1024];
   DIR *dir;
@@ -4706,7 +4765,7 @@ static void find_single_marker_path(const char *root,
   int found;
   int written;
 
-  namespace_path = lc_pouch_namespace_path(NULL, root, namespace_name);
+  namespace_path = lc_pouch_namespace_path(NULL, root, ns);
   assert_non_null(namespace_path);
   written = snprintf(markers_path, sizeof(markers_path), "%s/markers",
                      namespace_path);
@@ -4728,27 +4787,27 @@ static void find_single_marker_path(const char *root,
   lc_free_with_allocator(NULL, namespace_path);
 }
 
-static void make_peer_marker_path(const char *root, const char *namespace_name,
+static void make_peer_marker_path(const char *root, const char *ns,
                                   const char *leaf, char *path,
                                   size_t path_size) {
   char *namespace_path;
   int written;
 
-  namespace_path = lc_pouch_namespace_path(NULL, root, namespace_name);
+  namespace_path = lc_pouch_namespace_path(NULL, root, ns);
   assert_non_null(namespace_path);
   written = snprintf(path, path_size, "%s/markers/%s", namespace_path, leaf);
   assert_true(written > 0 && (size_t)written < path_size);
   lc_free_with_allocator(NULL, namespace_path);
 }
 
-static void make_queue_notify_path(const char *root, const char *namespace_name,
+static void make_queue_notify_path(const char *root, const char *ns,
                                    const char *queue, char *path,
                                    size_t path_size) {
   char *namespace_path;
   char *escaped_queue;
   int written;
 
-  namespace_path = lc_pouch_namespace_path(NULL, root, namespace_name);
+  namespace_path = lc_pouch_namespace_path(NULL, root, ns);
   escaped_queue = lc_pouch_path_escape_name(NULL, queue);
   assert_non_null(namespace_path);
   assert_non_null(escaped_queue);
@@ -5155,6 +5214,14 @@ static void test_single_writer_state_read_uses_projection_cache(void **state) {
   rc = lc_pouch_state_read(pouch, "default", "cache/key", &read_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_res.found);
+  read_source_to_string(read_res.body, buffer, sizeof(buffer));
+  assert_string_equal(buffer, "{\"value\":1}");
+  /* Resetting the original cache-filling source after EOF must not revoke the
+   * completed entry: another reader can already hold an immutable cache
+   * source. The later unlinked-segment read proves the completed entry stays
+   * published. */
+  rc = read_res.body->reset(read_res.body, &error);
+  assert_int_equal(rc, LC_OK);
   read_source_to_string(read_res.body, buffer, sizeof(buffer));
   assert_string_equal(buffer, "{\"value\":1}");
   lc_pouch_state_read_result_cleanup(NULL, &read_res);
@@ -5996,7 +6063,7 @@ test_resident_descriptors_stay_bounded_across_lifecycle(void **state) {
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
   assert_int_equal(lc_pouch_test_resident_descriptor_count(pouch), 1U);
 
-  maintenance_options.namespace_name = "default";
+  maintenance_options.ns = "default";
   maintenance_options.force = 1;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
@@ -7255,8 +7322,8 @@ static void test_pouch_endpoint_configures_disk_runtime_controls(void **state) {
                        "fsync_batch_max_ops=0&"
                        "queue_watch=true&"
                        "background_compaction=false&"
-                       "disable_compaction_throttling=true&retention_seconds=5&"
-                       "janitor_interval_seconds=3",
+                       "disable_compaction_throttling=true&"
+                       "terminal_reclaim_min_bytes=8192",
                        root) > 0);
 
   open_pouch_client_endpoint(endpoint, &client, &error);
@@ -7272,14 +7339,243 @@ static void test_pouch_endpoint_configures_disk_runtime_controls(void **state) {
   assert_false(status.background_compaction_enabled);
   assert_true(status.compaction_throttling_disabled);
   assert_int_equal(status.compaction_max_io_bytes_per_sec, 0U);
-  assert_int_equal(status.retention_seconds, 5U);
-  assert_int_equal(status.janitor_interval_seconds, 3U);
-  assert_true(status.janitor_running);
+  assert_int_equal(status.terminal_reclaim_min_bytes, 8192U);
+  assert_true(status.query_indexing_enabled);
   assert_non_null(status.queue_watch_mode);
   assert_non_null(status.queue_watch_reason);
   lc_pouch_status_cleanup(NULL, &status);
 
   lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_typed_settings_override_endpoint_options(void **state) {
+  lc_client *client;
+  lc_client_config config;
+  lc_client_handle *handle;
+  lc_pouch_settings settings;
+  lc_pouch_status status;
+  lc_error error;
+  const char *endpoints[1];
+  char root[512];
+  char endpoint[1536];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  memset(&status, 0, sizeof(status));
+  lc_error_init(&error);
+  make_root("typed-settings", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?single_writer=true&durable_sync=true&"
+                       "fsync_batch_max_ops=9&segment_target_bytes=8192&"
+                       "indexer_flush_docs=32&indexer_flush_interval_seconds=2&"
+                       "queue_watch=true&background_compaction=true&"
+                       "disable_compaction_throttling=false&"
+                       "terminal_reclaim_min_bytes=4096&query_engine=index&"
+                       "query_fallback_engine=scan&query_indexing=true&"
+                       "compression=zlib",
+                       root) > 0);
+  endpoints[0] = endpoint;
+  lc_pouch_settings_init(&settings);
+  settings.set_mask =
+      LC_POUCH_SETTING_SINGLE_WRITER | LC_POUCH_SETTING_DURABLE_SYNC |
+      LC_POUCH_SETTING_FSYNC_BATCH_MAX_OPS |
+      LC_POUCH_SETTING_SEGMENT_TARGET_BYTES |
+      LC_POUCH_SETTING_INDEXER_FLUSH_DOCS |
+      LC_POUCH_SETTING_INDEXER_FLUSH_INTERVAL_SECONDS |
+      LC_POUCH_SETTING_BACKGROUND_COMPACTION |
+      LC_POUCH_SETTING_DISABLE_COMPACTION_THROTTLING |
+      LC_POUCH_SETTING_TERMINAL_RECLAIM_MIN_BYTES |
+      LC_POUCH_SETTING_QUEUE_WATCH | LC_POUCH_SETTING_QUERY_ENGINE |
+      LC_POUCH_SETTING_QUERY_FALLBACK_ENGINE | LC_POUCH_SETTING_QUERY_INDEXING |
+      LC_POUCH_SETTING_COMPRESSION;
+  settings.single_writer = 0;
+  settings.durable_sync = 0;
+  settings.fsync_batch_max_ops = 0U;
+  settings.segment_target_bytes = 4096U;
+  settings.indexer_flush_docs = 64U;
+  settings.indexer_flush_interval_seconds = 1U;
+  settings.background_compaction_enabled = 0;
+  settings.compaction_throttling_disabled = 1;
+  settings.terminal_reclaim_min_bytes = 8192U;
+  settings.queue_watch = 0;
+  settings.query_engine = "scan";
+  settings.query_fallback_engine = "index";
+  settings.query_indexing_enabled = 0;
+  settings.compression = "none";
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.pouch_settings = &settings;
+
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+  handle = (lc_client_handle *)client;
+  rc = lc_pouch_status_read(handle->pouch, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(status.single_writer);
+  assert_false(status.durable_sync);
+  assert_int_equal(status.fsync_batch_max_ops, 0U);
+  assert_int_equal(status.segment_target_bytes, 4096U);
+  assert_int_equal(status.indexer_flush_docs, 64U);
+  assert_int_equal(status.indexer_flush_interval_seconds, 1U);
+  assert_false(status.background_compaction_enabled);
+  assert_true(status.compaction_throttling_disabled);
+  assert_int_equal(status.terminal_reclaim_min_bytes, 8192U);
+  assert_false(status.queue_watch_enabled);
+  assert_string_equal(status.query_engine, "scan");
+  assert_string_equal(status.query_fallback_engine, "index");
+  assert_false(status.query_indexing_enabled);
+  assert_string_equal(status.compression, "none");
+  lc_pouch_status_cleanup(NULL, &status);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_pouch_typed_settings_validate_backend_and_values(void **state) {
+  lc_client *client;
+  lc_client_config config;
+  lc_pouch_settings settings;
+  lc_error error;
+  const char *endpoints[1];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lc_error_init(&error);
+  lc_pouch_settings_init(&settings);
+  settings.set_mask = LC_POUCH_SETTING_DURABLE_SYNC;
+  settings.durable_sync = 1;
+  endpoints[0] = "https://lockd.invalid";
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.pouch_settings = &settings;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(client);
+  assert_string_equal(error.message,
+                      "pouch settings require exactly one pouch endpoint");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  settings.set_mask = LC_POUCH_SETTING_QUERY_INDEXING;
+  settings.query_indexing_enabled = 2;
+  endpoints[0] = "pouch:///tmp/liblockdc-invalid-pouch-settings";
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(client);
+  assert_string_equal(error.message,
+                      "pouch settings boolean fields must be zero or one");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  settings.set_mask = UINT64_C(1) << 63;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(client);
+  assert_string_equal(error.message,
+                      "pouch settings contain an unknown set_mask bit");
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_typed_settings_override_crypto_options(void **state) {
+  lc_client *client;
+  lc_client_config config;
+  lc_client_handle *handle;
+  lc_pouch_settings settings;
+  lc_pouch_status status;
+  lc_error error;
+  const char *endpoints[1];
+  char *crypto_key;
+  char root[512];
+  char endpoint[1024];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  crypto_key = NULL;
+  memset(&status, 0, sizeof(status));
+  lc_error_init(&error);
+  make_root("typed-settings-crypto", root, sizeof(root));
+  cleanup_root(root);
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(crypto_key);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?crypto_key=invalid&compression=zlib",
+                       root) > 0);
+  endpoints[0] = endpoint;
+  lc_pouch_settings_init(&settings);
+  settings.set_mask =
+      LC_POUCH_SETTING_CRYPTO_KEY | LC_POUCH_SETTING_COMPRESSION;
+  settings.crypto_key = crypto_key;
+  settings.compression = "none";
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.pouch_settings = &settings;
+
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+  handle = (lc_client_handle *)client;
+  rc = lc_pouch_status_read(handle->pouch, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(status.crypto_enabled);
+  assert_string_equal(status.compression, "none");
+  lc_pouch_status_cleanup(NULL, &status);
+  lc_client_close(client);
+  lc_pouch_crypto_key_string_free(crypto_key);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_pouch_typed_settings_override_crypto_file_generation(void **state) {
+  lc_client *client;
+  lc_client_config config;
+  lc_pouch_settings settings;
+  lc_error error;
+  const char *endpoints[1];
+  char endpoint[1536];
+  char key_path[640];
+  char root[512];
+  int written;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lc_error_init(&error);
+  make_root("typed-settings-crypto-file", root, sizeof(root));
+  cleanup_root(root);
+  written = snprintf(key_path, sizeof(key_path), "%s/pouch.key", root);
+  assert_true(written > 0 && (size_t)written < sizeof(key_path));
+  written = snprintf(endpoint, sizeof(endpoint),
+                     "pouch://%s?crypto_key_file=%s&"
+                     "crypto_generate_key_file=true",
+                     root, key_path);
+  assert_true(written > 0 && (size_t)written < sizeof(endpoint));
+  endpoints[0] = endpoint;
+  lc_pouch_settings_init(&settings);
+  settings.set_mask = LC_POUCH_SETTING_CRYPTO_KEY_FILE |
+                      LC_POUCH_SETTING_CRYPTO_GENERATE_KEY_FILE;
+  settings.crypto_key_file = key_path;
+  settings.crypto_generate_key_file = 0;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.pouch_settings = &settings;
+
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_null(client);
+  assert_int_equal(access(key_path, F_OK), -1);
+
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -7311,31 +7607,20 @@ static void test_pouch_indexer_deadline_clamps_u64_interval(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_pouch_defaults_and_post_mutation_janitor(void **state) {
+static void test_pouch_defaults_and_terminal_reclaim(void **state) {
   lc_pouch *pouch;
   lc_pouch_open_options options;
   lc_pouch_status status;
-  lc_pouch_fsync_stats fsync_stats;
-  lc_pouch_state_write_result write_result;
-  lc_pouch_state_read_result read_result;
-  lc_source *source;
   lc_error error;
-  struct timespec delay;
-  time_t deadline;
   char root[512];
-  int found;
   int rc;
 
   (void)state;
   pouch = NULL;
-  source = NULL;
   memset(&options, 0, sizeof(options));
   memset(&status, 0, sizeof(status));
-  memset(&fsync_stats, 0, sizeof(fsync_stats));
-  memset(&write_result, 0, sizeof(write_result));
-  memset(&read_result, 0, sizeof(read_result));
   lc_error_init(&error);
-  make_root("default-compaction-janitor", root, sizeof(root));
+  make_root("default-compaction-terminal-reclaim", root, sizeof(root));
   cleanup_root(root);
 
   rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
@@ -7353,63 +7638,20 @@ static void test_pouch_defaults_and_post_mutation_janitor(void **state) {
                    64U * 1024U * 1024U);
   assert_int_equal(status.compaction_delete_grace_seconds, 15U * 60U);
   assert_int_equal(status.compaction_max_io_bytes_per_sec, 8U * 1024U * 1024U);
-  assert_int_equal(status.retention_seconds, 0U);
-  assert_int_equal(status.janitor_interval_seconds, 60U * 60U);
-  assert_false(status.janitor_running);
+  assert_int_equal(status.terminal_reclaim_min_bytes, 1024U * 1024U);
+  assert_true(status.query_indexing_enabled);
   lc_pouch_status_cleanup(NULL, &status);
   lc_pouch_close(pouch);
   pouch = NULL;
 
   memset(&options, 0, sizeof(options));
-  options.retention_seconds = 1U;
-  options.janitor_interval_seconds = 1U;
+  options.terminal_reclaim_min_bytes = 4096U;
   rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_status_read(pouch, &status, &error);
   assert_int_equal(rc, LC_OK);
-  assert_true(status.janitor_running);
+  assert_int_equal(status.terminal_reclaim_min_bytes, 4096U);
   lc_pouch_status_cleanup(NULL, &status);
-
-  rc = lc_source_from_memory("expired", strlen("expired"), &source, &error);
-  assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "default", "expired", source, NULL,
-                            &write_result, &error);
-  assert_int_equal(rc, LC_OK);
-  lc_source_close(source);
-  source = NULL;
-  lc_pouch_state_write_result_cleanup(NULL, &write_result);
-  delay.tv_sec = 2;
-  delay.tv_nsec = 0L;
-  (void)nanosleep(&delay, NULL);
-
-  rc = lc_source_from_memory("trigger", strlen("trigger"), &source, &error);
-  assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "default", "trigger", source, NULL,
-                            &write_result, &error);
-  assert_int_equal(rc, LC_OK);
-  lc_source_close(source);
-  source = NULL;
-  lc_pouch_state_write_result_cleanup(NULL, &write_result);
-  rc = lc_pouch_fsync_stats_read(pouch, &fsync_stats, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_int_equal(fsync_stats.total_batches, 0U);
-  assert_int_equal(fsync_stats.total_requests, 0U);
-
-  found = 1;
-  deadline = time(NULL) + 4;
-  delay.tv_sec = 0;
-  delay.tv_nsec = 50L * 1000L * 1000L;
-  while (found && time(NULL) <= deadline) {
-    memset(&read_result, 0, sizeof(read_result));
-    rc = lc_pouch_state_read(pouch, "default", "expired", &read_result, &error);
-    assert_int_equal(rc, LC_OK);
-    found = read_result.found;
-    lc_pouch_state_read_result_cleanup(NULL, &read_result);
-    if (found) {
-      (void)nanosleep(&delay, NULL);
-    }
-  }
-  assert_false(found);
 
   lc_pouch_close(pouch);
   cleanup_root(root);
@@ -7772,17 +8014,16 @@ test_shared_writer_repairs_unseen_truncated_tail_from_cursor(void **state) {
 
 typedef struct pouch_body_append_capture {
   unsigned long calls;
-  const char *namespace_name;
+  const char *ns;
 } pouch_body_append_capture;
 
-static void pouch_body_append_capture_hook(void *context,
-                                           const char *namespace_name) {
+static void pouch_body_append_capture_hook(void *context, const char *ns) {
   pouch_body_append_capture *capture;
 
   capture = (pouch_body_append_capture *)context;
   if (capture != NULL) {
     capture->calls += 1UL;
-    capture->namespace_name = namespace_name;
+    capture->ns = ns;
   }
 }
 
@@ -7851,7 +8092,7 @@ static void test_shared_writers_append_one_rolling_segment(void **state) {
    * cross-process mutation lock. The durable result below is the observable
    * contract; this hook guards the lock-handoff regression directly. */
   assert_int_equal(body_append.calls, 0UL);
-  assert_null(body_append.namespace_name);
+  assert_null(body_append.ns);
 
   assert_int_equal(pouch_state_segment_count(root, "default"), 1UL);
   pouch_state_segment_path(root, "default", 1UL, segment_path,
@@ -8905,9 +9146,9 @@ static int pouch_shared_process_commit_transaction(const char *root,
   memset(&result, 0, sizeof(result));
   lc_error_init(&error);
   txn_id = test_xid_for_label(txn_id);
-  participants[0].namespace_name = "default";
+  participants[0].ns = "default";
   participants[0].key = "state/process-txn-first";
-  participants[1].namespace_name = "default";
+  participants[1].ns = "default";
   participants[1].key = "state/process-txn-second";
   request.txn_id = txn_id;
   request.participants = participants;
@@ -8953,7 +9194,7 @@ static int pouch_shared_process_compact_after_snapshot(const char *root,
     lc_pouch_test_after_snapshot_write_hook =
         pouch_compaction_process_wait_hook;
     lc_pouch_test_after_snapshot_write_context = &hook_state;
-    maintenance_options.namespace_name = "default";
+    maintenance_options.ns = "default";
     maintenance_options.force = 1;
     rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                   &maintenance_result, &error);
@@ -9897,8 +10138,7 @@ static const char *test_xid_for_label(const char *label) {
   return values[count++];
 }
 
-static void pouch_acquire_test_lease(lc_client *client,
-                                     const char *namespace_name,
+static void pouch_acquire_test_lease(lc_client *client, const char *ns,
                                      const char *key, const char *txn_id,
                                      lc_lease **out, lc_error *error) {
   lc_acquire_req request;
@@ -9909,7 +10149,7 @@ static void pouch_acquire_test_lease(lc_client *client,
   assert_non_null(out);
   *out = NULL;
   lc_acquire_req_init(&request);
-  request.namespace_name = namespace_name;
+  request.ns = ns;
   request.key = key;
   request.owner = "pouch-test-lease";
   request.ttl_seconds = 30L;
@@ -9922,7 +10162,7 @@ static void pouch_acquire_test_lease(lc_client *client,
 static void pouch_copy_lease_ref(lc_lease_ref *out, const lc_lease *lease) {
   assert_non_null(out);
   assert_non_null(lease);
-  out->namespace_name = lease->namespace_name;
+  out->ns = lease->ns;
   out->key = lease->key;
   out->lease_id = lease->lease_id;
   out->txn_id = lease->txn_id;
@@ -9963,8 +10203,8 @@ static void pouch_update_with_test_lease(lc_client *client,
 
   assert_non_null(request);
   lease = NULL;
-  pouch_acquire_test_lease(client, request->lease.namespace_name,
-                           request->lease.key, NULL, &lease, error);
+  pouch_acquire_test_lease(client, request->lease.ns, request->lease.key, NULL,
+                           &lease, error);
   pouch_copy_lease_ref(&request->lease, lease);
   rc = client->update(client, request, source, out, error);
   assert_int_equal(rc, LC_OK);
@@ -10829,7 +11069,7 @@ static void test_exclusive_indexer_publishes_transaction_decision_at_threshold(
   source = NULL;
   assert_int_equal(rc, LC_OK);
 
-  participant.namespace_name = "default";
+  participant.ns = "default";
   participant.key = acquire_req.key;
   decision_req.txn_id = acquire_req.txn_id;
   decision_req.participants = &participant;
@@ -10918,11 +11158,11 @@ test_exclusive_indexer_clears_guards_after_failed_transaction_decision(
   source = NULL;
   assert_int_equal(rc, LC_OK);
 
-  participants[0].namespace_name = "default";
+  participants[0].ns = "default";
   participants[0].key = acquire_req.key;
   /* The second entry is rejected only after the first staged participant has
    * become durable and installed its indexer guard. */
-  participants[1].namespace_name = "default";
+  participants[1].ns = "default";
   participants[1].key = "doc/.staging/invalid";
   decision_req.txn_id = acquire_req.txn_id;
   decision_req.participants = participants;
@@ -11034,7 +11274,7 @@ test_transaction_metadata_stays_staged_until_rollback(void **state) {
   assert_false(read_result.query_hidden);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
 
-  participant.namespace_name = "default";
+  participant.ns = "default";
   participant.key = acquire_req.key;
   decision_req.txn_id = acquire_req.txn_id;
   decision_req.participants = &participant;
@@ -11168,7 +11408,7 @@ static void test_transaction_metadata_rejects_staged_delete(void **state) {
   lc_error_cleanup(&error);
   lc_error_init(&error);
 
-  participant.namespace_name = "default";
+  participant.ns = "default";
   participant.key = acquire_req.key;
   decision_req.txn_id = acquire_req.txn_id;
   decision_req.participants = &participant;
@@ -11340,7 +11580,7 @@ static void test_query_index_sequence_ignores_lease_metadata(void **state) {
   assert_true(state_seq > query_seq);
   assert_int_equal(manifest_seq, query_seq);
 
-  maintenance_options.namespace_name = "default";
+  maintenance_options.ns = "default";
   maintenance_options.force = 1;
   rc = lc_pouch_maintenance_run(handle->pouch, &maintenance_options,
                                 &maintenance_result, &error);
@@ -11428,7 +11668,7 @@ test_compaction_reopen_preserves_released_implicit_xa_leases(void **state) {
       memset(&update_result, 0, sizeof(update_result));
     }
   }
-  maintenance_options.namespace_name = "default";
+  maintenance_options.ns = "default";
   maintenance_options.force = 1;
   rc = lc_pouch_maintenance_run(handle->pouch, &maintenance_options,
                                 &maintenance_result, &error);
@@ -11731,7 +11971,7 @@ static void test_query_index_ignores_internal_objects(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_non_null(transaction_message);
 
-  transaction_nack.message.namespace_name = transaction_message->namespace_name;
+  transaction_nack.message.ns = transaction_message->ns;
   transaction_nack.message.queue = transaction_message->queue;
   transaction_nack.message.message_id = transaction_message->message_id;
   transaction_nack.message.lease_id = transaction_message->lease_id;
@@ -11748,7 +11988,7 @@ static void test_query_index_ignores_internal_objects(void **state) {
   pouch_queue_message_participant_key(transaction_message,
                                       transaction_participant_key,
                                       sizeof(transaction_participant_key));
-  transaction_participant.namespace_name = transaction_message->namespace_name;
+  transaction_participant.ns = transaction_message->ns;
   transaction_participant.key = transaction_participant_key;
   transaction_decision.txn_id = transaction_message->txn_id;
   transaction_decision.participants = &transaction_participant;
@@ -11785,7 +12025,7 @@ static void test_query_index_ignores_internal_objects(void **state) {
   assert_int_equal(manifest_seq, query_seq);
 
   /* A cold selector query must ignore opaque attachment bytes. Regressions
-   * here mark scalar postings incomplete and strand workflow reconciliation. */
+   * here mark scalar postings incomplete and strand outbox reconciliation. */
   query_handler.begin = pouch_query_key_begin;
   query_handler.chunk = pouch_query_key_chunk;
   query_handler.end = pouch_query_key_end;
@@ -12103,8 +12343,8 @@ static void pouch_remove_with_test_lease(lc_client *client,
 
   assert_non_null(operation);
   lease = NULL;
-  pouch_acquire_test_lease(client, operation->lease.namespace_name,
-                           operation->lease.key, NULL, &lease, error);
+  pouch_acquire_test_lease(client, operation->lease.ns, operation->lease.key,
+                           NULL, &lease, error);
   pouch_copy_lease_ref(&operation->lease, lease);
   rc = client->remove(client, operation, out, error);
   assert_int_equal(rc, LC_OK);
@@ -12305,7 +12545,7 @@ static void test_public_core_contract_roundtrips_all_transforms(void **state) {
     assert_int_equal(rc, LC_OK);
     lc_source_close(source);
     source = NULL;
-    participant.namespace_name = "default";
+    participant.ns = "default";
     participant.key = "doc/txn";
     decision_req.txn_id = test_xid_for_label("matrix-txn");
     decision_req.participants = &participant;
@@ -12603,8 +12843,7 @@ static pid_t pouch_test_spawn_public_update(const char *root, const char *key,
                                 sizeof(arguments) / sizeof(arguments[0]));
 }
 
-static void pouch_state_segment_path(const char *root,
-                                     const char *namespace_name,
+static void pouch_state_segment_path(const char *root, const char *ns,
                                      unsigned long segment_id, char *out,
                                      size_t out_size) {
   lc_pouch_namespace_manifest manifest;
@@ -12614,8 +12853,8 @@ static void pouch_state_segment_path(const char *root,
 
   memset(&manifest, 0, sizeof(manifest));
   lc_error_init(&error);
-  rc = lc_pouch_namespace_manifest_open(NULL, root, namespace_name, &manifest,
-                                        NULL, NULL, &error);
+  rc = lc_pouch_namespace_manifest_open(NULL, root, ns, &manifest, NULL, NULL,
+                                        &error);
   assert_int_equal(rc, LC_OK);
   assert_true(segment_id > 0UL && segment_id <= manifest.segment_count);
   written = snprintf(out, out_size, "%s/segments/%s", manifest.namespace_path,
@@ -12627,7 +12866,7 @@ static void pouch_state_segment_path(const char *root,
 }
 
 static unsigned long pouch_state_segment_count(const char *root,
-                                               const char *namespace_name) {
+                                               const char *ns) {
   lc_pouch_namespace_manifest manifest;
   lc_error error;
   unsigned long count;
@@ -12635,8 +12874,8 @@ static unsigned long pouch_state_segment_count(const char *root,
 
   memset(&manifest, 0, sizeof(manifest));
   lc_error_init(&error);
-  rc = lc_pouch_namespace_manifest_open(NULL, root, namespace_name, &manifest,
-                                        NULL, NULL, &error);
+  rc = lc_pouch_namespace_manifest_open(NULL, root, ns, &manifest, NULL, NULL,
+                                        &error);
   assert_int_equal(rc, LC_OK);
   count = manifest.segment_count;
   lc_pouch_namespace_manifest_cleanup(NULL, &manifest);
@@ -12656,8 +12895,7 @@ static void pouch_test_discard_file_bytes(FILE *fp, uint64_t length) {
   }
 }
 
-static void pouch_state_payload_span_for_key(const char *root,
-                                             const char *namespace_name,
+static void pouch_state_payload_span_for_key(const char *root, const char *ns,
                                              const char *key, char *path_out,
                                              size_t path_out_size,
                                              uint64_t *payload_offset_out,
@@ -12678,17 +12916,17 @@ static void pouch_state_payload_span_for_key(const char *root,
   int rc;
 
   assert_non_null(root);
-  assert_non_null(namespace_name);
+  assert_non_null(ns);
   assert_non_null(key);
   assert_non_null(path_out);
   assert_non_null(payload_offset_out);
   assert_non_null(payload_length_out);
   assert_true(path_out_size > 0U);
   found = 0;
-  segment_count = pouch_state_segment_count(root, namespace_name);
+  segment_count = pouch_state_segment_count(root, ns);
   lc_error_init(&error);
   for (segment_id = 1UL; segment_id <= segment_count && !found; ++segment_id) {
-    pouch_state_segment_path(root, namespace_name, segment_id, segment_path,
+    pouch_state_segment_path(root, ns, segment_id, segment_path,
                              sizeof(segment_path));
     fp = fopen(segment_path, "rb");
     assert_non_null(fp);
@@ -13637,9 +13875,107 @@ test_pouch_endpoint_query_engine_routes_implicit_queries(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_pouch_endpoint_disables_query_indexing(void **state) {
+  static const char selector[] =
+      "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_pouch_status status;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_update_res update_res;
+  pouch_query_key_capture capture;
+  lc_error error;
+  char root[512];
+  char endpoint[640];
+  char *namespace_path;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  namespace_path = NULL;
+  memset(&status, 0, sizeof(status));
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  lc_index_flush_req_init(&flush_req);
+  memset(&flush_res, 0, sizeof(flush_res));
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+
+  make_root("endpoint-query-indexing-disabled", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?query_indexing=false&query_engine=index&"
+                       "query_fallback_engine=index&indexer_flush_docs=1",
+                       root) > 0);
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  assert_non_null(handle->pouch);
+  assert_false(handle->pouch->indexer_thread_started);
+  assert_false(handle->pouch->indexer_mutex_initialized);
+  rc = lc_pouch_status_read(handle->pouch, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(status.query_indexing_enabled);
+  lc_pouch_status_cleanup(NULL, &status);
+
+  write_client_state(client, "doc/a", "{\"category\":\"planning\"}", NULL, 0L,
+                     0, &update_res, &error);
+  lc_update_res_cleanup(&update_res);
+  assert_null(handle->pouch->query_pending_index);
+  assert_null(handle->pouch->indexer_pending_namespaces);
+  assert_null(handle->pouch->query_active_operations);
+  namespace_path = lc_pouch_namespace_path(NULL, root, "default");
+  assert_non_null(namespace_path);
+  assert_int_equal(query_index_regular_file_count(namespace_path), 0U);
+
+  query_req.selector_json = selector;
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1);
+  assert_true(pouch_query_capture_has(&capture, "doc/a"));
+  assert_string_equal(query_res.metadata_json, "{\"engine\":\"scan\"}");
+  lc_query_res_cleanup(&query_res);
+  assert_int_equal(query_index_regular_file_count(namespace_path), 0U);
+
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&query_req);
+  query_req.selector_json = selector;
+  query_req.engine = "index";
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch query indexing is disabled; use engine=scan");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  flush_req.ns = "default";
+  flush_req.mode = "sync";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(
+      error.message,
+      "pouch query indexing is disabled; flush_index is unavailable");
+  lc_index_flush_res_cleanup(&flush_res);
+
+  lc_free_with_allocator(NULL, namespace_path);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void
 test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
-  static const char namespace_name[] = "docs/ns-config";
+  static const char ns[] = "docs/ns-config";
   static const char selector[] =
       "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
   lc_client *client;
@@ -13680,10 +14016,10 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
   cleanup_root(root);
   open_pouch_client(root, &client, &error);
 
-  ns_req.namespace_name = namespace_name;
+  ns_req.ns = ns;
   rc = client->get_namespace_config(client, &ns_req, &ns_res, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(ns_res.namespace_name, namespace_name);
+  assert_string_equal(ns_res.ns, ns);
   assert_string_equal(ns_res.preferred_engine, "index");
   assert_string_equal(ns_res.fallback_engine, "none");
   assert_string_equal(ns_res.etag, "");
@@ -13701,10 +14037,9 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
   assert_non_null(first_config_etag);
   lc_namespace_config_res_cleanup(&ns_res);
 
-  update_req.lease.namespace_name = namespace_name;
+  update_req.lease.ns = ns;
   update_req.lease.key = "doc/a";
-  pouch_acquire_test_lease(client, namespace_name, "doc/a", NULL, &lease,
-                           &error);
+  pouch_acquire_test_lease(client, ns, "doc/a", NULL, &lease, &error);
   pouch_copy_lease_ref(&update_req.lease, lease);
   rc = lc_source_from_memory("{\"category\":\"planning\"}",
                              strlen("{\"category\":\"planning\"}"), &source,
@@ -13719,7 +14054,7 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
   assert_int_equal(rc, LC_OK);
   lease = NULL;
 
-  query_req.namespace_name = namespace_name;
+  query_req.ns = ns;
   query_req.selector_json = selector;
   rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
                           &error);
@@ -13731,7 +14066,7 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
 
   memset(&capture, 0, sizeof(capture));
   lc_query_req_init(&query_req);
-  query_req.namespace_name = namespace_name;
+  query_req.ns = ns;
   query_req.selector_json = selector;
   query_req.engine = "index";
   rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
@@ -13770,7 +14105,7 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
   client = NULL;
   open_pouch_client(root, &client, &error);
   lc_namespace_config_req_init(&ns_req);
-  ns_req.namespace_name = namespace_name;
+  ns_req.ns = ns;
   rc = client->get_namespace_config(client, &ns_req, &ns_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(ns_res.preferred_engine, "scan");
@@ -13892,7 +14227,7 @@ test_pouch_public_api_rejects_reserved_lockd_namespaces(void **state) {
   lc_error_init(&error);
   lc_get_res_cleanup(&get_res);
 
-  update_req.lease.namespace_name = ".lockd/leases";
+  update_req.lease.ns = ".lockd/leases";
   update_req.lease.key = "doc/a";
   rc =
       lc_source_from_memory("{\"kind\":\"reserved\"}",
@@ -13908,7 +14243,7 @@ test_pouch_public_api_rejects_reserved_lockd_namespaces(void **state) {
   lc_error_init(&error);
   lc_update_res_cleanup(&update_res);
 
-  enqueue_req.namespace_name = ".lockd/queue";
+  enqueue_req.ns = ".lockd/queue";
   enqueue_req.queue = "jobs";
   enqueue_req.visibility_timeout_seconds = 30L;
   rc = lc_source_from_memory("payload", strlen("payload"), &source, &error);
@@ -13921,7 +14256,7 @@ test_pouch_public_api_rejects_reserved_lockd_namespaces(void **state) {
   lc_error_init(&error);
   lc_enqueue_res_cleanup(&enqueue_res);
 
-  query_req.namespace_name = ".lockd/queue";
+  query_req.ns = ".lockd/queue";
   query_req.engine = "scan";
   query_req.selector_json = selector;
   rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
@@ -13932,7 +14267,7 @@ test_pouch_public_api_rejects_reserved_lockd_namespaces(void **state) {
   lc_error_init(&error);
   lc_query_res_cleanup(&query_res);
 
-  ns_req.namespace_name = ".lockd/config";
+  ns_req.ns = ".lockd/config";
   rc = client->get_namespace_config(client, &ns_req, &ns_res, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   lc_error_cleanup(&error);
@@ -13940,7 +14275,7 @@ test_pouch_public_api_rejects_reserved_lockd_namespaces(void **state) {
   lc_namespace_config_res_cleanup(&ns_res);
   lc_get_res_cleanup(&get_res);
 
-  update_req.lease.namespace_name = "default";
+  update_req.lease.ns = "default";
   update_req.lease.key = "q/jobs/state/message-1";
   rc =
       lc_source_from_memory("{\"kind\":\"reserved\"}",
@@ -13955,7 +14290,7 @@ test_pouch_public_api_rejects_reserved_lockd_namespaces(void **state) {
   lc_error_init(&error);
   lc_update_res_cleanup(&update_res);
 
-  update_req.lease.namespace_name = "default";
+  update_req.lease.ns = "default";
   update_req.lease.key = "state/doc-1/attachments/file-1";
   rc =
       lc_source_from_memory("{\"kind\":\"reserved\"}",
@@ -13971,7 +14306,7 @@ test_pouch_public_api_rejects_reserved_lockd_namespaces(void **state) {
   lc_error_init(&error);
   lc_update_res_cleanup(&update_res);
 
-  update_req.lease.namespace_name = ".lockdown";
+  update_req.lease.ns = ".lockdown";
   update_req.lease.key = "doc/a";
   pouch_acquire_test_lease(client, ".lockdown", "doc/a", NULL, &lease, &error);
   pouch_copy_lease_ref(&update_req.lease, lease);
@@ -14551,6 +14886,80 @@ static void test_state_crypto_compression_round_trips(void **state) {
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
   lc_pouch_crypto_key_string_free(crypto_key);
   lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_transformed_metadata_replay_defers_body_materialization(void **state) {
+  lc_pouch *writer;
+  lc_pouch *reader;
+  lc_source *body;
+  lc_pouch_open_options options;
+  lc_pouch_state_write_options write_options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result metadata_result;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char *crypto_key;
+  char root[512];
+  char segment_path[1024];
+  char payload[8192];
+  int rc;
+
+  (void)state;
+  writer = NULL;
+  reader = NULL;
+  body = NULL;
+  crypto_key = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&write_options, 0, sizeof(write_options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&metadata_result, 0, sizeof(metadata_result));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("transformed-lazy-body", root, sizeof(root));
+  cleanup_root(root);
+  fill_repeated_payload(payload, sizeof(payload));
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+
+  options.crypto_key = crypto_key;
+  options.compression = "zlib";
+  rc = lc_pouch_open(root, NULL, &options, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory(payload, strlen(payload), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  write_options.content_type = "application/json";
+  rc = lc_pouch_state_write(writer, "default", "transformed/lazy", body,
+                            &write_options, &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+  body = NULL;
+  lc_pouch_close(writer);
+  writer = NULL;
+
+  rc = lc_pouch_open(root, NULL, &options, &reader, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read_metadata(reader, "default", "transformed/lazy",
+                                    &metadata_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(metadata_result.found);
+  assert_null(metadata_result.body);
+  lc_pouch_state_read_result_cleanup(NULL, &metadata_result);
+
+  pouch_state_segment_path(root, "default", 1UL, segment_path,
+                           sizeof(segment_path));
+  assert_int_equal(unlink(segment_path), 0);
+  rc = lc_pouch_state_read(reader, "default", "transformed/lazy", &read_result,
+                           &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_null(read_result.body);
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(reader);
+  lc_pouch_crypto_key_string_free(crypto_key);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -16325,7 +16734,7 @@ test_metadata_batch_rollover_resets_active_segment_size(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_state_idle_compaction_installs_snapshot(void **state) {
+static void test_state_terminal_reclaim_installs_snapshot(void **state) {
   lc_pouch *pouch;
   lc_source *body;
   lc_pouch_open_options open_options;
@@ -16339,10 +16748,6 @@ static void test_state_idle_compaction_installs_snapshot(void **state) {
   char *namespace_path;
   char rejected_payload_file_path[1024];
   char path[1024];
-  char snapshot_path[1024];
-  char snapshot_manifest_line[128];
-  struct timespec delay;
-  int attempts;
   int written;
   int rc;
 
@@ -16361,6 +16766,7 @@ static void test_state_idle_compaction_installs_snapshot(void **state) {
   open_options.background_compaction_enabled = 1;
   open_options.compaction_min_segment_count = 1UL;
   open_options.compaction_min_reclaimable_bytes = 1UL;
+  open_options.terminal_reclaim_min_bytes = 1UL;
   open_options.compaction_interval_seconds = 1UL;
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
@@ -16383,30 +16789,12 @@ static void test_state_idle_compaction_installs_snapshot(void **state) {
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
-  written = snprintf(snapshot_path, sizeof(snapshot_path), "%s/snapshots/%s",
-                     namespace_path, "snapshot-00000000000000000003.log");
-  assert_true(written > 0 && (size_t)written < sizeof(snapshot_path));
   written = snprintf(path, sizeof(path), "%s/manifest", namespace_path);
   assert_true(written > 0 && (size_t)written < sizeof(path));
-  written = snprintf(snapshot_manifest_line, sizeof(snapshot_manifest_line),
-                     "snapshot=%s", "snapshot-00000000000000000003.log");
-  assert_true(written > 0 && (size_t)written < sizeof(snapshot_manifest_line));
-  delay.tv_sec = 0;
-  delay.tv_nsec = 100L * 1000L * 1000L;
-  /* The successful writes debounce maintenance; this quiet interval permits it.
-   */
-  for (attempts = 0; attempts < 30 &&
-                     (!path_is_file(snapshot_path) ||
-                      !pouch_file_contains_text(path, snapshot_manifest_line));
-       ++attempts) {
-    assert_int_equal(nanosleep(&delay, NULL), 0);
-  }
-  assert_true(path_is_file(snapshot_path));
-  assert_true(pouch_file_contains_text(path, snapshot_manifest_line));
-  assert_path_file(namespace_path,
-                   "snapshots/snapshot-00000000000000000003.log");
-  assert_path_file_contains(namespace_path, "manifest",
-                            "snapshot=snapshot-00000000000000000003.log");
+  /* One worker turn is the scheduler contract. Do not couple the storage
+   * invariant to a wall-clock race. */
+  lc_pouch_test_compaction_run_pass(pouch);
+  assert_true(pouch_file_contains_text(path, "snapshot="));
   assert_path_file_not_contains(namespace_path, "manifest", "snapshot_mode=");
   pouch_state_segment_path(root, "team/alpha", 1UL, path, sizeof(path));
   assert_true(path_is_file(path));
@@ -16447,7 +16835,459 @@ static void test_state_idle_compaction_installs_snapshot(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_state_idle_compaction_waits_for_first_mutation(void **state) {
+static void test_history_consumer_pins_compaction_and_persists(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_history_consumer *consumer;
+  lc_history_consumer *reopened;
+  lc_history_consumer *current;
+  lc_history_consumer_config config;
+  lc_history_consumer_position position;
+  lc_acquire_req acquire_req;
+  lc_release_req release_req;
+  lc_pouch *pouch;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_generation direct_index_seq;
+  lc_index_seq current_index_seq;
+  lc_lease *lease;
+  lc_source *body;
+  lc_error error;
+  char root[512];
+  char endpoint[600];
+  int rc;
+  int written;
+
+  (void)state;
+  client = NULL;
+  consumer = NULL;
+  reopened = NULL;
+  current = NULL;
+  lease = NULL;
+  body = NULL;
+  direct_index_seq = 0U;
+  current_index_seq = 0U;
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  memset(&position, 0, sizeof(position));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&write_result, 0, sizeof(write_result));
+  lc_error_init(&error);
+  make_root("history-consumer", root, sizeof(root));
+  cleanup_root(root);
+  written = snprintf(endpoint, sizeof(endpoint),
+                     "pouch://%s?segment_target_bytes=1&"
+                     "background_compaction=false",
+                     root);
+  assert_true(written > 0 && (size_t)written < sizeof(endpoint));
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  pouch = handle->pouch;
+
+  rc = lc_source_from_memory("one", strlen("one"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "history/ns", "state/a", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  rc = lc_source_from_memory("two", strlen("two"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "history/ns", "state/b", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  assert_true(pouch_state_segment_count(root, "history/ns") >= 2UL);
+  rc = lc_pouch_state_index_seq(pouch, "history/ns", &direct_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(direct_index_seq >= 2U);
+
+  acquire_req.ns = "history/ns";
+  acquire_req.key = "state/client";
+  acquire_req.owner = "history-consumer-test";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("three", strlen("three"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->update(lease, body, NULL, &error);
+  lc_source_close(body);
+  body = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  lc_history_consumer_config_init(&config);
+  config.ns = "history/ns";
+  config.consumer_id = "replica/a";
+  config.initial_acknowledged_index_seq = 0U;
+  rc = lc_client_new_history_consumer(client, &config, &consumer, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(consumer);
+  rc = lc_history_consumer_get_position(consumer, &position, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(position.acknowledged_index_seq, 0U);
+  assert_true(position.current_index_seq > direct_index_seq);
+  current_index_seq = position.current_index_seq;
+
+  config.consumer_id = "replica/invalid-ahead";
+  config.initial_acknowledged_index_seq = current_index_seq + 1U;
+  rc = lc_client_new_history_consumer(client, &config, &current, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(current);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  config.consumer_id = "replica/a";
+  config.initial_acknowledged_index_seq = 0U;
+
+  maintenance_options.ns = "history/ns";
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(maintenance_result.skipped);
+  assert_string_equal(maintenance_result.diagnostic, "history-consumer-behind");
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+
+  rc = lc_history_consumer_advance(consumer, current_index_seq + 1U, &position,
+                                   &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = lc_history_consumer_advance(consumer, current_index_seq, &position,
+                                   &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(position.acknowledged_index_seq, current_index_seq);
+  assert_int_equal(position.current_index_seq, current_index_seq);
+  rc = lc_history_consumer_advance(consumer, current_index_seq - 1U, &position,
+                                   &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(maintenance_result.compacted);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+
+  lc_client_close(client);
+  client = NULL;
+  rc = lc_history_consumer_get_position(consumer, &position, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(position.acknowledged_index_seq, position.current_index_seq);
+  lc_history_consumer_close(consumer);
+  consumer = NULL;
+
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  config.initial_acknowledged_index_seq = 0U;
+  rc = client->new_history_consumer(client, &config, &reopened, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_history_consumer_get_position(reopened, &position, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(position.acknowledged_index_seq, position.current_index_seq);
+  rc = lc_history_consumer_unregister(reopened, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_history_consumer_get_position(reopened, &position, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_history_consumer_close(reopened);
+  /* Consumer identities are application values: an internal control-directory
+   * name must remain usable after another cursor has created that directory. */
+  config.consumer_id = ".staging";
+  config.initial_acknowledged_index_seq = LC_HISTORY_CONSUMER_START_AT_CURRENT;
+  rc = client->new_history_consumer(client, &config, &current, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_history_consumer_get_position(current, &position, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(position.acknowledged_index_seq, position.current_index_seq);
+  rc = lc_history_consumer_unregister(current, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_history_consumer_close(current);
+  current = NULL;
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_history_consumer_advance_preserves_new_reclaim_marker(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_history_consumer *consumer;
+  lc_history_consumer_config config;
+  lc_history_consumer_position position;
+  lc_pouch_state_write_result write_result;
+  lc_source *body;
+  pouch_history_marker_race_context race;
+  lc_error error;
+  pthread_t pass_thread;
+  pthread_t advance_thread;
+  char root[512];
+  char endpoint[600];
+  char marker_directory[1024];
+  char marker_path[1024];
+  char *marker_leaf;
+  int rc;
+  int written;
+
+  (void)state;
+  client = NULL;
+  consumer = NULL;
+  body = NULL;
+  marker_leaf = NULL;
+  memset(&position, 0, sizeof(position));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&race, 0, sizeof(race));
+  lc_error_init(&error);
+  make_root("history-marker-race", root, sizeof(root));
+  cleanup_root(root);
+  written = snprintf(endpoint, sizeof(endpoint),
+                     "pouch://%s?segment_target_bytes=1&"
+                     "background_compaction=false",
+                     root);
+  assert_true(written > 0 && (size_t)written < sizeof(endpoint));
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+
+  rc = lc_source_from_memory("history", strlen("history"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(handle->pouch, "history/race", "state/a", body,
+                            NULL, &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  lc_history_consumer_config_init(&config);
+  config.ns = "history/race";
+  config.consumer_id = "replica/race";
+  config.initial_acknowledged_index_seq = 0U;
+  rc = lc_client_new_history_consumer(client, &config, &consumer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = consumer->position(consumer, &position, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(position.current_index_seq > position.acknowledged_index_seq);
+
+  /* Seed the durable work selected by the pass. The production transition is
+   * an earlier terminal write; this direct notification isolates the cursor
+   * advancement/removal interleaving. */
+  rc = lc_pouch_compaction_note_history_advanced(handle->pouch, "history/race",
+                                                 &error);
+  assert_int_equal(rc, LC_OK);
+  marker_leaf = lc_pouch_path_escape_name(NULL, "history/race");
+  assert_non_null(marker_leaf);
+  written = snprintf(marker_directory, sizeof(marker_directory),
+                     "%s/.lockd/terminal-reclaim", root);
+  assert_true(written > 0 && (size_t)written < sizeof(marker_directory));
+  written = snprintf(marker_path, sizeof(marker_path), "%s/%s",
+                     marker_directory, marker_leaf);
+  assert_true(written > 0 && (size_t)written < sizeof(marker_path));
+  assert_true(path_is_file(marker_path));
+
+  /* The test runs one selected pass directly. The normal worker was disabled
+   * at open so no unrelated turn can consume the seeded marker. */
+  handle->pouch->background_compaction_enabled = 1;
+  handle->pouch->compaction_interval_seconds = 1U;
+  race.pouch = handle->pouch;
+  race.consumer = consumer;
+  race.acknowledged_index_seq = position.current_index_seq;
+  lc_error_init(&race.advance_error);
+  assert_int_equal(pthread_mutex_init(&race.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&race.cond, NULL), 0);
+  lc_pouch_test_before_terminal_reclaim_marker_remove_hook =
+      pouch_history_marker_remove_wait_hook;
+  lc_pouch_test_before_terminal_reclaim_marker_remove_context = &race;
+  assert_int_equal(
+      pthread_create(&pass_thread, NULL, pouch_history_marker_run_pass, &race),
+      0);
+  assert_int_equal(pthread_mutex_lock(&race.mutex), 0);
+  while (!race.removal_ready) {
+    assert_int_equal(pthread_cond_wait(&race.cond, &race.mutex), 0);
+  }
+  assert_int_equal(pthread_mutex_unlock(&race.mutex), 0);
+  assert_int_equal(pthread_create(&advance_thread, NULL,
+                                  pouch_history_marker_advance_consumer, &race),
+                   0);
+  assert_int_equal(pthread_mutex_lock(&race.mutex), 0);
+  while (!race.advance_started) {
+    assert_int_equal(pthread_cond_wait(&race.cond, &race.mutex), 0);
+  }
+  race.allow_removal = 1;
+  assert_int_equal(pthread_cond_broadcast(&race.cond), 0);
+  assert_int_equal(pthread_mutex_unlock(&race.mutex), 0);
+  assert_int_equal(pthread_join(pass_thread, NULL), 0);
+  assert_int_equal(pthread_join(advance_thread, NULL), 0);
+  lc_pouch_test_before_terminal_reclaim_marker_remove_hook = NULL;
+  lc_pouch_test_before_terminal_reclaim_marker_remove_context = NULL;
+  assert_int_equal(race.advance_rc, LC_OK);
+  assert_true(path_is_file(marker_path));
+
+  assert_int_equal(pthread_cond_destroy(&race.cond), 0);
+  assert_int_equal(pthread_mutex_destroy(&race.mutex), 0);
+  lc_error_cleanup(&race.advance_error);
+  lc_history_consumer_close(consumer);
+  lc_client_close(client);
+  lc_free_with_allocator(NULL, marker_leaf);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_history_consumer_corruption_blocks_compaction(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_history_consumer *consumer;
+  lc_history_consumer_config config;
+  lc_history_consumer_position position;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result write_result;
+  lc_source *body;
+  lc_error error;
+  char root[512];
+  char endpoint[600];
+  char *namespace_leaf;
+  char *consumer_leaf;
+  char *control_path;
+  char *history_path;
+  char *namespace_path;
+  char *consumer_path;
+  char *staging_path;
+  char *staging_consumer_path;
+  const char *corrupt_records[] = {"bad\n", "LCH1\nack=\n",
+                                   "LCH1\nack=0\ntrailing\n"};
+  size_t corrupt_index;
+  int rc;
+  int written;
+
+  (void)state;
+  client = NULL;
+  consumer = NULL;
+  body = NULL;
+  namespace_leaf = NULL;
+  consumer_leaf = NULL;
+  control_path = NULL;
+  history_path = NULL;
+  namespace_path = NULL;
+  consumer_path = NULL;
+  staging_path = NULL;
+  staging_consumer_path = NULL;
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&position, 0, sizeof(position));
+  lc_error_init(&error);
+  make_root("history-corruption", root, sizeof(root));
+  cleanup_root(root);
+  written = snprintf(endpoint, sizeof(endpoint),
+                     "pouch://%s?segment_target_bytes=1&"
+                     "background_compaction=false",
+                     root);
+  assert_true(written > 0 && (size_t)written < sizeof(endpoint));
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  rc = lc_source_from_memory("one", strlen("one"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(handle->pouch, "history/corrupt", "state/a", body,
+                            NULL, &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  rc = lc_source_from_memory("two", strlen("two"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(handle->pouch, "history/corrupt", "state/b", body,
+                            NULL, &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  lc_history_consumer_config_init(&config);
+  config.ns = "history/corrupt";
+  config.consumer_id = "replica/corrupt";
+  rc = client->new_history_consumer(client, &config, &consumer, &error);
+  assert_int_equal(rc, LC_OK);
+
+  namespace_leaf = lc_pouch_path_escape_name(NULL, config.ns);
+  consumer_leaf = lc_pouch_path_escape_name(NULL, "consumer:replica/corrupt");
+  control_path = lc_pouch_path_join(NULL, root, ".lockd");
+  history_path = lc_pouch_path_join(NULL, control_path, "history-consumers");
+  namespace_path = lc_pouch_path_join(NULL, history_path, namespace_leaf);
+  consumer_path = lc_pouch_path_join(NULL, namespace_path, consumer_leaf);
+  staging_path = lc_pouch_path_join(NULL, namespace_path, ".staging");
+  staging_consumer_path = lc_pouch_path_join(NULL, staging_path, consumer_leaf);
+  assert_non_null(consumer_path);
+  assert_non_null(staging_consumer_path);
+  maintenance_options.ns = config.ns;
+  maintenance_options.force = 1;
+  write_text_file(staging_consumer_path, "LCH1\nack=0\n");
+  rc = consumer->position(consumer, &position, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(access(staging_consumer_path, F_OK), -1);
+  assert_int_equal(errno, ENOENT);
+  write_text_file(staging_consumer_path, "LCH1\nack=0\n");
+  rc = lc_pouch_maintenance_run(handle->pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(maintenance_result.skipped);
+  assert_string_equal(maintenance_result.diagnostic, "history-consumer-behind");
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  assert_int_equal(access(staging_consumer_path, F_OK), -1);
+  assert_int_equal(errno, ENOENT);
+  for (corrupt_index = 0U;
+       corrupt_index < sizeof(corrupt_records) / sizeof(corrupt_records[0]);
+       ++corrupt_index) {
+    write_text_file(consumer_path, corrupt_records[corrupt_index]);
+    rc = consumer->position(consumer, &position, &error);
+    assert_int_equal(rc, LC_ERR_INVALID);
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+    rc = lc_pouch_maintenance_run(handle->pouch, &maintenance_options,
+                                  &maintenance_result, &error);
+    assert_int_equal(rc, LC_ERR_INVALID);
+    assert_false(maintenance_result.compacted);
+    lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+  }
+  assert_int_equal(unlink(consumer_path), 0);
+  assert_int_equal(symlink(root, consumer_path), 0);
+  rc = consumer->position(consumer, &position, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = lc_pouch_maintenance_run(handle->pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_false(maintenance_result.compacted);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_history_consumer_close(consumer);
+  consumer = NULL;
+  lc_free_with_allocator(NULL, namespace_leaf);
+  lc_free_with_allocator(NULL, consumer_leaf);
+  lc_free_with_allocator(NULL, control_path);
+  lc_free_with_allocator(NULL, history_path);
+  lc_free_with_allocator(NULL, namespace_path);
+  lc_free_with_allocator(NULL, consumer_path);
+  lc_free_with_allocator(NULL, staging_path);
+  lc_free_with_allocator(NULL, staging_consumer_path);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_state_compaction_does_not_scan_root_at_open(void **state) {
   lc_pouch *pouch;
   lc_source *body;
   lc_pouch_open_options open_options;
@@ -16457,8 +17297,6 @@ static void test_state_idle_compaction_waits_for_first_mutation(void **state) {
   char root[512];
   char *namespace_path;
   char snapshot_path[1024];
-  struct timespec delay;
-  int attempts;
   int written;
   int rc;
 
@@ -16503,12 +17341,9 @@ static void test_state_idle_compaction_waits_for_first_mutation(void **state) {
                      namespace_path, "snapshot-00000000000000000003.log");
   assert_true(written > 0 && (size_t)written < sizeof(snapshot_path));
 
-  delay.tv_sec = 0;
-  delay.tv_nsec = 100L * 1000L * 1000L;
-  for (attempts = 0; attempts < 15; ++attempts) {
-    assert_false(path_is_file(snapshot_path));
-    assert_int_equal(nanosleep(&delay, NULL), 0);
-  }
+  /* No mutation of this handle and no persisted terminal marker means an open
+   * cannot discover the namespace or launch a compaction scan. */
+  lc_pouch_test_compaction_run_pass(pouch);
   assert_false(path_is_file(snapshot_path));
 
   lc_free_with_allocator(NULL, namespace_path);
@@ -16589,6 +17424,7 @@ static void test_maintenance_reports_disabled_without_force(void **state) {
   lc_pouch_state_write_result write_result;
   lc_error error;
   char root[512];
+  unsigned long segment_count;
   int rc;
 
   (void)state;
@@ -16613,14 +17449,18 @@ static void test_maintenance_reports_disabled_without_force(void **state) {
   assert_int_equal(rc, LC_OK);
   body->close(body);
 
-  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.ns = "team/alpha";
+  maintenance_options.terminal_reclaim = 1;
+  segment_count = pouch_state_segment_count(root, "team/alpha");
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(maintenance_result.namespace_name, "team/alpha");
+  assert_string_equal(maintenance_result.ns, "team/alpha");
   assert_string_equal(maintenance_result.diagnostic, "disabled");
   assert_true(maintenance_result.skipped);
   assert_false(maintenance_result.compacted);
+  assert_int_equal(pouch_state_segment_count(root, "team/alpha"),
+                   segment_count);
 
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
@@ -16674,7 +17514,7 @@ test_maintenance_retention_sweep_deletes_expired_state(void **state) {
   assert_true(write_result.updated_at_unix > 0L);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
 
-  maintenance_options.namespace_name = "team/retention";
+  maintenance_options.ns = "team/retention";
   maintenance_options.retention_updated_before_unix = 1L;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
@@ -16725,6 +17565,347 @@ test_maintenance_retention_sweep_deletes_expired_state(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_terminal_reclaim_compacts_active_segment_without_timing_wait(
+    void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result delete_result;
+  lc_pouch_state_read_result read_result;
+  lc_source *body;
+  lc_error error;
+  char root[512];
+  char *namespace_path;
+  char *marker_leaf;
+  char marker_path[1024];
+  char manifest_path[1024];
+  char first_segment_path[1024];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  namespace_path = NULL;
+  marker_leaf = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&delete_result, 0, sizeof(delete_result));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("terminal-reclaim-active", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1024U * 1024U;
+  open_options.compaction_min_segment_count = 2UL;
+  open_options.compaction_min_reclaimable_bytes = 1024U * 1024U;
+  open_options.terminal_reclaim_min_bytes = 1U;
+  open_options.compaction_interval_seconds = 3600U;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 1;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("terminal", strlen("terminal"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/terminal", "state/dead", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  rc = lc_pouch_state_delete(pouch, "team/terminal", "state/dead", NULL,
+                             &delete_result, &error);
+  assert_int_equal(rc, LC_OK);
+
+  marker_leaf = lc_pouch_path_escape_name(NULL, "team/terminal");
+  assert_non_null(marker_leaf);
+  assert_true(snprintf(marker_path, sizeof(marker_path),
+                       "%s/.lockd/terminal-reclaim/%s", root, marker_leaf) > 0);
+  /* A terminal mutation only coalesces bounded in-memory work. It does not
+   * perform marker I/O on the foreground mutation path. */
+  assert_false(path_is_file(marker_path));
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/terminal");
+  assert_non_null(namespace_path);
+  assert_true(snprintf(manifest_path, sizeof(manifest_path), "%s/manifest",
+                       namespace_path) > 0);
+  pouch_state_segment_path(root, "team/terminal", 1UL, first_segment_path,
+                           sizeof(first_segment_path));
+  assert_true(path_is_file(first_segment_path));
+
+  /* Run one worker turn directly: this is the observable scheduler contract,
+   * not a wall-clock race. */
+  lc_pouch_test_compaction_run_pass(pouch);
+  /* The terminal marker and bounded queue remain live through the configured
+   * obsolete-file grace period, so physical unlink cannot be stranded. */
+  assert_true(path_is_file(marker_path));
+  assert_int_equal(lc_pouch_test_compaction_queue_count(pouch), 1U);
+  assert_true(pouch_file_contains_text(manifest_path, "snapshot="));
+  assert_true(path_is_file(first_segment_path));
+
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "team/terminal", "state/dead", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_free_with_allocator(NULL, marker_leaf);
+  lc_free_with_allocator(NULL, namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_terminal_reclaim_marker_resumes_after_reopen(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result delete_result;
+  lc_source *body;
+  lc_error error;
+  char root[512];
+  char *marker_leaf;
+  char *namespace_path;
+  char control_directory[1024];
+  char marker_directory[1024];
+  char marker_path[1024];
+  char manifest_path[1024];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  marker_leaf = NULL;
+  namespace_path = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&delete_result, 0, sizeof(delete_result));
+  lc_error_init(&error);
+  make_root("terminal-reclaim-reopen", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1024U * 1024U;
+  open_options.terminal_reclaim_min_bytes = 1U;
+  open_options.compaction_interval_seconds = 3600U;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 0;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("terminal", strlen("terminal"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/reopen", "state/dead", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  rc = lc_pouch_state_delete(pouch, "team/reopen", "state/dead", NULL,
+                             &delete_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  marker_leaf = lc_pouch_path_escape_name(NULL, "team/reopen");
+  assert_non_null(marker_leaf);
+  assert_true(snprintf(control_directory, sizeof(control_directory),
+                       "%s/.lockd", root) > 0);
+  rc = mkdir(control_directory, 0777);
+  assert_true(rc == 0 || (rc == -1 && errno == EEXIST));
+  assert_true(snprintf(marker_directory, sizeof(marker_directory),
+                       "%s/.lockd/terminal-reclaim", root) > 0);
+  rc = mkdir(marker_directory, 0777);
+  assert_true(rc == 0 || (rc == -1 && errno == EEXIST));
+  assert_true(snprintf(marker_path, sizeof(marker_path), "%s/%s",
+                       marker_directory, marker_leaf) > 0);
+  write_text_file(marker_path, "");
+
+  open_options.background_compaction_enabled = 1;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lc_pouch_test_compaction_queue_count(pouch), 1U);
+  lc_pouch_test_compaction_run_pass(pouch);
+  assert_true(path_is_file(marker_path));
+  assert_int_equal(lc_pouch_test_compaction_queue_count(pouch), 1U);
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/reopen");
+  assert_non_null(namespace_path);
+  assert_true(snprintf(manifest_path, sizeof(manifest_path), "%s/manifest",
+                       namespace_path) > 0);
+  assert_true(pouch_file_contains_text(manifest_path, "snapshot="));
+
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_free_with_allocator(NULL, marker_leaf);
+  lc_free_with_allocator(NULL, namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_terminal_reclaim_failed_marker_does_not_starve_next_marker(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result delete_result;
+  lc_source *body;
+  lc_error error;
+  char root[512];
+  char *blocked_marker_leaf;
+  char *healthy_marker_leaf;
+  char *blocked_namespace_path;
+  char *healthy_namespace_path;
+  char control_directory[1024];
+  char marker_directory[1024];
+  char blocked_marker_path[1024];
+  char healthy_marker_path[1024];
+  char healthy_manifest_path[1024];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  blocked_marker_leaf = NULL;
+  healthy_marker_leaf = NULL;
+  blocked_namespace_path = NULL;
+  healthy_namespace_path = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&delete_result, 0, sizeof(delete_result));
+  lc_error_init(&error);
+  make_root("terminal-reclaim-marker-fairness", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1024U * 1024U;
+  open_options.terminal_reclaim_min_bytes = 1U;
+  open_options.compaction_interval_seconds = 3600U;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 0;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("blocked", strlen("blocked"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "aaa/blocked", "state/dead", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  rc = lc_pouch_state_delete(pouch, "aaa/blocked", "state/dead", NULL,
+                             &delete_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+
+  rc = lc_source_from_memory("healthy", strlen("healthy"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "zzz/healthy", "state/dead", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  rc = lc_pouch_state_delete(pouch, "zzz/healthy", "state/dead", NULL,
+                             &delete_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  blocked_marker_leaf = lc_pouch_path_escape_name(NULL, "aaa/blocked");
+  healthy_marker_leaf = lc_pouch_path_escape_name(NULL, "zzz/healthy");
+  assert_non_null(blocked_marker_leaf);
+  assert_non_null(healthy_marker_leaf);
+  blocked_namespace_path = lc_pouch_namespace_path(NULL, root, "aaa/blocked");
+  healthy_namespace_path = lc_pouch_namespace_path(NULL, root, "zzz/healthy");
+  assert_non_null(blocked_namespace_path);
+  assert_non_null(healthy_namespace_path);
+  assert_true(strcmp(blocked_marker_leaf, healthy_marker_leaf) < 0);
+  assert_true(snprintf(control_directory, sizeof(control_directory),
+                       "%s/.lockd", root) > 0);
+  rc = mkdir(control_directory, 0777);
+  assert_true(rc == 0 || (rc == -1 && errno == EEXIST));
+  assert_true(snprintf(marker_directory, sizeof(marker_directory),
+                       "%s/.lockd/terminal-reclaim", root) > 0);
+  rc = mkdir(marker_directory, 0777);
+  assert_true(rc == 0 || (rc == -1 && errno == EEXIST));
+  assert_true(snprintf(blocked_marker_path, sizeof(blocked_marker_path),
+                       "%s/%s", marker_directory, blocked_marker_leaf) > 0);
+  assert_true(snprintf(healthy_marker_path, sizeof(healthy_marker_path),
+                       "%s/%s", marker_directory, healthy_marker_leaf) > 0);
+  write_text_file(blocked_marker_path, "");
+  write_text_file(healthy_marker_path, "");
+  assert_int_equal(chmod(blocked_namespace_path, 0), 0);
+
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  /* Keep the test scheduler-driven without starting a background thread. */
+  pouch->background_compaction_enabled = 1;
+  lc_pouch_test_compaction_run_pass(pouch);
+  assert_true(path_is_file(blocked_marker_path));
+  lc_pouch_test_compaction_run_pass(pouch);
+  assert_true(path_is_file(blocked_marker_path));
+  assert_true(snprintf(healthy_manifest_path, sizeof(healthy_manifest_path),
+                       "%s/manifest", healthy_namespace_path) > 0);
+  assert_true(pouch_file_contains_text(healthy_manifest_path, "snapshot="));
+
+  assert_int_equal(chmod(blocked_namespace_path, 0700), 0);
+  lc_pouch_close(pouch);
+  lc_free_with_allocator(NULL, healthy_namespace_path);
+  lc_free_with_allocator(NULL, blocked_namespace_path);
+  lc_free_with_allocator(NULL, healthy_marker_leaf);
+  lc_free_with_allocator(NULL, blocked_marker_leaf);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_compaction_queue_is_bounded_per_root(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_state_write_result write_result;
+  lc_source *body;
+  lc_error error;
+  char root[512];
+  char ns[64];
+  unsigned int index;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&write_result, 0, sizeof(write_result));
+  lc_error_init(&error);
+  make_root("compaction-queue-bounded", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.compaction_interval_seconds = 3600U;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 1;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  for (index = 0U; index < LC_POUCH_COMPACTION_QUEUE_MAX_NAMESPACES + 16U;
+       ++index) {
+    assert_true(snprintf(ns, sizeof(ns), "team/%u", index) > 0);
+    rc = lc_source_from_memory("x", 1U, &body, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_pouch_state_write(pouch, ns, "state/live", body, NULL,
+                              &write_result, &error);
+    assert_int_equal(rc, LC_OK);
+    lc_source_close(body);
+    body = NULL;
+    lc_pouch_state_write_result_cleanup(NULL, &write_result);
+    memset(&write_result, 0, sizeof(write_result));
+  }
+  assert_int_equal(lc_pouch_test_compaction_queue_count(pouch),
+                   LC_POUCH_COMPACTION_QUEUE_MAX_NAMESPACES);
+
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void
 test_maintenance_creates_namespace_without_prior_writes(void **state) {
   lc_pouch *pouch;
@@ -16747,12 +17928,12 @@ test_maintenance_creates_namespace_without_prior_writes(void **state) {
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
 
-  maintenance_options.namespace_name = "team/empty";
+  maintenance_options.ns = "team/empty";
   maintenance_options.cleanup_only = 1;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(maintenance_result.namespace_name, "team/empty");
+  assert_string_equal(maintenance_result.ns, "team/empty");
   assert_string_equal(maintenance_result.diagnostic, "cleanup-complete");
   assert_true(maintenance_result.skipped);
   assert_false(maintenance_result.compacted);
@@ -16825,7 +18006,7 @@ static void test_maintenance_reports_threshold_skip(void **state) {
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
 
-  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.ns = "team/alpha";
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
   assert_int_equal(rc, LC_OK);
@@ -16886,7 +18067,7 @@ static void test_maintenance_force_installs_snapshot(void **state) {
   assert_int_equal(rc, LC_OK);
   body->close(body);
 
-  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.ns = "team/alpha";
   maintenance_options.force = 1;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
@@ -16972,7 +18153,7 @@ static void test_manifest_open_ignores_unmanifested_snapshot(void **state) {
   assert_int_equal(rc, LC_OK);
   body->close(body);
 
-  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.ns = "team/alpha";
   maintenance_options.force = 1;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
@@ -17059,7 +18240,7 @@ static void test_maintenance_aborts_on_validation_drift(void **state) {
   lc_pouch_test_after_snapshot_write_context = &hook_state;
   lc_pouch_test_after_snapshot_write_hook = pouch_compaction_drift_hook;
 
-  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.ns = "team/alpha";
   maintenance_options.force = 1;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
@@ -17134,7 +18315,7 @@ static void test_maintenance_aborts_on_same_size_segment_drift(void **state) {
   lc_pouch_test_after_snapshot_write_context = &hook_state;
   lc_pouch_test_after_snapshot_write_hook = pouch_compaction_drift_hook;
 
-  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.ns = "team/alpha";
   maintenance_options.force = 1;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
@@ -17212,13 +18393,13 @@ static void test_maintenance_reports_snapshot_write_abort(void **state) {
   assert_non_null(snapshot_path);
   assert_int_equal(chmod(snapshots_path, 0555), 0);
 
-  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.ns = "team/alpha";
   maintenance_options.force = 1;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
   assert_int_equal(chmod(snapshots_path, 0755), 0);
   assert_true(rc != LC_OK);
-  assert_string_equal(maintenance_result.namespace_name, "team/alpha");
+  assert_string_equal(maintenance_result.ns, "team/alpha");
   assert_string_equal(maintenance_result.diagnostic, "snapshot-write-aborted");
   assert_true(maintenance_result.aborted);
   assert_false(maintenance_result.compacted);
@@ -17286,7 +18467,7 @@ static void test_maintenance_runs_immediately_despite_interval(void **state) {
     lc_pouch_state_write_result_cleanup(NULL, &write_result);
   }
 
-  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.ns = "team/alpha";
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
   assert_int_equal(rc, LC_OK);
@@ -17379,7 +18560,7 @@ static void test_compaction_reclaims_expired_obsolete_files(void **state) {
   assert_non_null(segment_two_path);
   assert_true(path_is_file(segment_one_path));
   assert_true(path_is_file(segment_two_path));
-  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.ns = "team/alpha";
   maintenance_options.force = 1;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
@@ -17401,7 +18582,7 @@ static void test_compaction_reclaims_expired_obsolete_files(void **state) {
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   memset(&maintenance_result, 0, sizeof(maintenance_result));
   memset(&maintenance_options, 0, sizeof(maintenance_options));
-  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.ns = "team/alpha";
   maintenance_options.cleanup_only = 1;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
@@ -17518,7 +18699,7 @@ static void test_snapshot_high_water_survives_compaction_reopen(void **state) {
   assert_int_equal(rc, LC_OK);
   body->close(body);
 
-  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.ns = "team/alpha";
   maintenance_options.force = 1;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
@@ -17571,8 +18752,10 @@ test_query_freshness_delete_survives_compaction_reopen(void **state) {
   lc_pouch_generation query_seq_before;
   lc_pouch_generation query_seq_after;
   lc_pouch_generation state_seq;
+  lc_pouch_generation indexed_seq;
   lc_error error;
   char root[512];
+  size_t query_rows;
   int rc;
 
   (void)state;
@@ -17582,6 +18765,8 @@ test_query_freshness_delete_survives_compaction_reopen(void **state) {
   query_seq_before = 0UL;
   query_seq_after = 0UL;
   state_seq = 0UL;
+  indexed_seq = 0UL;
+  query_rows = 0U;
   memset(&open_options, 0, sizeof(open_options));
   memset(&maintenance_options, 0, sizeof(maintenance_options));
   memset(&maintenance_result, 0, sizeof(maintenance_result));
@@ -17595,6 +18780,8 @@ test_query_freshness_delete_survives_compaction_reopen(void **state) {
   cleanup_root(root);
 
   open_options.segment_target_bytes = 1U;
+  open_options.single_writer_set = 1;
+  open_options.single_writer = 0;
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_source_from_memory("{\"kind\":\"gone\"}",
@@ -17623,6 +18810,15 @@ test_query_freshness_delete_survives_compaction_reopen(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(query_seq_before > initial_query_seq);
   assert_int_equal(query_seq_before, delete_result.index_seq);
+  /* Publish the tombstone before compaction so the test proves shared
+   * compaction retires a current derived projection rather than merely
+   * catching a naturally stale manifest. */
+  rc = lc_pouch_query_index_flush(pouch, "docs/query-freshness",
+                                  query_seq_before, &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, query_seq_before);
+  assert_true(flush_result.repaired);
+  memset(&flush_result, 0, sizeof(flush_result));
 
   /* Internal records advance state ordering but are not query candidates.
    * This distinguishes the durable query high water from generic state
@@ -17644,7 +18840,7 @@ test_query_freshness_delete_survives_compaction_reopen(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(query_seq_after, query_seq_before);
 
-  maintenance_options.namespace_name = "docs/query-freshness";
+  maintenance_options.ns = "docs/query-freshness";
   maintenance_options.force = 1;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
@@ -17660,10 +18856,21 @@ test_query_freshness_delete_survives_compaction_reopen(void **state) {
                                       &query_seq_after, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(query_seq_after, query_seq_before);
-  rc = lc_pouch_query_index_flush(pouch, "docs/query-freshness",
-                                  query_seq_after, &flush_result, &error);
+  /* Shared compaction explicitly retires the derived manifest. A wait-style
+   * caller must repair that derived view from canonical state, without
+   * accepting the stale pre-compaction index. */
+  rc = lc_pouch_query_index_ensure_current(
+      pouch, "docs/query-freshness", query_seq_after, 0, &flush_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(flush_result.index_seq, query_seq_before);
+  assert_true(flush_result.repaired);
+  query_rows = 0U;
+  rc = lc_pouch_query_index_visit(pouch, "docs/query-freshness",
+                                  pouch_query_index_count_row, &query_rows,
+                                  &indexed_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(indexed_seq, query_seq_before);
+  assert_int_equal(query_rows, 0U);
 
   lc_pouch_state_write_result_cleanup(NULL, &internal_result);
   lc_pouch_state_write_result_cleanup(NULL, &delete_result);
@@ -17674,8 +18881,104 @@ test_query_freshness_delete_survives_compaction_reopen(void **state) {
 }
 
 static void
+test_query_indexing_opt_out_invalidates_before_compaction(void **state) {
+  static const char ns[] = "docs/query-indexing-opt-out";
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result delete_result;
+  lc_pouch_query_index_flush_result flush_result;
+  lc_pouch_generation query_seq;
+  lc_pouch_generation indexed_seq;
+  lc_error error;
+  char root[512];
+  size_t query_rows;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  query_seq = 0UL;
+  indexed_seq = 0UL;
+  query_rows = 0U;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&delete_result, 0, sizeof(delete_result));
+  memset(&flush_result, 0, sizeof(flush_result));
+  lc_error_init(&error);
+  make_root("query-indexing-opt-out-compaction", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1U;
+  open_options.single_writer_set = 1;
+  open_options.single_writer = 1;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"kind\":\"gone\"}",
+                             strlen("{\"kind\":\"gone\"}"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, ns, "doc/gone", body, NULL, &write_result,
+                            &error);
+  lc_source_close(body);
+  body = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_query_index_seq(pouch, ns, &query_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(query_seq > 0UL);
+  rc = lc_pouch_query_index_flush(pouch, ns, query_seq, &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  memset(&flush_result, 0, sizeof(flush_result));
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_options.query_indexing_enabled_set = 1;
+  open_options.query_indexing_enabled = 0;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_delete(pouch, ns, "doc/gone", NULL, &delete_result,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  maintenance_options.ns = ns;
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(maintenance_result.compacted);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_options.query_indexing_enabled_set = 0;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_query_index_seq(pouch, ns, &query_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_ensure_current(pouch, ns, query_seq, 0,
+                                           &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(flush_result.repaired);
+  memset(&flush_result, 0, sizeof(flush_result));
+  rc = lc_pouch_query_index_visit(pouch, ns, pouch_query_index_count_row,
+                                  &query_rows, &indexed_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(indexed_seq, query_seq);
+  assert_int_equal(query_rows, 0U);
+
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_query_watermark_waits_for_exclusive_namespace_mutation(void **state) {
-  static const char namespace_name[] = "docs/query-watermark-lock";
+  static const char ns[] = "docs/query-watermark-lock";
   pouch_query_watermark_overlap overlap;
   pthread_t mutation_thread;
   pthread_t query_thread;
@@ -17696,15 +18999,14 @@ test_query_watermark_waits_for_exclusive_namespace_mutation(void **state) {
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  pouch_write_json_state(pouch, namespace_name, "doc/initial",
-                         "{\"kind\":\"initial\"}", NULL, &error);
-  rc = lc_pouch_state_query_index_seq(pouch, namespace_name,
-                                      &expected_query_seq, &error);
+  pouch_write_json_state(pouch, ns, "doc/initial", "{\"kind\":\"initial\"}",
+                         NULL, &error);
+  rc = lc_pouch_state_query_index_seq(pouch, ns, &expected_query_seq, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(expected_query_seq > 0UL);
 
   overlap.pouch = pouch;
-  overlap.namespace_name = namespace_name;
+  overlap.ns = ns;
   assert_int_equal(pthread_mutex_init(&overlap.mutex, NULL), 0);
   assert_int_equal(pthread_cond_init(&overlap.cond, NULL), 0);
   assert_int_equal(pthread_create(&mutation_thread, NULL,
@@ -17805,7 +19107,7 @@ static void test_state_metadata_survives_snapshot_compaction(void **state) {
   assert_true(metadata_result.has_query_hidden);
   assert_true(metadata_result.query_hidden);
 
-  maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.ns = "team/alpha";
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
   assert_int_equal(rc, LC_OK);
@@ -17994,16 +19296,15 @@ static void test_staged_state_writes_durable_decision_records(void **state) {
 }
 
 static int pouch_state_segments_contain_record_type(const char *root,
-                                                    const char *namespace_name,
+                                                    const char *ns,
                                                     unsigned char type) {
   const unsigned char header[] = {'L', 'H', 'C', 'P', 1U, type};
   char segment_path[1024];
   unsigned long segment_index;
 
   for (segment_index = 1UL;
-       segment_index <= pouch_state_segment_count(root, namespace_name);
-       ++segment_index) {
-    pouch_state_segment_path(root, namespace_name, segment_index, segment_path,
+       segment_index <= pouch_state_segment_count(root, ns); ++segment_index) {
+    pouch_state_segment_path(root, ns, segment_index, segment_path,
                              sizeof(segment_path));
     if (pouch_file_contains_bytes(segment_path, header, sizeof(header))) {
       return 1;
@@ -18774,6 +20075,47 @@ static void test_client_get_missing_and_public_state_behavior(void **state) {
   assert_false(get_res.no_content);
   assert_int_equal(loaded.value, 42);
   lc_get_res_cleanup(&get_res);
+  memset(&get_res, 0, sizeof(get_res));
+
+  pouch_acquire_test_lease(client, "component", "component/state", NULL, &lease,
+                           &error);
+  pouch_copy_lease_ref(&update_req.lease, lease);
+  rc = lc_source_from_memory("{\"value\":7}", strlen("{\"value\":7}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  assert_int_equal(rc, LC_OK);
+  source->close(source);
+  source = NULL;
+  lc_update_res_cleanup(&update_res);
+  memset(&update_res, 0, sizeof(update_res));
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_get_in_namespace(client, "component", "component/state", &get_opts,
+                           sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(bytes, length, "\"value\":7"));
+  sink->close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+  memset(&get_res, 0, sizeof(get_res));
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc =
+      client->get(client, "component/state", &get_opts, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(get_res.no_content);
+  sink->close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
   if (source != NULL) {
     source->close(source);
   }
@@ -18849,7 +20191,7 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(lease);
-  attach_op.lease.namespace_name = lease->namespace_name;
+  attach_op.lease.ns = lease->ns;
   attach_op.lease.key = lease->key;
   attach_op.lease.lease_id = lease->lease_id;
   attach_op.lease.txn_id = lease->txn_id;
@@ -19001,7 +20343,7 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   sink = NULL;
   lc_attachment_get_res_cleanup(&get_res);
 
-  delete_op.lease.namespace_name = lease->namespace_name;
+  delete_op.lease.ns = lease->ns;
   delete_op.lease.key = lease->key;
   delete_op.lease.lease_id = lease->lease_id;
   delete_op.lease.txn_id = lease->txn_id;
@@ -19041,7 +20383,7 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(deleted, 0);
 
-  delete_all_op.lease.namespace_name = lease->namespace_name;
+  delete_all_op.lease.ns = lease->ns;
   delete_all_op.lease.key = lease->key;
   delete_all_op.lease.lease_id = lease->lease_id;
   delete_all_op.lease.txn_id = lease->txn_id;
@@ -19233,7 +20575,7 @@ test_compaction_preserves_reachable_spans_in_writer_modes(void **state) {
     lc_source_close(source);
     source = NULL;
 
-    acquire_req.namespace_name = "refs";
+    acquire_req.ns = "refs";
     acquire_req.key = "state/attachment";
     acquire_req.owner = "compaction-spans";
     acquire_req.ttl_seconds = 30L;
@@ -19254,7 +20596,7 @@ test_compaction_preserves_reachable_spans_in_writer_modes(void **state) {
     assert_int_equal(rc, LC_OK);
     lease = NULL;
 
-    maintenance_options.namespace_name = "refs";
+    maintenance_options.ns = "refs";
     maintenance_options.force = 1;
     rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                   &maintenance_result, &error);
@@ -19290,7 +20632,7 @@ test_compaction_preserves_reachable_spans_in_writer_modes(void **state) {
     assert_string_equal(payload, "staged");
     lc_pouch_state_read_result_cleanup(NULL, &read_result);
 
-    get_op.lease.namespace_name = "refs";
+    get_op.lease.ns = "refs";
     get_op.lease.key = "state/attachment";
     get_op.selector.name = "payload.txt";
     get_op.public_read = 1;
@@ -19381,7 +20723,7 @@ static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
   assert_non_null(enqueue_res.message_id);
   assert_int_equal(enqueue_res.payload_bytes, 5L);
 
-  stale_ack_op.message.namespace_name = "default";
+  stale_ack_op.message.ns = "default";
   stale_ack_op.message.queue = "jobs";
   stale_ack_op.message.message_id = enqueue_res.message_id;
   rc = client->queue_ack(client, &stale_ack_op, &stale_ack_res, &error);
@@ -19458,7 +20800,7 @@ static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
     lc_ack_op ack_op;
 
     memset(&ack_op, 0, sizeof(ack_op));
-    ack_op.message.namespace_name = message->namespace_name;
+    ack_op.message.ns = message->ns;
     ack_op.message.queue = message->queue;
     ack_op.message.message_id = message->message_id;
     ack_op.message.lease_id = message->lease_id;
@@ -19640,6 +20982,7 @@ test_client_queue_redelivers_abandoned_inflight_after_visibility_timeout(
   lc_dequeue_req dequeue_req;
   lc_message *message;
   lc_error error;
+  pouch_queue_test_clock clock;
   const void *bytes;
   size_t length;
   char root[512];
@@ -19658,10 +21001,15 @@ test_client_queue_redelivers_abandoned_inflight_after_visibility_timeout(
   memset(&stats_res, 0, sizeof(stats_res));
   lc_dequeue_req_init(&dequeue_req);
   lc_error_init(&error);
+  memset(&clock, 0, sizeof(clock));
+  clock.wall.tv_sec = 1000L;
+  clock.monotonic.tv_sec = 1000L;
   make_root("client-queue-redelivery", root, sizeof(root));
   cleanup_root(root);
 
   open_pouch_client(root, &client, &error);
+  lc_pouch_test_queue_time_context = &clock;
+  lc_pouch_test_queue_clock_gettime = pouch_queue_test_gettime;
   enqueue_req.queue = "jobs";
   rc = lc_source_from_memory("abandoned", strlen("abandoned"), &source, &error);
   assert_int_equal(rc, LC_OK);
@@ -19688,7 +21036,11 @@ test_client_queue_redelivers_abandoned_inflight_after_visibility_timeout(
   assert_int_equal(stats_res.pending_candidates, 1);
   lc_queue_stats_res_cleanup(&stats_res);
 
-  sleep(2U);
+  /* Advance the same injected wall clock used by queue visibility and lease
+   * validation. This proves redelivery without racing a real one-second
+   * boundary or delaying the test suite. */
+  clock.wall.tv_sec += 2L;
+  clock.monotonic.tv_sec += 2L;
   rc = client->dequeue(client, &dequeue_req, &message, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(message);
@@ -19716,6 +21068,7 @@ test_client_queue_redelivers_abandoned_inflight_after_visibility_timeout(
 
   lc_queue_stats_res_cleanup(&stats_res);
   lc_enqueue_res_cleanup(&enqueue_res);
+  (void)teardown_pouch_queue_test_clock(NULL);
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -20086,7 +21439,7 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
 
-  txn_update_req.lease.namespace_name = "default";
+  txn_update_req.lease.ns = "default";
   txn_update_req.lease.key = "crypto/txn-state";
   txn_update_req.lease.txn_id = test_xid_for_label("crypto-txn");
   pouch_acquire_test_lease(client, "default", "crypto/txn-state", "crypto-txn",
@@ -20102,7 +21455,7 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   source->close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
-  participant.namespace_name = "default";
+  participant.ns = "default";
   participant.key = "crypto/txn-state";
   participant.backend_hash = NULL;
   decision_req.txn_id = test_xid_for_label("crypto-txn");
@@ -20951,7 +22304,10 @@ static void test_pouch_crypto_rejects_wrong_key(void **state) {
 static void test_pouch_crypto_rejects_tampered_payload(void **state) {
   lc_client *client;
   lc_client *reader;
+  lc_client_handle *reader_handle;
   lc_update_res update_res;
+  lc_pouch_state_read_result metadata_result;
+  lc_pouch_state_read_result body_result;
   lc_error error;
   char *crypto_key;
   char payload_path[1024];
@@ -20963,8 +22319,11 @@ static void test_pouch_crypto_rejects_tampered_payload(void **state) {
   (void)state;
   client = NULL;
   reader = NULL;
+  reader_handle = NULL;
   crypto_key = NULL;
   memset(&update_res, 0, sizeof(update_res));
+  memset(&metadata_result, 0, sizeof(metadata_result));
+  memset(&body_result, 0, sizeof(body_result));
   lc_error_init(&error);
   make_root("crypto-tamper", root, sizeof(root));
   cleanup_root(root);
@@ -20985,9 +22344,44 @@ static void test_pouch_crypto_rejects_tampered_payload(void **state) {
   flip_file_byte(payload_path, payload_offset + 8U);
 
   open_pouch_client_crypto(root, crypto_key, &reader, &error);
+  reader_handle = (lc_client_handle *)reader;
+  assert_non_null(reader_handle->pouch);
+  rc = lc_pouch_state_read_metadata(reader_handle->pouch, "default",
+                                    "crypto/tamper", &metadata_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(metadata_result.found);
+  assert_null(metadata_result.body);
+  lc_pouch_state_read_result_cleanup(NULL, &metadata_result);
+  /* A body source must be returned before its terminal authentication tag is
+   * consumed. Deliberately discard the terminal read error: even then an
+   * invalid source must never publish its fully copied plaintext to the cache.
+   */
+  rc = lc_pouch_state_read(reader_handle->pouch, "default", "crypto/tamper",
+                           &body_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(body_result.found);
+  assert_non_null(body_result.body);
+  for (;;) {
+    unsigned char bytes[16];
+    size_t nread;
+
+    nread =
+        body_result.body->read(body_result.body, bytes, sizeof(bytes), NULL);
+    if (nread == 0U) {
+      break;
+    }
+  }
+  lc_pouch_state_read_result_cleanup(NULL, &body_result);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  /* Reopening the body must reach its authenticated source, rather than a
+   * falsely published cache entry, and therefore report the same corruption.
+   */
   assert_client_get_protocol_failure(reader, "crypto/tamper", &error);
 
   lc_client_close(reader);
+  lc_pouch_state_read_result_cleanup(NULL, &metadata_result);
+  lc_pouch_state_read_result_cleanup(NULL, &body_result);
   lc_update_res_cleanup(&update_res);
   lc_pouch_crypto_key_string_free(crypto_key);
   cleanup_root(root);
@@ -21204,7 +22598,7 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   assert_non_null(message);
   assert_string_equal(message->txn_id, test_xid_for_label("txn-queue-commit"));
 
-  ack_op.message.namespace_name = message->namespace_name;
+  ack_op.message.ns = message->ns;
   ack_op.message.queue = message->queue;
   ack_op.message.message_id = message->message_id;
   ack_op.message.lease_id = message->lease_id;
@@ -21231,8 +22625,8 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   pouch_queue_message_participant_key(message, participant_key,
                                       sizeof(participant_key));
   snprintf(participant_namespace, sizeof(participant_namespace), "%s",
-           message->namespace_name);
-  participant.namespace_name = participant_namespace;
+           message->ns);
+  participant.ns = participant_namespace;
   participant.key = participant_key;
   participant.backend_hash = NULL;
   decision_req.participants = &participant;
@@ -21280,7 +22674,7 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
 
   memset(&ack_op, 0, sizeof(ack_op));
   memset(&ack_res, 0, sizeof(ack_res));
-  ack_op.message.namespace_name = message->namespace_name;
+  ack_op.message.ns = message->ns;
   ack_op.message.queue = message->queue;
   ack_op.message.message_id = message->message_id;
   ack_op.message.lease_id = message->lease_id;
@@ -21295,7 +22689,7 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   decision_req.txn_id = test_xid_for_label("txn-queue-rollback");
   pouch_queue_message_participant_key(message, participant_key,
                                       sizeof(participant_key));
-  participant.namespace_name = message->namespace_name;
+  participant.ns = message->ns;
   participant.key = participant_key;
   participant.backend_hash = NULL;
   decision_req.participants = &participant;
@@ -21320,7 +22714,7 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   assert_non_null(message);
   memset(&ack_op, 0, sizeof(ack_op));
   memset(&ack_res, 0, sizeof(ack_res));
-  ack_op.message.namespace_name = message->namespace_name;
+  ack_op.message.ns = message->ns;
   ack_op.message.queue = message->queue;
   ack_op.message.message_id = message->message_id;
   ack_op.message.lease_id = message->lease_id;
@@ -21399,7 +22793,7 @@ static void test_txn_queue_decision_rejects_newer_delivery_lease(void **state) {
   assert_non_null(first_message);
   first_fencing_token = first_message->fencing_token;
 
-  ack_op.message.namespace_name = first_message->namespace_name;
+  ack_op.message.ns = first_message->ns;
   ack_op.message.queue = first_message->queue;
   ack_op.message.message_id = first_message->message_id;
   ack_op.message.lease_id = first_message->lease_id;
@@ -21413,7 +22807,7 @@ static void test_txn_queue_decision_rejects_newer_delivery_lease(void **state) {
   pouch_queue_message_participant_key(first_message, participant_key,
                                       sizeof(participant_key));
   snprintf(participant_namespace, sizeof(participant_namespace), "%s",
-           first_message->namespace_name);
+           first_message->ns);
   snprintf(metadata_key, sizeof(metadata_key), "q/txn-stale/msg/%s.meta",
            first_message->message_id);
 
@@ -21427,7 +22821,7 @@ static void test_txn_queue_decision_rejects_newer_delivery_lease(void **state) {
   assert_string_equal(second_message->message_id, first_message->message_id);
   assert_true(second_message->fencing_token > first_fencing_token);
 
-  participant.namespace_name = participant_namespace;
+  participant.ns = participant_namespace;
   participant.key = participant_key;
   participant.backend_hash = NULL;
   decision_req.txn_id = test_xid_for_label("txn-first");
@@ -21491,7 +22885,7 @@ static void test_txn_update_preserves_delete_marker_content_type(void **state) {
   cleanup_root(root);
 
   open_pouch_client(root, &client, &error);
-  update_req.lease.namespace_name = "default";
+  update_req.lease.ns = "default";
   update_req.lease.key = "state/content-type";
   update_req.lease.txn_id =
       test_xid_for_label("txn-delete-marker-content-type");
@@ -21506,7 +22900,7 @@ static void test_txn_update_preserves_delete_marker_content_type(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
 
-  participant.namespace_name = "default";
+  participant.ns = "default";
   participant.key = "state/content-type";
   decision_req.txn_id = update_req.lease.txn_id;
   decision_req.participants = &participant;
@@ -21610,7 +23004,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   cleanup_root(root);
 
   open_pouch_client(root, &client, &error);
-  update_req.lease.namespace_name = "docs/txn-index";
+  update_req.lease.ns = "docs/txn-index";
   update_req.lease.key = "doc/txn";
   update_req.lease.txn_id = test_xid_for_label("txn-state-index");
   pouch_acquire_test_lease(client, "docs/txn-index", "doc/txn",
@@ -21629,7 +23023,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
 
   mutations[0] = "/counter++";
   mutations[1] = "/status=\"mutated\"";
-  mutate_op.lease.namespace_name = "docs/txn-index";
+  mutate_op.lease.ns = "docs/txn-index";
   mutate_op.lease.key = "doc/txn";
   mutate_op.lease.txn_id = test_xid_for_label("txn-state-index");
   pouch_copy_lease_ref(&mutate_op.lease, state_lease);
@@ -21642,7 +23036,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   lc_update_res_cleanup(&update_res);
   lc_mutate_res_cleanup(&mutate_res);
 
-  enqueue_req.namespace_name = "docs/txn-index";
+  enqueue_req.ns = "docs/txn-index";
   enqueue_req.queue = "txn-mixed";
   enqueue_req.visibility_timeout_seconds = 120L;
   rc = lc_source_from_memory("mixed-job", strlen("mixed-job"), &source, &error);
@@ -21653,7 +23047,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_enqueue_res_cleanup(&enqueue_res);
 
-  dequeue_req.namespace_name = "docs/txn-index";
+  dequeue_req.ns = "docs/txn-index";
   dequeue_req.queue = "txn-mixed";
   dequeue_req.owner = "worker-mixed";
   dequeue_req.txn_id = test_xid_for_label("txn-state-index");
@@ -21662,7 +23056,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_non_null(message);
   assert_string_equal(message->txn_id, test_xid_for_label("txn-state-index"));
-  ack_op.message.namespace_name = message->namespace_name;
+  ack_op.message.ns = message->ns;
   ack_op.message.queue = message->queue;
   ack_op.message.message_id = message->message_id;
   ack_op.message.lease_id = message->lease_id;
@@ -21677,7 +23071,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = "docs/txn-index";
+  query_req.ns = "docs/txn-index";
   query_req.selector_json = selector;
   query_req.engine = "index";
   query_req.refresh = "wait_for";
@@ -21687,7 +23081,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   assert_int_equal(before_commit.count, 0);
   lc_query_res_cleanup(&query_res);
 
-  stats_req.namespace_name = "docs/txn-index";
+  stats_req.ns = "docs/txn-index";
   stats_req.queue = "txn-mixed";
   rc = client->queue_stats(client, &stats_req, &stats_res, &error);
   assert_int_equal(rc, LC_OK);
@@ -21696,10 +23090,10 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
 
   pouch_queue_message_participant_key(message, queue_participant_key,
                                       sizeof(queue_participant_key));
-  participants[0].namespace_name = "docs/txn-index";
+  participants[0].ns = "docs/txn-index";
   participants[0].key = "doc/txn";
   participants[0].backend_hash = NULL;
-  participants[1].namespace_name = message->namespace_name;
+  participants[1].ns = message->ns;
   participants[1].key = queue_participant_key;
   participants[1].backend_hash = NULL;
   decision_req.txn_id = test_xid_for_label("txn-state-index");
@@ -21746,7 +23140,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   open_pouch_client(root, &client, &error);
 
   lc_update_req_init(&update_req);
-  update_req.lease.namespace_name = "docs/txn-index";
+  update_req.lease.ns = "docs/txn-index";
   update_req.lease.key = "doc/rollback";
   update_req.lease.txn_id = test_xid_for_label("txn-state-rollback");
   pouch_acquire_test_lease(client, "docs/txn-index", "doc/rollback",
@@ -21763,7 +23157,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_update_res_cleanup(&update_res);
 
-  participants[0].namespace_name = "docs/txn-index";
+  participants[0].ns = "docs/txn-index";
   participants[0].key = "doc/rollback";
   participants[0].backend_hash = NULL;
   decision_req.txn_id = test_xid_for_label("txn-state-rollback");
@@ -21855,7 +23249,7 @@ static void test_txn_recovery_applies_queue_side_effects(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_non_null(message);
 
-  ack_op.message.namespace_name = message->namespace_name;
+  ack_op.message.ns = message->ns;
   ack_op.message.queue = message->queue;
   ack_op.message.message_id = message->message_id;
   ack_op.message.lease_id = message->lease_id;
@@ -21869,8 +23263,8 @@ static void test_txn_recovery_applies_queue_side_effects(void **state) {
   pouch_queue_message_participant_key(message, participant_key,
                                       sizeof(participant_key));
   snprintf(participant_namespace, sizeof(participant_namespace), "%s",
-           message->namespace_name);
-  participant.namespace_name = participant_namespace;
+           message->ns);
+  participant.ns = participant_namespace;
   participant.key = participant_key;
   participant.backend_hash = NULL;
   message->close(message);
@@ -21940,7 +23334,7 @@ test_client_queue_mutations_touch_notification_marker(void **state) {
   assert_true(snprintf(endpoint, sizeof(endpoint),
                        "pouch://%s?queue_watch=true", root) > 0);
   open_pouch_client_endpoint(endpoint, &client, &error);
-  enqueue_req.namespace_name = "team/notify";
+  enqueue_req.ns = "team/notify";
   enqueue_req.queue = "jobs-main";
   enqueue_req.visibility_timeout_seconds = 30L;
   rc = lc_source_from_memory("job", strlen("job"), &source, &error);
@@ -21956,7 +23350,7 @@ test_client_queue_mutations_touch_notification_marker(void **state) {
   enqueue_sequence = read_marker_sequence(marker_path, NULL);
   assert_true(enqueue_sequence > (uint64_t)0U);
 
-  dequeue_req.namespace_name = "team/notify";
+  dequeue_req.ns = "team/notify";
   dequeue_req.queue = "jobs-main";
   dequeue_req.owner = "worker-notify";
   dequeue_req.visibility_timeout_seconds = 45L;
@@ -22676,7 +24070,7 @@ static void test_client_queue_ttl_and_retry_terminal_states(void **state) {
   assert_non_null(message);
   assert_int_equal(message->attempts, 1);
 
-  nack_op.message.namespace_name = message->namespace_name;
+  nack_op.message.ns = message->ns;
   nack_op.message.queue = message->queue;
   nack_op.message.message_id = message->message_id;
   nack_op.message.lease_id = message->lease_id;
@@ -23428,7 +24822,7 @@ static int pouch_watch_commit_txn_ack_with_client(lc_client *client,
                       NULL, NULL, NULL);
   }
   if (rc == LC_OK) {
-    ack_op.message.namespace_name = message->namespace_name;
+    ack_op.message.ns = message->ns;
     ack_op.message.queue = message->queue;
     ack_op.message.message_id = message->message_id;
     ack_op.message.lease_id = message->lease_id;
@@ -23446,7 +24840,7 @@ static int pouch_watch_commit_txn_ack_with_client(lc_client *client,
     decision_req.txn_id = txn_id;
     pouch_queue_message_participant_key(message, participant_key,
                                         sizeof(participant_key));
-    participant.namespace_name = message->namespace_name;
+    participant.ns = message->ns;
     participant.key = participant_key;
     participant.backend_hash = NULL;
     decision_req.participants = &participant;
@@ -24163,7 +25557,7 @@ static void test_lease_bound_state_update_get_and_release(void **state) {
   query_handler.begin = pouch_query_key_begin;
   query_handler.chunk = pouch_query_key_chunk;
   query_handler.end = pouch_query_key_end;
-  query_req.namespace_name = "default";
+  query_req.ns = "default";
   query_req.engine = "index";
   query_req.selector_lql = "range{field=/value,gte=0}";
   query_req.limit = 1L;
@@ -24773,14 +26167,14 @@ static void test_lease_keepalive_and_release_use_local_lifecycle(void **state) {
   assert_sha256_text_etag(lease->state_etag, "{\"value\":9}");
 
   /* Renewal is an extension: a shorter requested TTL cannot shorten a live
-   * lease or leave workflow recovery with a stale later deadline. */
+   * lease or leave outbox recovery with a stale later deadline. */
   before = lease->lease_expires_at_unix;
   keepalive_req.ttl_seconds = 1L;
   rc = lease->keepalive(lease, &keepalive_req, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lease->lease_expires_at_unix, before);
 
-  keepalive_op.lease.namespace_name = lease->namespace_name;
+  keepalive_op.lease.ns = lease->ns;
   keepalive_op.lease.key = lease->key;
   keepalive_op.lease.lease_id = lease->lease_id;
   keepalive_op.lease.txn_id = lease->txn_id;
@@ -24794,7 +26188,7 @@ static void test_lease_keepalive_and_release_use_local_lifecycle(void **state) {
   assert_sha256_text_etag(keepalive_res.state_etag, "{\"value\":9}");
   lc_keepalive_res_cleanup(&keepalive_res);
 
-  release_op.lease.namespace_name = lease->namespace_name;
+  release_op.lease.ns = lease->ns;
   release_op.lease.key = lease->key;
   release_op.lease.lease_id = lease->lease_id;
   release_op.lease.txn_id = lease->txn_id;
@@ -25334,7 +26728,7 @@ test_pouch_migrates_legacy_active_lease_state_version(void **state) {
   test_remove_control_migration_marker(root);
 
   open_pouch_client(root, &client, &error);
-  keepalive_op.lease.namespace_name = "default";
+  keepalive_op.lease.ns = "default";
   keepalive_op.lease.key = key;
   keepalive_op.lease.lease_id = "prior-lease";
   keepalive_op.lease.fencing_token = 7L;
@@ -26004,7 +27398,7 @@ static void test_minted_xid_enrolls_cross_namespace_participant_before_publish(
   /* Shared mode covers the former recursive state-lock deadlock as well as
    * the cross-namespace implicit-XA enrollment boundary. */
   open_pouch_client_shared(root, &client, &error);
-  acquire_first.namespace_name = "implicit-first";
+  acquire_first.ns = "implicit-first";
   acquire_first.key = first_key;
   acquire_first.owner = "implicit-enrollment-owner";
   acquire_first.ttl_seconds = 30L;
@@ -26012,7 +27406,7 @@ static void test_minted_xid_enrolls_cross_namespace_participant_before_publish(
   assert_int_equal(rc, LC_OK);
   assert_non_null(first->txn_id);
 
-  acquire_second.namespace_name = "implicit-second";
+  acquire_second.ns = "implicit-second";
   acquire_second.key = second_key;
   acquire_second.owner = "implicit-enrollment-owner";
   acquire_second.ttl_seconds = 30L;
@@ -26123,7 +27517,7 @@ test_minted_xid_vote_survives_incremental_sorted_enrollment(void **state) {
            (long)getpid());
 
   open_pouch_client_shared(root, &client, &error);
-  acquire_first.namespace_name = "implicit-vote-z";
+  acquire_first.ns = "implicit-vote-z";
   acquire_first.key = first_key;
   acquire_first.owner = "implicit-vote-owner";
   acquire_first.ttl_seconds = 30L;
@@ -26139,7 +27533,7 @@ test_minted_xid_vote_survives_incremental_sorted_enrollment(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
 
-  acquire_second.namespace_name = "implicit-vote-y";
+  acquire_second.ns = "implicit-vote-y";
   acquire_second.key = second_key;
   acquire_second.owner = "implicit-vote-owner";
   acquire_second.ttl_seconds = 30L;
@@ -26164,7 +27558,7 @@ test_minted_xid_vote_survives_incremental_sorted_enrollment(void **state) {
   memset(&read_result, 0, sizeof(read_result));
 
   /* This participant sorts before the already-voted first participant. */
-  acquire_third.namespace_name = "implicit-vote-a";
+  acquire_third.ns = "implicit-vote-a";
   acquire_third.key = third_key;
   acquire_third.owner = "implicit-vote-owner";
   acquire_third.ttl_seconds = 30L;
@@ -26360,6 +27754,165 @@ test_pouch_queue_dequeue_rejects_invalid_xid_without_leasing(void **state) {
   lc_error_cleanup(&error);
 }
 
+typedef struct pouch_lifecycle_test_clock {
+  struct timespec now;
+} pouch_lifecycle_test_clock;
+
+static int pouch_lifecycle_test_gettime(clockid_t clock_id,
+                                        struct timespec *out, void *context) {
+  pouch_lifecycle_test_clock *clock = (pouch_lifecycle_test_clock *)context;
+
+  assert_true(clock_id == CLOCK_REALTIME || clock_id == CLOCK_MONOTONIC);
+  *out = clock->now;
+  return 0;
+}
+
+static int teardown_pouch_lifecycle_test_clock(void **state) {
+  (void)state;
+  lc_pouch_test_queue_clock_gettime = NULL;
+  lc_pouch_test_queue_poll_delay = NULL;
+  lc_pouch_test_queue_time_context = NULL;
+  return 0;
+}
+
+typedef struct pouch_client_close_stream_callback {
+  lc_client *client;
+  size_t offset;
+  unsigned int close_calls;
+} pouch_client_close_stream_callback;
+
+static size_t pouch_client_close_stream_read(void *context, void *buffer,
+                                             size_t count, lc_error *error) {
+  pouch_client_close_stream_callback *callback =
+      (pouch_client_close_stream_callback *)context;
+  static const char body[] = "callback-body";
+  size_t remaining;
+  size_t written;
+
+  (void)error;
+  if (callback->close_calls == 0U) {
+    ++callback->close_calls;
+    lc_client_close(callback->client);
+  }
+  remaining = sizeof(body) - 1U - callback->offset;
+  written = remaining < count ? remaining : count;
+  if (written > 0U) {
+    memcpy(buffer, body + callback->offset, written);
+    callback->offset += written;
+  }
+  return written;
+}
+
+static int pouch_client_close_stream_write(lc_sink *self, const void *bytes,
+                                           size_t length, lc_error *error) {
+  pouch_client_close_stream_callback *callback =
+      (pouch_client_close_stream_callback *)self->impl;
+
+  (void)bytes;
+  (void)length;
+  (void)error;
+  if (callback->close_calls == 0U) {
+    ++callback->close_calls;
+    lc_client_close(callback->client);
+  }
+  return 1;
+}
+
+static void pouch_client_close_stream_sink_close(lc_sink *self) { (void)self; }
+
+static void test_pouch_client_update_pins_source_callback_owner(void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_update_req update;
+  lc_update_res update_res;
+  lc_error error;
+  pouch_client_close_stream_callback callback;
+  char root[512];
+  char lease_id[128];
+  char txn_id[LC_XID_STRING_SIZE];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&callback, 0, sizeof(callback));
+  lc_error_init(&error);
+  make_root("client-update-close-source", root, sizeof(root));
+  cleanup_root(root);
+  open_pouch_client(root, &client, &error);
+  pouch_acquire_test_lease(client, NULL, "state/client-close-source", NULL,
+                           &lease, &error);
+  assert_true(snprintf(lease_id, sizeof(lease_id), "%s", lease->lease_id) > 0);
+  assert_true(snprintf(txn_id, sizeof(txn_id), "%s", lease->txn_id) > 0);
+  lc_update_req_init(&update);
+  update.lease.key = "state/client-close-source";
+  update.lease.lease_id = lease_id;
+  update.lease.txn_id = txn_id;
+  update.lease.fencing_token = lease->fencing_token;
+  lease->close(lease);
+  lease = NULL;
+  callback.client = client;
+  rc = lc_source_from_callbacks(pouch_client_close_stream_read, NULL, NULL,
+                                &callback, &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update, source, &update_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(callback.close_calls, 1U);
+  lc_update_res_cleanup(&update_res);
+  lc_source_close(source);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_client_get_pins_sink_callback_owner(void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink sink;
+  lc_get_res get_res;
+  lc_error error;
+  pouch_client_close_stream_callback callback;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  memset(&sink, 0, sizeof(sink));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&callback, 0, sizeof(callback));
+  lc_error_init(&error);
+  make_root("client-get-close-sink", root, sizeof(root));
+  cleanup_root(root);
+  open_pouch_client(root, &client, &error);
+  pouch_acquire_test_lease(client, NULL, "state/client-close-sink", NULL,
+                           &lease, &error);
+  rc = lc_source_from_memory("stored", strlen("stored"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->update(lease, source, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+  callback.client = client;
+  sink.impl = &callback;
+  sink.write = pouch_client_close_stream_write;
+  sink.close = pouch_client_close_stream_sink_close;
+  rc = client->get(client, "state/client-close-sink", NULL, &sink, &get_res,
+                   &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(callback.close_calls, 1U);
+  lc_get_res_cleanup(&get_res);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void
 test_minted_xid_reconstructed_release_validates_lifecycle(void **state) {
   lc_client *client;
@@ -26381,6 +27934,7 @@ test_minted_xid_reconstructed_release_validates_lifecycle(void **state) {
   char stale_lease_id[128];
   char stale_txn_id[LC_XID_STRING_SIZE];
   long stale_fencing_token;
+  pouch_lifecycle_test_clock clock;
   int rc;
 
   (void)state;
@@ -26396,6 +27950,7 @@ test_minted_xid_reconstructed_release_validates_lifecycle(void **state) {
   stale_lease_id[0] = '\0';
   stale_txn_id[0] = '\0';
   stale_fencing_token = 0L;
+  memset(&clock, 0, sizeof(clock));
   lc_release_op_init(&release_op);
   memset(&release_res, 0, sizeof(release_res));
   memset(&get_res, 0, sizeof(get_res));
@@ -26448,6 +28003,11 @@ test_minted_xid_reconstructed_release_validates_lifecycle(void **state) {
   {
     lc_acquire_req acquire_req;
 
+    /* Advance a controlled wall clock instead of racing a one-second TTL
+     * against this process's scheduling. */
+    clock.now.tv_sec = 1000000;
+    lc_pouch_test_queue_time_context = &clock;
+    lc_pouch_test_queue_clock_gettime = pouch_lifecycle_test_gettime;
     lc_acquire_req_init(&acquire_req);
     acquire_req.key = stale_key;
     acquire_req.owner = "stale-owner";
@@ -26471,7 +28031,7 @@ test_minted_xid_reconstructed_release_validates_lifecycle(void **state) {
   release_op.lease.lease_id = stale_lease_id;
   release_op.lease.txn_id = stale_txn_id;
   release_op.lease.fencing_token = stale_fencing_token;
-  sleep(2U);
+  clock.now.tv_sec += 2;
 
   /* The expired holder itself must discard its staged payload rather than
    * publishing it. A persisted reference is then idempotently releasable. */
@@ -27122,7 +28682,7 @@ static void test_transaction_bound_lease_requires_transaction_id(void **state) {
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_OK);
 
-  update_req.lease.namespace_name = lease->namespace_name;
+  update_req.lease.ns = lease->ns;
   update_req.lease.key = lease->key;
   update_req.lease.lease_id = lease->lease_id;
   update_req.lease.fencing_token = lease->fencing_token;
@@ -27162,6 +28722,7 @@ test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
   static const char selector[] =
       "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
   lc_client *client;
+  lc_pouch *pouch;
   lc_lease *lease;
   lc_source *source;
   lc_acquire_req acquire_req;
@@ -27178,10 +28739,12 @@ test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
   lc_error error;
   char root[512];
   char key[96];
+  unsigned int queue_turn;
   int rc;
 
   (void)state;
   client = NULL;
+  pouch = NULL;
   lease = NULL;
   source = NULL;
   lc_acquire_req_init(&acquire_req);
@@ -27201,7 +28764,8 @@ test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
   snprintf(key, sizeof(key), "doc/lease-txn-visible/%ld", (long)getpid());
 
   open_pouch_client(root, &client, &error);
-  acquire_req.namespace_name = "docs/lease-txn-visible";
+  pouch = ((lc_client_handle *)client)->pouch;
+  acquire_req.ns = "docs/lease-txn-visible";
   acquire_req.key = key;
   acquire_req.owner = "txn-owner";
   acquire_req.ttl_seconds = 30L;
@@ -27220,7 +28784,16 @@ test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
 
-  participant.namespace_name = acquire_req.namespace_name;
+  /* Clear prior acquire/stage maintenance work. The public transaction
+   * decision itself must then schedule terminal reclamation for this namespace.
+   */
+  for (queue_turn = 0U; queue_turn < LC_POUCH_COMPACTION_QUEUE_MAX_NAMESPACES;
+       ++queue_turn) {
+    lc_pouch_test_compaction_run_pass(pouch);
+  }
+  assert_int_equal(lc_pouch_test_compaction_queue_count(pouch), 0U);
+
+  participant.ns = acquire_req.ns;
   participant.key = key;
   participant.backend_hash = NULL;
   decision_req.txn_id = acquire_req.txn_id;
@@ -27228,9 +28801,10 @@ test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
   decision_req.participant_count = 1U;
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
+  assert_true(lc_pouch_test_compaction_queue_count(pouch) > 0U);
   lc_txn_decision_res_cleanup(&decision_res);
 
-  describe_req.namespace_name = acquire_req.namespace_name;
+  describe_req.ns = acquire_req.ns;
   describe_req.key = key;
   rc = client->describe(client, &describe_req, &describe_res, &error);
   assert_int_equal(rc, LC_OK);
@@ -27242,7 +28816,7 @@ test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = acquire_req.namespace_name;
+  query_req.ns = acquire_req.ns;
   query_req.selector_json = selector;
   query_req.engine = "scan";
   rc = client->query_keys(client, &query_req, &handler, &scan_capture,
@@ -27321,7 +28895,7 @@ test_transaction_bound_lease_rollback_clears_matching_lease(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
 
-  participant.namespace_name = "default";
+  participant.ns = "default";
   participant.key = key;
   participant.backend_hash = NULL;
   decision_req.txn_id = acquire_req.txn_id;
@@ -27441,7 +29015,7 @@ static void test_transaction_bound_remove_stages_until_decision(void **state) {
   sink->close(sink);
   sink = NULL;
 
-  participant.namespace_name = "default";
+  participant.ns = "default";
   participant.key = key;
   decision_req.txn_id = acquire_req.txn_id;
   decision_req.participants = &participant;
@@ -27543,7 +29117,7 @@ static void test_transaction_bound_remove_then_mutate_recreates_logical_value(
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_OK);
 
-  remove_op.lease.namespace_name = lease->namespace_name;
+  remove_op.lease.ns = lease->ns;
   remove_op.lease.key = lease->key;
   remove_op.lease.lease_id = lease->lease_id;
   remove_op.lease.txn_id = lease->txn_id;
@@ -27569,7 +29143,7 @@ static void test_transaction_bound_remove_then_mutate_recreates_logical_value(
   rc = lease->mutate(lease, &mutate_req, &error);
   assert_int_equal(rc, LC_OK);
 
-  participant.namespace_name = "default";
+  participant.ns = "default";
   participant.key = key;
   decision_req.txn_id = acquire_req.txn_id;
   decision_req.participants = &participant;
@@ -27668,7 +29242,7 @@ test_transaction_bound_remove_renew_then_update_recreates_logical_value(
   source = NULL;
   assert_int_equal(rc, LC_OK);
 
-  participant.namespace_name = "default";
+  participant.ns = "default";
   participant.key = key;
   decision_req.txn_id = acquire_req.txn_id;
   decision_req.participants = &participant;
@@ -27756,7 +29330,7 @@ static void test_txn_decision_skips_newer_state_lease(void **state) {
   rc = client->acquire(client, &acquire_req, &new_lease, &error);
   assert_int_equal(rc, LC_OK);
 
-  participant.namespace_name = "default";
+  participant.ns = "default";
   participant.key = key;
   participant.backend_hash = NULL;
   decision_req.txn_id = test_xid_for_label("txn-old");
@@ -28047,7 +29621,7 @@ static void test_client_metadata_enforces_version_precondition(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
 
-  metadata_op.lease.namespace_name = lease->namespace_name;
+  metadata_op.lease.ns = lease->ns;
   metadata_op.lease.key = lease->key;
   metadata_op.lease.lease_id = lease->lease_id;
   metadata_op.lease.txn_id = lease->txn_id;
@@ -28182,7 +29756,7 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = "docs/query";
+  query_req.ns = "docs/query";
   query_req.engine = "scan";
   query_req.selector_json = selector;
   query_req.limit = 1L;
@@ -28200,7 +29774,7 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   snprintf(cursor, sizeof(cursor), "%s", query_res.cursor);
   query_req.cursor = cursor;
   lc_query_res_cleanup(&query_res);
-  cursor_update_req.lease.namespace_name = "docs/query";
+  cursor_update_req.lease.ns = "docs/query";
   cursor_update_req.lease.key = "doc/0";
   pouch_acquire_test_lease(client, "docs/query", "doc/0", NULL, &lease, &error);
   pouch_copy_lease_ref(&cursor_update_req.lease, lease);
@@ -28236,7 +29810,7 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   lc_query_res_cleanup(&query_res);
 
   lc_query_req_init(&query_req);
-  query_req.namespace_name = "docs/query";
+  query_req.ns = "docs/query";
   query_req.engine = "scan";
   query_req.selector_lql = "eq{field=/category,value=planning}";
   query_req.limit = 10L;
@@ -28252,7 +29826,7 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   lc_query_res_cleanup(&query_res);
 
   lc_query_req_init(&query_req);
-  query_req.namespace_name = "docs/query";
+  query_req.ns = "docs/query";
   query_req.engine = "scan";
   query_req.selector_json = selector;
   query_req.selector_lql = "eq{field=/category,value=planning}";
@@ -28300,7 +29874,7 @@ test_query_keys_callback_can_reenter_pouch_public_api(void **state) {
   cleanup_root(root);
   open_pouch_client(root, &client, &error);
 
-  update_req.lease.namespace_name = "docs/query-reentrant";
+  update_req.lease.ns = "docs/query-reentrant";
   update_req.lease.key = "doc/a";
   pouch_acquire_test_lease(client, "docs/query-reentrant", "doc/a", NULL,
                            &lease, &error);
@@ -28323,7 +29897,7 @@ test_query_keys_callback_can_reenter_pouch_public_api(void **state) {
   handler.end = pouch_reentrant_query_key_end;
   reentrant.client = client;
   reentrant.get_key = "doc/a";
-  query_req.namespace_name = "docs/query-reentrant";
+  query_req.ns = "docs/query-reentrant";
   query_req.engine = "scan";
   query_req.selector_json = selector;
   rc = client->query_keys(client, &query_req, &handler, &reentrant, &query_res,
@@ -28508,7 +30082,7 @@ static void test_query_keys_index_summary_uses_artifact_rows(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = "docs/query-index";
+  query_req.ns = "docs/query-index";
   query_req.refresh = "wait_for";
   query_req.limit = 1L;
   rc = client->query_keys(client, &query_req, &handler, &first_page, &query_res,
@@ -28608,7 +30182,7 @@ static void test_query_keys_index_summary_uses_artifact_rows(void **state) {
 }
 
 static void test_query_index_sync_flush_uses_durable_state(void **state) {
-  static const char namespace_name[] = "docs/query-index-pending";
+  static const char ns[] = "docs/query-index-pending";
   static const char live_json[] =
       "{\"value\":42,"
       "\"details\":{\"status\":\"active\",\"owner\":{\"team\":\"platform\"}},"
@@ -28679,7 +30253,7 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
 
   open_pouch_client_endpoint(endpoint, &client, &error);
   lc_update_req_init(&update_req);
-  update_req.lease.namespace_name = namespace_name;
+  update_req.lease.ns = ns;
   update_req.lease.key = "doc/warmup";
   rc = lc_source_from_memory("{\"details\":{\"status\":\"inactive\"}}",
                              strlen("{\"details\":{\"status\":\"inactive\"}}"),
@@ -28693,7 +30267,7 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
   memset(&live_update, 0, sizeof(live_update));
 
   lc_index_flush_req_init(&flush_req);
-  flush_req.namespace_name = namespace_name;
+  flush_req.ns = ns;
   flush_req.mode = "sync";
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
   assert_int_equal(rc, LC_OK);
@@ -28701,7 +30275,7 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
   memset(&flush_res, 0, sizeof(flush_res));
 
   lc_update_req_init(&update_req);
-  update_req.lease.namespace_name = namespace_name;
+  update_req.lease.ns = ns;
   update_req.lease.key = "doc/live";
   rc = lc_source_from_memory(live_json, strlen(live_json), &source, &error);
   assert_int_equal(rc, LC_OK);
@@ -28711,7 +30285,7 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
   source = NULL;
 
   lc_update_req_init(&update_req);
-  update_req.lease.namespace_name = namespace_name;
+  update_req.lease.ns = ns;
   update_req.lease.key = "doc/live";
   rc = lc_source_from_memory(live_updated_json, strlen(live_updated_json),
                              &source, &error);
@@ -28722,7 +30296,7 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
   source = NULL;
 
   lc_update_req_init(&update_req);
-  update_req.lease.namespace_name = namespace_name;
+  update_req.lease.ns = ns;
   update_req.lease.key = "doc/removed";
   rc = lc_source_from_memory(removed_json, strlen(removed_json), &source,
                              &error);
@@ -28733,7 +30307,7 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
   source = NULL;
 
   lc_update_req_init(&update_req);
-  update_req.lease.namespace_name = namespace_name;
+  update_req.lease.ns = ns;
   update_req.lease.key = "doc/z";
   rc = lc_source_from_memory(pending_removed_json, strlen(pending_removed_json),
                              &source, &error);
@@ -28744,7 +30318,7 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
   source = NULL;
 
   lc_update_req_init(&update_req);
-  update_req.lease.namespace_name = namespace_name;
+  update_req.lease.ns = ns;
   update_req.lease.key = "doc/a";
   rc = lc_source_from_memory(pending_json, strlen(pending_json), &source,
                              &error);
@@ -28755,7 +30329,7 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
   source = NULL;
 
   lc_remove_op_init(&remove_op);
-  remove_op.lease.namespace_name = namespace_name;
+  remove_op.lease.ns = ns;
   remove_op.lease.key = "doc/removed";
   remove_op.if_version = removed_update.new_version;
   remove_op.has_if_version = 1;
@@ -28765,7 +30339,7 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
   lc_remove_res_cleanup(&remove_res);
   memset(&remove_res, 0, sizeof(remove_res));
   lc_remove_op_init(&remove_op);
-  remove_op.lease.namespace_name = namespace_name;
+  remove_op.lease.ns = ns;
   remove_op.lease.key = "doc/z";
   remove_op.if_version = pending_removed_update.new_version;
   remove_op.has_if_version = 1;
@@ -28773,7 +30347,7 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
   assert_int_equal(remove_res.removed, 1);
 
   lc_index_flush_req_init(&flush_req);
-  flush_req.namespace_name = namespace_name;
+  flush_req.ns = ns;
   flush_req.mode = "sync";
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
   assert_int_equal(rc, LC_OK);
@@ -28784,7 +30358,7 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
   lc_query_req_init(&query_req);
-  query_req.namespace_name = namespace_name;
+  query_req.ns = ns;
   query_req.engine = "index";
   query_req.selector_json =
       "{\"eq\":{\"field\":\"/details/status\",\"value\":\"active\"}}";
@@ -28803,7 +30377,7 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
    * merge that tail with the earlier durable warmup projection. */
   memset(&query_res, 0, sizeof(query_res));
   lc_query_req_init(&query_req);
-  query_req.namespace_name = namespace_name;
+  query_req.ns = ns;
   query_req.engine = "index";
   query_req.selector_json =
       "{\"eq\":{\"field\":\"/details/status\",\"value\":\"inactive\"}}";
@@ -28816,7 +30390,7 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
 
   memset(&query_res, 0, sizeof(query_res));
   lc_query_req_init(&query_req);
-  query_req.namespace_name = namespace_name;
+  query_req.ns = ns;
   query_req.engine = "index";
   query_req.selector_json =
       "{\"eq\":{\"field\":\"/details/status\",\"value\":\"pending\"}}";
@@ -28830,7 +30404,7 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
 
   memset(&query_res, 0, sizeof(query_res));
   lc_query_req_init(&query_req);
-  query_req.namespace_name = namespace_name;
+  query_req.ns = ns;
   query_req.engine = "index";
   query_req.selector_json = "{\"range\":{\"field\":\"/value\",\"gte\":0}}";
   rc = client->query_keys(client, &query_req, &handler, &range_page, &query_res,
@@ -28843,7 +30417,7 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
 
   memset(&query_res, 0, sizeof(query_res));
   lc_query_req_init(&query_req);
-  query_req.namespace_name = namespace_name;
+  query_req.ns = ns;
   query_req.engine = "index";
   query_req.selector_json =
       "{\"icontains\":{\"field\":\"/...\",\"value\":\"ENCRYPTION\"}}";
@@ -28894,7 +30468,7 @@ test_query_keys_index_summary_preserves_callback_failure(void **state) {
   cleanup_root(root);
   open_pouch_client(root, &client, &error);
 
-  update_req.lease.namespace_name = "docs/query-index-callback";
+  update_req.lease.ns = "docs/query-index-callback";
   update_req.lease.key = "doc/a";
   rc = lc_source_from_memory("{\"v\":1}", strlen("{\"v\":1}"), &source, &error);
   assert_int_equal(rc, LC_OK);
@@ -28904,7 +30478,7 @@ test_query_keys_index_summary_preserves_callback_failure(void **state) {
   source = NULL;
   lc_update_res_cleanup(&update_res);
 
-  query_req.namespace_name = "docs/query-index-callback";
+  query_req.ns = "docs/query-index-callback";
   query_req.engine = "index";
   query_req.refresh = "wait_for";
   query_req.limit = 10L;
@@ -28974,7 +30548,7 @@ test_query_keys_index_repairs_unknown_generation_posting_term(void **state) {
   cleanup_root(root);
   open_pouch_client(root, &client, &error);
 
-  update_req.lease.namespace_name = "docs/query-index-posting-term";
+  update_req.lease.ns = "docs/query-index-posting-term";
   update_req.lease.key = "doc/a";
   rc = lc_source_from_memory("{\"v\":\"one\"}", strlen("{\"v\":\"one\"}"),
                              &source, &error);
@@ -28988,7 +30562,7 @@ test_query_keys_index_repairs_unknown_generation_posting_term(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = "docs/query-index-posting-term";
+  query_req.ns = "docs/query-index-posting-term";
   query_req.engine = "index";
   query_req.refresh = "wait_for";
   query_req.selector_json = selector;
@@ -29197,7 +30771,7 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = "docs/query-index-in";
+  query_req.ns = "docs/query-index-in";
   query_req.selector_json = selector;
   query_req.engine = "index";
   query_req.refresh = "wait_for";
@@ -29462,7 +31036,7 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
 
 static void
 test_query_keys_index_all_text_preserves_complete_matches(void **state) {
-  static const char namespace_name[] = "docs/query-index-all-text-direct";
+  static const char ns[] = "docs/query-index-all-text-direct";
   static const char selector[] =
       "{\"icontains\":{\"field\":\"/...\",\"value\":\"audit\"}}";
   static const char large_prefix[] = "{\"payload\":\"";
@@ -29494,10 +31068,10 @@ test_query_keys_index_all_text_preserves_complete_matches(void **state) {
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
 
-  pouch_write_json_state(pouch, namespace_name, "doc/duplicate",
+  pouch_write_json_state(pouch, ns, "doc/duplicate",
                          "{\"first\":\"AUDIT\",\"second\":\"audit log\"}", NULL,
                          &error);
-  pouch_write_json_state(pouch, namespace_name, "doc/other",
+  pouch_write_json_state(pouch, ns, "doc/other",
                          "{\"first\":\"ordinary\",\"second\":\"record\"}", NULL,
                          &error);
   long_json_length =
@@ -29508,8 +31082,7 @@ test_query_keys_index_all_text_preserves_complete_matches(void **state) {
   memcpy(long_json + sizeof(large_prefix) - 1U + 300U, large_suffix,
          sizeof(large_suffix) - 1U);
   long_json[long_json_length] = '\0';
-  pouch_write_json_state(pouch, namespace_name, "doc/large", long_json, NULL,
-                         &error);
+  pouch_write_json_state(pouch, ns, "doc/large", long_json, NULL, &error);
   lc_pouch_close(pouch);
   pouch = NULL;
 
@@ -29517,7 +31090,7 @@ test_query_keys_index_all_text_preserves_complete_matches(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = namespace_name;
+  query_req.ns = ns;
   query_req.selector_json = selector;
   query_req.engine = "index";
   query_req.refresh = "wait_for";
@@ -29551,8 +31124,7 @@ test_query_keys_index_all_text_preserves_complete_matches(void **state) {
 
 static void
 test_query_keys_index_all_text_compacts_candidate_matches(void **state) {
-  static const char namespace_name[] =
-      "docs/query-index-all-text-direct-candidates";
+  static const char ns[] = "docs/query-index-all-text-direct-candidates";
   static const char selector_lql[] = "icontains{field=/...,value=audit}";
   static const char large_prefix[] = "{\"payload\":\"audit ";
   static const char large_suffix[] = "\"}";
@@ -29591,12 +31163,9 @@ test_query_keys_index_all_text_compacts_candidate_matches(void **state) {
   memcpy(document + sizeof(large_prefix) - 1U + 300U, large_suffix,
          sizeof(large_suffix) - 1U);
   document[document_length] = '\0';
-  pouch_write_json_state(pouch, namespace_name, "doc/one", document, NULL,
-                         &error);
-  pouch_write_json_state(pouch, namespace_name, "doc/two", document, NULL,
-                         &error);
-  pouch_write_json_state(pouch, namespace_name, "doc/three", document, NULL,
-                         &error);
+  pouch_write_json_state(pouch, ns, "doc/one", document, NULL, &error);
+  pouch_write_json_state(pouch, ns, "doc/two", document, NULL, &error);
+  pouch_write_json_state(pouch, ns, "doc/three", document, NULL, &error);
   lc_pouch_close(pouch);
   pouch = NULL;
 
@@ -29604,7 +31173,7 @@ test_query_keys_index_all_text_compacts_candidate_matches(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = namespace_name;
+  query_req.ns = ns;
   query_req.selector_lql = selector_lql;
   query_req.engine = "index";
   query_req.refresh = "wait_for";
@@ -29627,7 +31196,7 @@ test_query_keys_index_all_text_compacts_candidate_matches(void **state) {
  * verifier; both cases must survive a fresh client opening the same Pouch. */
 static void test_query_keys_index_all_text_token_postings_preserve_substrings(
     void **state) {
-  static const char namespace_name[] = "docs/query-index-all-text-tokens";
+  static const char ns[] = "docs/query-index-all-text-tokens";
   static const char audit_selector[] =
       "{\"icontains\":{\"field\":\"/...\",\"value\":\"audit\"}}";
   static const char record_selector[] =
@@ -29656,11 +31225,11 @@ static void test_query_keys_index_all_text_token_postings_preserve_substrings(
   cleanup_root(root);
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  pouch_write_json_state(pouch, namespace_name, "doc/token",
+  pouch_write_json_state(pouch, ns, "doc/token",
                          "{\"message\":\"AuDiT record\"}", NULL, &error);
-  pouch_write_json_state(pouch, namespace_name, "doc/substring",
+  pouch_write_json_state(pouch, ns, "doc/substring",
                          "{\"message\":\"preauditpost\"}", NULL, &error);
-  pouch_write_json_state(pouch, namespace_name, "doc/other",
+  pouch_write_json_state(pouch, ns, "doc/other",
                          "{\"message\":\"ordinary note\"}", NULL, &error);
   lc_pouch_close(pouch);
   pouch = NULL;
@@ -29669,7 +31238,7 @@ static void test_query_keys_index_all_text_token_postings_preserve_substrings(
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = namespace_name;
+  query_req.ns = ns;
   query_req.selector_json = audit_selector;
   query_req.engine = "index";
   query_req.refresh = "wait_for";
@@ -29873,7 +31442,7 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = "docs/query-index-scalar-types";
+  query_req.ns = "docs/query-index-scalar-types";
   query_req.selector_json = "{\"eq\":{\"field\":\"/v\",\"value\":1}}";
   query_req.engine = "scan";
   rc = client->query_keys(client, &query_req, &handler, &scan_number_page,
@@ -30085,7 +31654,7 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   newest_query_index_path(namespace_path, "query.index.lcpdtg", doc_table_path,
                           sizeof(doc_table_path));
   write_text_file(doc_table_path, "broken\n");
-  flush_req.namespace_name = "docs/query-index-scalar-types";
+  flush_req.ns = "docs/query-index-scalar-types";
   flush_req.mode = "sync";
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
   assert_int_equal(rc, LC_OK);
@@ -30206,7 +31775,7 @@ static void test_query_keys_index_root_or_uses_scalar_union(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = "docs/query-index-or";
+  query_req.ns = "docs/query-index-or";
   query_req.selector_lql = "eq{field=/bucket,value=needle}";
   query_req.engine = "index";
   query_req.refresh = "wait_for";
@@ -30387,7 +31956,7 @@ static void test_query_keys_index_text_stops_after_target_field(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = "docs/query-index-text-stop";
+  query_req.ns = "docs/query-index-text-stop";
   query_req.selector_json =
       "{\"contains\":{\"field\":\"/a\",\"value\":\"timeout\"}}";
   query_req.engine = "index";
@@ -30494,7 +32063,7 @@ test_query_keys_index_long_strings_use_validated_candidates(void **state) {
   assert_non_null(json);
   snprintf(json, json_len, "{\"long\":\"%s\"}", value_a);
   lc_update_req_init(&update_req);
-  update_req.lease.namespace_name = "docs/query-index-long-strings";
+  update_req.lease.ns = "docs/query-index-long-strings";
   update_req.lease.key = "doc/a";
   rc = lc_source_from_memory(json, strlen(json), &source, &error);
   assert_int_equal(rc, LC_OK);
@@ -30511,7 +32080,7 @@ test_query_keys_index_long_strings_use_validated_candidates(void **state) {
   assert_non_null(json);
   snprintf(json, json_len, "{\"long\":\"%s\"}", value_b);
   lc_update_req_init(&update_req);
-  update_req.lease.namespace_name = "docs/query-index-long-strings";
+  update_req.lease.ns = "docs/query-index-long-strings";
   update_req.lease.key = "doc/b";
   rc = lc_source_from_memory(json, strlen(json), &source, &error);
   assert_int_equal(rc, LC_OK);
@@ -30526,7 +32095,7 @@ test_query_keys_index_long_strings_use_validated_candidates(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = "docs/query-index-long-strings";
+  query_req.ns = "docs/query-index-long-strings";
   query_req.engine = "index";
   query_req.refresh = "wait_for";
   query_req.limit = 10L;
@@ -30652,7 +32221,7 @@ test_query_keys_index_large_strings_use_fallback_candidates(void **state) {
   assert_non_null(json);
   snprintf(json, json_length, "{\"payload\":\"%s\"}", match_value);
   lc_update_req_init(&update_req);
-  update_req.lease.namespace_name = "docs/query-index-large-strings";
+  update_req.lease.ns = "docs/query-index-large-strings";
   update_req.lease.key = "doc/match";
   rc = lc_source_from_memory(json, strlen(json), &source, &error);
   assert_int_equal(rc, LC_OK);
@@ -30664,7 +32233,7 @@ test_query_keys_index_large_strings_use_fallback_candidates(void **state) {
 
   snprintf(json, json_length, "{\"payload\":\"%s\"}", other_value);
   lc_update_req_init(&update_req);
-  update_req.lease.namespace_name = "docs/query-index-large-strings";
+  update_req.lease.ns = "docs/query-index-large-strings";
   update_req.lease.key = "doc/other";
   rc = lc_source_from_memory(json, strlen(json), &source, &error);
   assert_int_equal(rc, LC_OK);
@@ -30677,7 +32246,7 @@ test_query_keys_index_large_strings_use_fallback_candidates(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = "docs/query-index-large-strings";
+  query_req.ns = "docs/query-index-large-strings";
   query_req.engine = "index";
   query_req.refresh = "wait_for";
   query_req.limit = 10L;
@@ -30897,7 +32466,7 @@ test_query_keys_index_date_lql_filters_temporal_candidates(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = "docs/query-index-date";
+  query_req.ns = "docs/query-index-date";
   query_req.selector_lql = "date{field=/created_at,after=2025-01-01}";
   query_req.engine = "index";
   query_req.refresh = "wait_for";
@@ -31014,7 +32583,7 @@ test_query_keys_index_recursive_exists_uses_container_presence(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = "docs/query-index-recursive";
+  query_req.ns = "docs/query-index-recursive";
   query_req.selector_json = "{\"exists\":\"/details/**\"}";
   query_req.engine = "index";
   query_req.refresh = "wait_for";
@@ -31063,7 +32632,7 @@ test_query_keys_index_rejects_wildcard_exists_selectors(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = "docs/query-index-wildcard";
+  query_req.ns = "docs/query-index-wildcard";
   query_req.engine = "index";
   query_req.refresh = "wait_for";
 
@@ -31148,6 +32717,137 @@ test_query_documents_scan_matches_escaped_pointer_paths(void **state) {
   }
 
   lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_query_scan_body_cache_warms_only_full_consumption(void **state) {
+  static const char ns[] = "docs/query-scan-discard-no-warm";
+  static const char prefix[] = "{\"status\":\"matched\",\"payload\":\"";
+  static const char suffix[] = "\"}";
+  pouch_fail_allocator_state allocator_state;
+  lc_allocator allocator;
+  lc_client_config config;
+  lc_client *client;
+  lc_error error;
+  lc_pouch *pouch;
+  lc_pouch_state_write_result write_result;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_sink *sink;
+  lc_source *source;
+  const char *endpoints[1];
+  char endpoint[640];
+  char root[512];
+  char *body;
+  size_t body_length;
+  int rc;
+
+  (void)state;
+  memset(&allocator_state, 0, sizeof(allocator_state));
+  pouch_fail_allocator_init(&allocator, &allocator_state);
+  client = NULL;
+  pouch = NULL;
+  sink = NULL;
+  source = NULL;
+  body = NULL;
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&query_res, 0, sizeof(query_res));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  make_root("query-scan-discard-no-warm", root, sizeof(root));
+  cleanup_root(root);
+
+  body_length = (sizeof(prefix) - 1U) + 192U * 1024U + (sizeof(suffix) - 1U);
+  body = (char *)malloc(body_length + 1U);
+  assert_non_null(body);
+  memcpy(body, prefix, sizeof(prefix) - 1U);
+  memset(body + sizeof(prefix) - 1U, 'x', 192U * 1024U);
+  memcpy(body + sizeof(prefix) - 1U + 192U * 1024U, suffix,
+         sizeof(suffix) - 1U);
+  body[body_length] = '\0';
+
+  rc = lc_pouch_open(root, &allocator, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory(body, body_length, &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, ns, "doc/large", source, NULL, &write_result,
+                            &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(&allocator, &write_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.allocator = allocator;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  /* A scan with a discard sink decides at /status and must not allocate a
+   * full transformed-body cache entry for the 192 KiB payload it never reads.
+   */
+  allocator_state.large_allocation_minimum = 128U * 1024U;
+  allocator_state.large_allocations = 0U;
+  query_req.ns = ns;
+  query_req.engine = "scan";
+  query_req.selector_json =
+      "{\"eq\":{\"field\":\"/status\",\"value\":\"matched\"}}";
+  query_req.limit = 1L;
+  rc = lc_sink_to_discard(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_matches\":1"));
+  assert_int_equal(allocator_state.large_allocations, 0U);
+
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_query_res_cleanup(&query_res);
+  memset(&query_res, 0, sizeof(query_res));
+
+  /* An any-text predicate must consume the complete JSON document. It may
+   * therefore warm the bounded transformed-body cache, and the next scan must
+   * reuse that complete entry instead of decrypting the large body again. */
+  allocator_state.large_allocations = 0U;
+  query_req.selector_json = NULL;
+  query_req.selector_lql = "icontains{field=/...,value=matched}";
+  rc = lc_sink_to_discard(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_matches\":1"));
+  assert_int_equal(allocator_state.large_allocations, 1U);
+
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_query_res_cleanup(&query_res);
+  memset(&query_res, 0, sizeof(query_res));
+  allocator_state.large_allocations = 0U;
+  rc = lc_sink_to_discard(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_matches\":1"));
+  assert_int_equal(allocator_state.large_allocations, 0U);
+
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  free(body);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -31260,7 +32960,7 @@ static void test_query_documents_scan_streams_rows(void **state) {
   rc = lc_sink_to_memory(&first_sink, &error);
   assert_int_equal(rc, LC_OK);
 
-  query_req.namespace_name = "docs/query-docs";
+  query_req.ns = "docs/query-docs";
   query_req.selector_json = selector;
   query_req.limit = 1L;
   query_req.return_mode = "documents";
@@ -31471,7 +33171,7 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   open_pouch_client(root, &client, &error);
   rc = lc_sink_to_memory(&first_sink, &error);
   assert_int_equal(rc, LC_OK);
-  query_req.namespace_name = "docs/query-docs-index";
+  query_req.ns = "docs/query-docs-index";
   query_req.selector_json = selector;
   query_req.limit = 1L;
   query_req.return_mode = "documents";
@@ -31793,11 +33493,11 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   lc_pouch_close(writer);
   writer = NULL;
 
-  flush_req.namespace_name = "docs/flush";
+  flush_req.ns = "docs/flush";
   flush_req.mode = "sync";
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(flush_res.namespace_name, "docs/flush");
+  assert_string_equal(flush_res.ns, "docs/flush");
   assert_string_equal(flush_res.mode, "sync");
   assert_string_equal(flush_res.flush_id, "pouch-query-index-repair");
   assert_true(flush_res.accepted);
@@ -31835,7 +33535,7 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_string_equal(flush_res.mode, "wait");
   lc_index_flush_res_cleanup(&flush_res);
 
-  query_req.namespace_name = "docs/flush";
+  query_req.ns = "docs/flush";
   query_req.engine = "index";
   query_req.selector_json =
       "{\"eq\":{\"field\":\"/kind\",\"value\":\"flush\"}}";
@@ -32087,7 +33787,7 @@ test_flush_index_external_accept_invalidates_cached_summary(void **state) {
   lc_pouch_close(writer);
   writer = NULL;
 
-  flush_req.namespace_name = "docs/external-accept";
+  flush_req.ns = "docs/external-accept";
   flush_req.mode = "wait";
   rc =
       cached_client->flush_index(cached_client, &flush_req, &flush_res, &error);
@@ -32136,7 +33836,7 @@ test_flush_index_external_accept_invalidates_cached_summary(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = "docs/external-accept";
+  query_req.ns = "docs/external-accept";
   query_req.selector_json = selector;
   query_req.engine = "index";
   query_req.refresh = "wait_for";
@@ -32597,7 +34297,7 @@ test_flush_index_rebuilds_incomplete_summary_after_document_fix(void **state) {
   pouch_write_json_state(writer, "docs/incomplete-fix", "doc/bad", "{", NULL,
                          &error);
 
-  flush_req.namespace_name = "docs/incomplete-fix";
+  flush_req.ns = "docs/incomplete-fix";
   flush_req.mode = "sync";
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
   assert_int_equal(rc, LC_OK);
@@ -32623,7 +34323,7 @@ test_flush_index_rebuilds_incomplete_summary_after_document_fix(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = "docs/incomplete-fix";
+  query_req.ns = "docs/incomplete-fix";
   query_req.selector_json = selector;
   query_req.engine = "index";
   query_req.refresh = "wait_for";
@@ -32676,10 +34376,10 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   make_root("txn-records", root, sizeof(root));
   cleanup_root(root);
 
-  participants[0].namespace_name = "orders/eu";
+  participants[0].ns = "orders/eu";
   participants[0].key = "state/order-1";
   participants[0].backend_hash = "backend-a";
-  participants[1].namespace_name = "orders/us";
+  participants[1].ns = "orders/us";
   participants[1].key = "state/order-2";
   participants[1].backend_hash = "backend-b";
   decision_req.txn_id = test_xid_for_label("txn-pouch-records");
@@ -32893,13 +34593,12 @@ static void test_txn_replay_applies_durable_decision(void **state) {
 
   open_pouch_client(root, &client, &error);
   pouch = ((lc_client_handle *)client)->pouch;
-  participant.namespace_name = "default";
+  participant.ns = "default";
   participant.key = "state/replay-commit";
   participant.backend_hash = NULL;
   rc = lc_source_from_memory("committed", strlen("committed"), &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_stage_write(pouch, participant.namespace_name,
-                                  participant.key,
+  rc = lc_pouch_state_stage_write(pouch, participant.ns, participant.key,
                                   test_xid_for_label("txn-replay-commit"),
                                   source, NULL, &write_result, &error);
   source->close(source);
@@ -32914,14 +34613,14 @@ static void test_txn_replay_applies_durable_decision(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_string_equal(replay_res.state, "commit");
   lc_txn_replay_res_cleanup(&replay_res);
-  rc = lc_pouch_state_read(pouch, participant.namespace_name, participant.key,
-                           &read_result, &error);
+  rc = lc_pouch_state_read(pouch, participant.ns, participant.key, &read_result,
+                           &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
   read_source_to_string(read_result.body, body, sizeof(body));
   assert_string_equal(body, "committed");
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
-  rc = lc_pouch_state_read(pouch, participant.namespace_name,
+  rc = lc_pouch_state_read(pouch, participant.ns,
                            "state/replay-commit/.staging/txn-replay-commit",
                            &read_result, &error);
   assert_int_equal(rc, LC_OK);
@@ -32931,8 +34630,7 @@ static void test_txn_replay_applies_durable_decision(void **state) {
   participant.key = "state/replay-expired";
   rc = lc_source_from_memory("discarded", strlen("discarded"), &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_stage_write(pouch, participant.namespace_name,
-                                  participant.key,
+  rc = lc_pouch_state_stage_write(pouch, participant.ns, participant.key,
                                   test_xid_for_label("txn-replay-expired"),
                                   source, NULL, &write_result, &error);
   source->close(source);
@@ -32947,14 +34645,14 @@ static void test_txn_replay_applies_durable_decision(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_string_equal(replay_res.state, "rollback");
   lc_txn_replay_res_cleanup(&replay_res);
-  rc = lc_pouch_state_read(pouch, participant.namespace_name,
+  rc = lc_pouch_state_read(pouch, participant.ns,
                            "state/replay-expired/.staging/txn-replay-expired",
                            &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
-  rc = lc_pouch_state_read(pouch, participant.namespace_name, participant.key,
-                           &read_result, &error);
+  rc = lc_pouch_state_read(pouch, participant.ns, participant.key, &read_result,
+                           &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
@@ -32995,16 +34693,16 @@ static void test_txn_decision_merges_durable_participants(void **state) {
 
   open_pouch_client(root, &client, &error);
   pouch = ((lc_client_handle *)client)->pouch;
-  participants[0].namespace_name = "default";
+  participants[0].ns = "default";
   participants[0].key = "state/txn-merge-first";
   participants[0].backend_hash = NULL;
-  participants[1].namespace_name = "default";
+  participants[1].ns = "default";
   participants[1].key = "state/txn-merge-second";
   participants[1].backend_hash = NULL;
   rc = lc_source_from_memory("first", strlen("first"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(
-      pouch, participants[0].namespace_name, participants[0].key,
+      pouch, participants[0].ns, participants[0].key,
       test_xid_for_label("txn-merge"), source, NULL, &write_result, &error);
   source->close(source);
   source = NULL;
@@ -33013,7 +34711,7 @@ static void test_txn_decision_merges_durable_participants(void **state) {
   rc = lc_source_from_memory("second", strlen("second"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(
-      pouch, participants[1].namespace_name, participants[1].key,
+      pouch, participants[1].ns, participants[1].key,
       test_xid_for_label("txn-merge"), source, NULL, &write_result, &error);
   source->close(source);
   source = NULL;
@@ -33042,15 +34740,15 @@ static void test_txn_decision_merges_durable_participants(void **state) {
   assert_string_equal(decision_res.state, "commit");
   lc_txn_decision_res_cleanup(&decision_res);
 
-  rc = lc_pouch_state_read(pouch, participants[0].namespace_name,
-                           participants[0].key, &read_result, &error);
+  rc = lc_pouch_state_read(pouch, participants[0].ns, participants[0].key,
+                           &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
   read_source_to_string(read_result.body, body, sizeof(body));
   assert_string_equal(body, "first");
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
-  rc = lc_pouch_state_read(pouch, participants[1].namespace_name,
-                           participants[1].key, &read_result, &error);
+  rc = lc_pouch_state_read(pouch, participants[1].ns, participants[1].key,
+                           &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
   read_source_to_string(read_result.body, body, sizeof(body));
@@ -33095,19 +34793,19 @@ static void test_txn_decision_skips_foreign_backend_participant(void **state) {
   pouch = ((lc_client_handle *)client)->pouch;
   rc = lc_pouch_backend_hash(pouch, backend_hash, &error);
   assert_int_equal(rc, LC_OK);
-  participants[0].namespace_name = "default";
+  participants[0].ns = "default";
   participants[0].key = "state/local";
   participants[0].backend_hash = backend_hash;
-  participants[1].namespace_name = "default";
+  participants[1].ns = "default";
   participants[1].key = "state/foreign";
   participants[1].backend_hash = "foreign-backend";
 
   rc = lc_source_from_memory("local", strlen("local"), &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_stage_write(pouch, participants[0].namespace_name,
-                                  participants[0].key,
-                                  test_xid_for_label("txn-backend-routing"),
-                                  source, NULL, &write_result, &error);
+  rc =
+      lc_pouch_state_stage_write(pouch, participants[0].ns, participants[0].key,
+                                 test_xid_for_label("txn-backend-routing"),
+                                 source, NULL, &write_result, &error);
   source->close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -33115,10 +34813,10 @@ static void test_txn_decision_skips_foreign_backend_participant(void **state) {
 
   rc = lc_source_from_memory("foreign", strlen("foreign"), &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_stage_write(pouch, participants[1].namespace_name,
-                                  participants[1].key,
-                                  test_xid_for_label("txn-backend-routing"),
-                                  source, NULL, &write_result, &error);
+  rc =
+      lc_pouch_state_stage_write(pouch, participants[1].ns, participants[1].key,
+                                 test_xid_for_label("txn-backend-routing"),
+                                 source, NULL, &write_result, &error);
   source->close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -33131,8 +34829,8 @@ static void test_txn_decision_skips_foreign_backend_participant(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
 
-  rc = lc_pouch_state_read(pouch, participants[0].namespace_name,
-                           participants[0].key, &read_result, &error);
+  rc = lc_pouch_state_read(pouch, participants[0].ns, participants[0].key,
+                           &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
   read_source_to_string(read_result.body, body, sizeof(body));
@@ -33142,15 +34840,15 @@ static void test_txn_decision_skips_foreign_backend_participant(void **state) {
   assert_true(snprintf(staged_key, sizeof(staged_key), "%s/.staging/%s",
                        participants[0].key,
                        test_xid_for_label("txn-backend-routing")) > 0);
-  rc = lc_pouch_state_read(pouch, participants[0].namespace_name, staged_key,
-                           &read_result, &error);
+  rc = lc_pouch_state_read(pouch, participants[0].ns, staged_key, &read_result,
+                           &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   memset(&read_result, 0, sizeof(read_result));
 
-  rc = lc_pouch_state_read(pouch, participants[1].namespace_name,
-                           participants[1].key, &read_result, &error);
+  rc = lc_pouch_state_read(pouch, participants[1].ns, participants[1].key,
+                           &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
@@ -33158,8 +34856,8 @@ static void test_txn_decision_skips_foreign_backend_participant(void **state) {
   assert_true(snprintf(staged_key, sizeof(staged_key), "%s/.staging/%s",
                        participants[1].key,
                        test_xid_for_label("txn-backend-routing")) > 0);
-  rc = lc_pouch_state_read(pouch, participants[1].namespace_name, staged_key,
-                           &read_result, &error);
+  rc = lc_pouch_state_read(pouch, participants[1].ns, staged_key, &read_result,
+                           &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
   read_source_to_string(read_result.body, body, sizeof(body));
@@ -33230,7 +34928,7 @@ static void test_txn_decision_validates_target_backend(void **state) {
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   memset(&read_result, 0, sizeof(read_result));
 
-  participant.namespace_name = "default";
+  participant.ns = "default";
   participant.key = "state/blank-backend";
   participant.backend_hash = " \t ";
   decision_req.txn_id = test_xid_for_label("txn-target-blank-participant");
@@ -33328,7 +35026,7 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   cleanup_root(root);
 
   open_pouch_client(root, &client, &error);
-  attach_op.lease.namespace_name = "objects/txn";
+  attach_op.lease.ns = "objects/txn";
   attach_op.lease.key = "state/object-1";
   attach_op.lease.txn_id = test_xid_for_label("txn-attachment-commit");
   pouch_acquire_test_lease(client, "objects/txn", "state/object-1",
@@ -33351,7 +35049,7 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   updated_at_unix = attach_res.attachment.updated_at_unix;
   lc_attach_res_cleanup(&attach_res);
 
-  list_req.lease.namespace_name = "objects/txn";
+  list_req.lease.ns = "objects/txn";
   list_req.lease.key = "state/object-1";
   list_req.public_read = 1;
   rc = client->list_attachments(client, &list_req, &list, &error);
@@ -33359,7 +35057,7 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   assert_int_equal(list.count, 0U);
   lc_attachment_list_cleanup(&list);
 
-  participant.namespace_name = "objects/txn";
+  participant.ns = "objects/txn";
   participant.key = "state/object-1";
   participant.backend_hash = NULL;
   decision_req.txn_id = test_xid_for_label("txn-attachment-commit");
@@ -33380,7 +35078,7 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   assert_true(list.items[0].updated_at_unix >= updated_at_unix);
   lc_attachment_list_cleanup(&list);
 
-  get_op.lease.namespace_name = "objects/txn";
+  get_op.lease.ns = "objects/txn";
   get_op.lease.key = "state/object-1";
   get_op.public_read = 1;
   get_op.selector.name = "report.txt";
@@ -33481,7 +35179,7 @@ static void test_txn_recovery_applies_attachment_side_effects(void **state) {
   cleanup_root(root);
 
   open_pouch_client(root, &client, &error);
-  attach_op.lease.namespace_name = "objects/recover";
+  attach_op.lease.ns = "objects/recover";
   attach_op.lease.key = "state/object-2";
   attach_op.lease.txn_id = test_xid_for_label("txn-attachment-recover");
   pouch_acquire_test_lease(client, "objects/recover", "state/object-2",
@@ -33508,7 +35206,7 @@ static void test_txn_recovery_applies_attachment_side_effects(void **state) {
     lc_txn_participant participant;
 
     memset(&participant, 0, sizeof(participant));
-    participant.namespace_name = "objects/recover";
+    participant.ns = "objects/recover";
     participant.key = "state/object-2";
     participant.backend_hash = NULL;
     test_write_binary_txn_record(pouch, "txn-attachment-recover", "commit", 0L,
@@ -33518,7 +35216,7 @@ static void test_txn_recovery_applies_attachment_side_effects(void **state) {
   pouch = NULL;
 
   open_pouch_client(root, &client, &error);
-  list_req.lease.namespace_name = "objects/recover";
+  list_req.lease.ns = "objects/recover";
   list_req.lease.key = "state/object-2";
   list_req.public_read = 1;
   rc = client->list_attachments(client, &list_req, &list, &error);
@@ -33564,7 +35262,7 @@ static void pouch_attach_text_with_lease(lc_lease *lease, const char *name,
   lc_attach_res_cleanup(&attach_res);
 }
 
-static void pouch_attach_text(lc_client *client, const char *namespace_name,
+static void pouch_attach_text(lc_client *client, const char *ns,
                               const char *key, const char *txn_id,
                               const char *name, const char *body,
                               lc_error *error) {
@@ -33572,7 +35270,7 @@ static void pouch_attach_text(lc_client *client, const char *namespace_name,
   int rc;
 
   lease = NULL;
-  pouch_acquire_test_lease(client, namespace_name, key, txn_id, &lease, error);
+  pouch_acquire_test_lease(client, ns, key, txn_id, &lease, error);
   pouch_attach_text_with_lease(lease, name, body, error);
   if (txn_id != NULL) {
     lease->close(lease);
@@ -33640,7 +35338,7 @@ test_private_attachment_reads_validate_lease_and_overlay_transaction(
   pouch_attach_text(client, "docs/attachment-txn", "state/attachment-txn", NULL,
                     "old.txt", "old", &error);
 
-  acquire_req.namespace_name = "docs/attachment-txn";
+  acquire_req.ns = "docs/attachment-txn";
   acquire_req.key = "state/attachment-txn";
   acquire_req.owner = "attachment-txn-owner";
   acquire_req.ttl_seconds = 30L;
@@ -33663,7 +35361,7 @@ test_private_attachment_reads_validate_lease_and_overlay_transaction(
   assert_int_equal(rc, LC_OK);
   assert_int_equal(deleted, 1);
 
-  list_req.lease.namespace_name = acquire_req.namespace_name;
+  list_req.lease.ns = acquire_req.ns;
   list_req.lease.key = acquire_req.key;
   list_req.lease.txn_id = acquire_req.txn_id;
   rc = client->list_attachments(client, &list_req, &list, &error);
@@ -33749,22 +35447,22 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   cleanup_root(root);
 
   open_pouch_client(root, &client, &error);
-  list_req.lease.namespace_name = "objects/mixed";
+  list_req.lease.ns = "objects/mixed";
   list_req.lease.key = "state/object-queue";
   list_req.public_read = 1;
-  participants[0].namespace_name = "objects/mixed";
+  participants[0].ns = "objects/mixed";
   participants[0].key = "state/object-queue";
   participants[0].backend_hash = NULL;
   decision_req.participants = participants;
   decision_req.participant_count = 1U;
-  enqueue_req.namespace_name = "objects/mixed";
+  enqueue_req.ns = "objects/mixed";
   enqueue_req.queue = "mixed-q";
   enqueue_req.visibility_timeout_seconds = 120L;
-  dequeue_req.namespace_name = "objects/mixed";
+  dequeue_req.ns = "objects/mixed";
   dequeue_req.queue = "mixed-q";
   dequeue_req.owner = "mixed-worker";
   dequeue_req.visibility_timeout_seconds = 120L;
-  stats_req.namespace_name = "objects/mixed";
+  stats_req.ns = "objects/mixed";
   stats_req.queue = "mixed-q";
 
   pouch_attach_text(client, "objects/mixed", "state/object-queue",
@@ -33786,7 +35484,7 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   rc = client->dequeue(client, &dequeue_req, &message, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(message);
-  ack_op.message.namespace_name = message->namespace_name;
+  ack_op.message.ns = message->ns;
   ack_op.message.queue = message->queue;
   ack_op.message.message_id = message->message_id;
   ack_op.message.lease_id = message->lease_id;
@@ -33804,7 +35502,7 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   decision_req.txn_id = test_xid_for_label("txn-mixed-commit");
   pouch_queue_message_participant_key(message, queue_participant_key,
                                       sizeof(queue_participant_key));
-  participants[1].namespace_name = message->namespace_name;
+  participants[1].ns = message->ns;
   participants[1].key = queue_participant_key;
   participants[1].backend_hash = NULL;
   decision_req.participant_count = 2U;
@@ -33838,7 +35536,7 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   assert_non_null(message);
   memset(&ack_op, 0, sizeof(ack_op));
   memset(&ack_res, 0, sizeof(ack_res));
-  ack_op.message.namespace_name = message->namespace_name;
+  ack_op.message.ns = message->ns;
   ack_op.message.queue = message->queue;
   ack_op.message.message_id = message->message_id;
   ack_op.message.lease_id = message->lease_id;
@@ -33852,7 +35550,7 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   decision_req.txn_id = test_xid_for_label("txn-mixed-rollback");
   pouch_queue_message_participant_key(message, queue_participant_key,
                                       sizeof(queue_participant_key));
-  participants[1].namespace_name = message->namespace_name;
+  participants[1].ns = message->ns;
   participants[1].key = queue_participant_key;
   participants[1].backend_hash = NULL;
   decision_req.participant_count = 2U;
@@ -33880,7 +35578,7 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   assert_non_null(message);
   memset(&ack_op, 0, sizeof(ack_op));
   memset(&ack_res, 0, sizeof(ack_res));
-  ack_op.message.namespace_name = message->namespace_name;
+  ack_op.message.ns = message->ns;
   ack_op.message.queue = message->queue;
   ack_op.message.message_id = message->message_id;
   ack_op.message.lease_id = message->lease_id;
@@ -33936,10 +35634,10 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
   pouch_attach_text(client, "objects/delete", "state/object-3", NULL,
                     "rollback-delete.txt", "rollback-delete", &error);
 
-  list_req.lease.namespace_name = "objects/delete";
+  list_req.lease.ns = "objects/delete";
   list_req.lease.key = "state/object-3";
   list_req.public_read = 1;
-  delete_op.lease.namespace_name = "objects/delete";
+  delete_op.lease.ns = "objects/delete";
   delete_op.lease.key = "state/object-3";
   delete_op.lease.txn_id = test_xid_for_label("txn-delete-commit");
   pouch_acquire_test_lease(client, "objects/delete", "state/object-3",
@@ -33956,7 +35654,7 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
   assert_true(pouch_attachment_list_has_name(&list, "delete.txt"));
   lc_attachment_list_cleanup(&list);
 
-  participant.namespace_name = "objects/delete";
+  participant.ns = "objects/delete";
   participant.key = "state/object-3";
   participant.backend_hash = NULL;
   decision_req.txn_id = test_xid_for_label("txn-delete-commit");
@@ -34003,7 +35701,7 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
                            "txn-clear-commit", &lease, &error);
   pouch_attach_text_with_lease(lease, "staged-clear.txt", "staged-clear",
                                &error);
-  delete_all_op.lease.namespace_name = "objects/delete";
+  delete_all_op.lease.ns = "objects/delete";
   delete_all_op.lease.key = "state/object-3";
   delete_all_op.lease.txn_id = test_xid_for_label("txn-clear-commit");
   pouch_copy_lease_ref(&delete_all_op.lease, lease);
@@ -34108,7 +35806,7 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
     lc_txn_participant participant;
 
     memset(&participant, 0, sizeof(participant));
-    participant.namespace_name = "orders/recover";
+    participant.ns = "orders/recover";
     participant.key = "state/recover-commit";
     participant.backend_hash = NULL;
     test_write_binary_txn_record(pouch, "txn-recover-commit", "commit", 0L, 1UL,
@@ -34129,7 +35827,7 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
     lc_txn_participant participant;
 
     memset(&participant, 0, sizeof(participant));
-    participant.namespace_name = "orders/recover";
+    participant.ns = "orders/recover";
     participant.key = "state/recover-expired";
     participant.backend_hash = NULL;
     test_write_binary_txn_record(pouch, "txn-recover-expired", "prepare", 1L,
@@ -34142,7 +35840,7 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
-  query_req.namespace_name = "orders/recover";
+  query_req.ns = "orders/recover";
   query_req.selector_json = selector;
   query_req.engine = "index";
   query_req.refresh = "wait_for";
@@ -34709,6 +36407,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_pouch_endpoint_rejects_unix_socket_mix),
       cmocka_unit_test(
           test_pouch_endpoint_query_engine_routes_implicit_queries),
+      cmocka_unit_test(test_pouch_endpoint_disables_query_indexing),
       cmocka_unit_test(
           test_pouch_namespace_config_persists_and_routes_implicit_queries),
       cmocka_unit_test(test_pouch_public_api_rejects_reserved_lockd_namespaces),
@@ -34723,6 +36422,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_state_compression_streams_segment_payloads),
       cmocka_unit_test(test_state_compression_mode_is_root_invariant),
       cmocka_unit_test(test_state_crypto_compression_round_trips),
+      cmocka_unit_test(
+          test_transformed_metadata_replay_defers_body_materialization),
       cmocka_unit_test(
           test_crypto_compressed_source_authenticates_terminal_frame),
       cmocka_unit_test(
@@ -34754,12 +36455,22 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_state_write_enforces_create_if_absent),
       cmocka_unit_test(test_state_writes_roll_active_segments),
       cmocka_unit_test(test_metadata_batch_rollover_resets_active_segment_size),
-      cmocka_unit_test(test_state_idle_compaction_installs_snapshot),
-      cmocka_unit_test(test_state_idle_compaction_waits_for_first_mutation),
+      cmocka_unit_test(test_state_terminal_reclaim_installs_snapshot),
+      cmocka_unit_test(test_history_consumer_pins_compaction_and_persists),
+      cmocka_unit_test(
+          test_history_consumer_advance_preserves_new_reclaim_marker),
+      cmocka_unit_test(test_history_consumer_corruption_blocks_compaction),
+      cmocka_unit_test(test_state_compaction_does_not_scan_root_at_open),
       cmocka_unit_test(test_state_replay_ignores_stale_generation),
       cmocka_unit_test(test_pouch_root_path_aliases_share_store_identity),
       cmocka_unit_test(test_maintenance_reports_disabled_without_force),
       cmocka_unit_test(test_maintenance_retention_sweep_deletes_expired_state),
+      cmocka_unit_test(
+          test_terminal_reclaim_compacts_active_segment_without_timing_wait),
+      cmocka_unit_test(test_terminal_reclaim_marker_resumes_after_reopen),
+      cmocka_unit_test(
+          test_terminal_reclaim_failed_marker_does_not_starve_next_marker),
+      cmocka_unit_test(test_compaction_queue_is_bounded_per_root),
       cmocka_unit_test(test_maintenance_creates_namespace_without_prior_writes),
       cmocka_unit_test(test_maintenance_reports_threshold_skip),
       cmocka_unit_test(test_maintenance_force_installs_snapshot),
@@ -34771,6 +36482,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_compaction_reclaims_expired_obsolete_files),
       cmocka_unit_test(test_snapshot_high_water_survives_compaction_reopen),
       cmocka_unit_test(test_query_freshness_delete_survives_compaction_reopen),
+      cmocka_unit_test(
+          test_query_indexing_opt_out_invalidates_before_compaction),
       cmocka_unit_test(
           test_query_watermark_waits_for_exclusive_namespace_mutation),
       cmocka_unit_test(test_state_metadata_survives_snapshot_compaction),
@@ -34940,8 +36653,13 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_shared_query_flush_observes_peer_streamed_state),
       cmocka_unit_test(test_query_index_staleness_is_namespace_scoped),
       cmocka_unit_test(test_pouch_endpoint_configures_disk_runtime_controls),
+      cmocka_unit_test(test_pouch_typed_settings_override_endpoint_options),
+      cmocka_unit_test(test_pouch_typed_settings_validate_backend_and_values),
+      cmocka_unit_test(test_pouch_typed_settings_override_crypto_options),
+      cmocka_unit_test(
+          test_pouch_typed_settings_override_crypto_file_generation),
       cmocka_unit_test(test_pouch_indexer_deadline_clamps_u64_interval),
-      cmocka_unit_test(test_pouch_defaults_and_post_mutation_janitor),
+      cmocka_unit_test(test_pouch_defaults_and_terminal_reclaim),
       cmocka_unit_test(test_exclusive_writer_probe_heartbeat_precedence),
       cmocka_unit_test(
           test_single_writer_transition_invalidates_query_index_trust),
@@ -35011,8 +36729,11 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_pouch_transaction_ids_match_lockd_xid_contract),
       cmocka_unit_test(
           test_pouch_queue_dequeue_rejects_invalid_xid_without_leasing),
-      cmocka_unit_test(
-          test_minted_xid_reconstructed_release_validates_lifecycle),
+      cmocka_unit_test(test_pouch_client_update_pins_source_callback_owner),
+      cmocka_unit_test(test_pouch_client_get_pins_sink_callback_owner),
+      cmocka_unit_test_teardown(
+          test_minted_xid_reconstructed_release_validates_lifecycle,
+          teardown_pouch_lifecycle_test_clock),
       cmocka_unit_test(
           test_explicit_xa_release_rollback_discards_all_participants),
       cmocka_unit_test(
@@ -35067,6 +36788,7 @@ int main(int argc, char **argv) {
           test_query_keys_index_recursive_exists_uses_container_presence),
       cmocka_unit_test(test_query_keys_index_rejects_wildcard_exists_selectors),
       cmocka_unit_test(test_query_documents_scan_matches_escaped_pointer_paths),
+      cmocka_unit_test(test_query_scan_body_cache_warms_only_full_consumption),
       cmocka_unit_test(test_query_documents_scan_streams_rows),
       cmocka_unit_test(test_query_documents_index_uses_scalar_postings),
       cmocka_unit_test(test_flush_index_reports_projection_high_water),

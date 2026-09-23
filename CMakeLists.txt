@@ -67,19 +67,19 @@ option(LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS
 option(LOCKDC_ENABLE_COVERAGE "Build test targets with gcov coverage instrumentation." OFF)
 option(LOCKDC_INSTALL "Enable install rules." ON)
 
-set(LOCKDC_OPENSSL_VERSION "3.6.2" CACHE STRING "Pinned OpenSSL release supplied by c.pkt.systems.")
+set(LOCKDC_OPENSSL_VERSION "3.6.4" CACHE STRING "Pinned OpenSSL release supplied by c.pkt.systems.")
 set(LOCKDC_ZLIB_VERSION "1.3.2" CACHE STRING "Pinned zlib release supplied by c.pkt.systems.")
-set(LOCKDC_CURL_VERSION "8.20.0" CACHE STRING "Pinned curl release supplied by c.pkt.systems.")
-set(LOCKDC_NGHTTP2_VERSION "1.69.0" CACHE STRING "Pinned nghttp2 release supplied by c.pkt.systems.")
+set(LOCKDC_CURL_VERSION "8.22.0" CACHE STRING "Pinned curl release supplied by c.pkt.systems.")
+set(LOCKDC_NGHTTP2_VERSION "1.70.0" CACHE STRING "Pinned nghttp2 release supplied by c.pkt.systems.")
 set(LOCKDC_LIBSSH2_VERSION "1.11.1" CACHE STRING "Pinned libssh2 release supplied by c.pkt.systems.")
-set(LOCKDC_LONEJSON_VERSION "0.43.0" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
+set(LOCKDC_LONEJSON_VERSION "0.44.0" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
 set(LOCKDC_LONEJSON_ABI_VERSION "26" CACHE STRING "Pinned lonejson shared-library ABI/SOVERSION." FORCE)
-set(LOCKDC_LIBLQL_VERSION "0.2.0" CACHE STRING "Pinned liblql release used for pouch LQL query support." FORCE)
+set(LOCKDC_LIBLQL_VERSION "0.3.0" CACHE STRING "Pinned liblql release used for pouch LQL query support." FORCE)
 set(LOCKDC_LIBLQL_ABI_VERSION "0" CACHE STRING "Pinned liblql shared-library ABI/SOVERSION." FORCE)
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
-set(LOCKDC_PSLOG_VERSION "0.9.0" CACHE STRING "Pinned libpslog release used for SDK logging." FORCE)
-set(LOCKDC_CPKT_VERSION "0.9.0" CACHE STRING "Pinned c.pkt.systems dependency bundle version." FORCE)
-set(LOCKDC_MIN_ABI_VERSION "3")
+set(LOCKDC_PSLOG_VERSION "0.10.0" CACHE STRING "Pinned libpslog release used for SDK logging." FORCE)
+set(LOCKDC_CPKT_VERSION "0.10.0" CACHE STRING "Pinned c.pkt.systems dependency bundle version." FORCE)
+set(LOCKDC_MIN_ABI_VERSION "4")
 set(LOCKDC_ABI_VERSION "${LOCKDC_MIN_ABI_VERSION}" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc.")
 if(LOCKDC_ABI_VERSION MATCHES "^[0-9]+$" AND LOCKDC_ABI_VERSION LESS LOCKDC_MIN_ABI_VERSION)
     set(LOCKDC_ABI_VERSION "${LOCKDC_MIN_ABI_VERSION}" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc." FORCE)
@@ -190,35 +190,156 @@ set(LOCKDC_C_TEST_ENVIRONMENT "")
 if(CMAKE_CROSSCOMPILING)
     list(APPEND LOCKDC_C_TEST_ENVIRONMENT "LOCKDC_SLOW_TEST_RUNTIME=1")
 endif()
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSROOT AND LOCKDC_TARGET_LIBC STREQUAL "musl")
-    set(lockdc_c_test_runtime_dirs)
+
+# Development executables run directly with the same Bootlin runtime that
+# built them.  This deliberately applies to tests, examples, helpers,
+# benchmarks, fuzzers, and local SDK consumers, but never to shipped targets.
+# DT_RPATH (rather than DT_RUNPATH) is intentional: it also resolves indirect
+# dependencies loaded by a build-tree shared library without LD_LIBRARY_PATH.
+set(LOCKDC_DEVELOPMENT_RUNTIME_LOADER "")
+set(LOCKDC_DEVELOPMENT_RUNTIME_DIRS "")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSROOT)
+    file(GLOB lockdc_runtime_loaders
+        "${CMAKE_SYSROOT}/lib/ld-linux*.so.*"
+        "${CMAKE_SYSROOT}/lib64/ld-linux*.so.*"
+        "${CMAKE_SYSROOT}/lib/ld-musl-*.so.*"
+        "${CMAKE_SYSROOT}/lib64/ld-musl-*.so.*")
+    list(LENGTH lockdc_runtime_loaders lockdc_runtime_loader_count)
+    if(NOT lockdc_runtime_loader_count EQUAL 0)
+        list(GET lockdc_runtime_loaders 0 LOCKDC_DEVELOPMENT_RUNTIME_LOADER)
+    endif()
+
+    set(LOCKDC_DEVELOPMENT_RUNTIME_DIRS "${CMAKE_CURRENT_BINARY_DIR}")
+    if(LOCKDC_BUILD_SHARED)
+        list(APPEND LOCKDC_DEVELOPMENT_RUNTIME_DIRS "$<TARGET_FILE_DIR:lc_shared>")
+    endif()
     foreach(lockdc_runtime_dir
             "${CMAKE_SYSROOT}/lib"
             "${CMAKE_SYSROOT}/usr/lib"
             "${CMAKE_SYSROOT}/lib64"
-            "${CMAKE_SYSROOT}/usr/lib64")
-        if(IS_DIRECTORY "${lockdc_runtime_dir}")
-            list(APPEND lockdc_c_test_runtime_dirs "${lockdc_runtime_dir}")
+            "${CMAKE_SYSROOT}/usr/lib64"
+            "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib"
+            "${LOCKDC_EXTERNAL_ROOT}/curl/install/lib"
+            "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib"
+            "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
+            "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
+            "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+            "${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib"
+            "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
+            "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
+        # Vendored dependency prefixes can be created after this configure by
+        # lc_deps. Keep their paths in development RPATHs so one configure is
+        # sufficient for a fresh dependency root.
+        list(APPEND LOCKDC_DEVELOPMENT_RUNTIME_DIRS "${lockdc_runtime_dir}")
+    endforeach()
+    foreach(lockdc_runtime_library libatomic.so.1 libasan.so libubsan.so)
+        execute_process(
+            COMMAND "${CMAKE_C_COMPILER}" "-print-file-name=${lockdc_runtime_library}"
+            OUTPUT_VARIABLE lockdc_runtime_library_path
+            RESULT_VARIABLE lockdc_runtime_library_result
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        if(lockdc_runtime_library_result EQUAL 0
+           AND EXISTS "${lockdc_runtime_library_path}")
+            get_filename_component(lockdc_runtime_library_dir
+                "${lockdc_runtime_library_path}" DIRECTORY)
+            file(REAL_PATH "${lockdc_runtime_library_dir}"
+                lockdc_runtime_library_dir)
+            list(APPEND LOCKDC_DEVELOPMENT_RUNTIME_DIRS "${lockdc_runtime_library_dir}")
         endif()
     endforeach()
-    execute_process(
-        COMMAND "${CMAKE_C_COMPILER}" -print-file-name=libatomic.so.1
-        OUTPUT_VARIABLE lockdc_libatomic_path
-        RESULT_VARIABLE lockdc_libatomic_result
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET)
-    if(lockdc_libatomic_result EQUAL 0
-       AND NOT lockdc_libatomic_path STREQUAL "libatomic.so.1"
-       AND EXISTS "${lockdc_libatomic_path}")
-        get_filename_component(lockdc_libatomic_dir "${lockdc_libatomic_path}" DIRECTORY)
-        list(APPEND lockdc_c_test_runtime_dirs "${lockdc_libatomic_dir}")
-    endif()
-    list(REMOVE_DUPLICATES lockdc_c_test_runtime_dirs)
-    if(lockdc_c_test_runtime_dirs)
-        string(JOIN ":" lockdc_c_test_runtime_path ${lockdc_c_test_runtime_dirs})
-        list(APPEND LOCKDC_C_TEST_ENVIRONMENT "LD_LIBRARY_PATH=${lockdc_c_test_runtime_path}")
-    endif()
+    list(REMOVE_DUPLICATES LOCKDC_DEVELOPMENT_RUNTIME_DIRS)
 endif()
+
+function(lc_configure_development_runtime target)
+    get_target_property(target_type ${target} TYPE)
+    if(NOT target_type STREQUAL "EXECUTABLE")
+        return()
+    endif()
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SYSROOT)
+        return()
+    endif()
+    if(LOCKDC_DEVELOPMENT_RUNTIME_LOADER STREQUAL "")
+        message(FATAL_ERROR
+            "Bootlin sysroot has no dynamic loader for development executable ${target}: "
+            "${CMAKE_SYSROOT}")
+    endif()
+    target_link_options(${target} PRIVATE
+        "LINKER:--dynamic-linker,${LOCKDC_DEVELOPMENT_RUNTIME_LOADER}"
+        "LINKER:--disable-new-dtags")
+    set_property(TARGET ${target} PROPERTY SKIP_BUILD_RPATH TRUE)
+    foreach(lockdc_runtime_dir IN LISTS LOCKDC_DEVELOPMENT_RUNTIME_DIRS)
+        target_link_options(${target} PRIVATE "LINKER:-rpath,${lockdc_runtime_dir}")
+    endforeach()
+endfunction()
+
+function(lc_configure_development_module_runtime target)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SYSROOT)
+        return()
+    endif()
+    target_link_options(${target} PRIVATE "LINKER:--disable-new-dtags")
+    set_property(TARGET ${target} PROPERTY SKIP_BUILD_RPATH TRUE)
+    foreach(lockdc_runtime_dir IN LISTS LOCKDC_DEVELOPMENT_RUNTIME_DIRS)
+        target_link_options(${target} PRIVATE "LINKER:-rpath,${lockdc_runtime_dir}")
+    endforeach()
+endfunction()
+
+function(lc_collect_development_runtime_targets directory)
+    get_property(lockdc_directory_targets DIRECTORY "${directory}"
+        PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(lockdc_directory_target IN LISTS lockdc_directory_targets)
+        get_target_property(lockdc_target_type "${lockdc_directory_target}" TYPE)
+        if(lockdc_target_type STREQUAL "EXECUTABLE")
+            set_property(GLOBAL APPEND PROPERTY
+                LOCKDC_DEVELOPMENT_RUNTIME_EXECUTABLE_TARGETS
+                "${lockdc_directory_target}")
+        elseif(lockdc_target_type STREQUAL "MODULE_LIBRARY")
+            set_property(GLOBAL APPEND PROPERTY
+                LOCKDC_DEVELOPMENT_RUNTIME_MODULE_TARGETS
+                "${lockdc_directory_target}")
+        endif()
+    endforeach()
+
+    get_property(lockdc_subdirectories DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+    foreach(lockdc_subdirectory IN LISTS lockdc_subdirectories)
+        lc_collect_development_runtime_targets("${lockdc_subdirectory}")
+    endforeach()
+endfunction()
+
+function(lc_write_development_runtime_contract_manifest)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SYSROOT)
+        return()
+    endif()
+
+    set_property(GLOBAL PROPERTY LOCKDC_DEVELOPMENT_RUNTIME_EXECUTABLE_TARGETS "")
+    set_property(GLOBAL PROPERTY LOCKDC_DEVELOPMENT_RUNTIME_MODULE_TARGETS "")
+    lc_collect_development_runtime_targets("${CMAKE_CURRENT_SOURCE_DIR}")
+    get_property(lockdc_development_runtime_executables GLOBAL PROPERTY
+        LOCKDC_DEVELOPMENT_RUNTIME_EXECUTABLE_TARGETS)
+    get_property(lockdc_development_runtime_modules GLOBAL PROPERTY
+        LOCKDC_DEVELOPMENT_RUNTIME_MODULE_TARGETS)
+    list(REMOVE_DUPLICATES lockdc_development_runtime_executables)
+    list(REMOVE_DUPLICATES lockdc_development_runtime_modules)
+
+    set(lockdc_development_runtime_manifest
+        "set(LOCKDC_DEVELOPMENT_RUNTIME_EXECUTABLES\n")
+    foreach(lockdc_development_runtime_target
+            IN LISTS lockdc_development_runtime_executables)
+        string(APPEND lockdc_development_runtime_manifest
+            "  \"$<TARGET_FILE:${lockdc_development_runtime_target}>\"\n")
+    endforeach()
+    string(APPEND lockdc_development_runtime_manifest ")\n"
+        "set(LOCKDC_DEVELOPMENT_RUNTIME_MODULES\n")
+    foreach(lockdc_development_runtime_target
+            IN LISTS lockdc_development_runtime_modules)
+        string(APPEND lockdc_development_runtime_manifest
+            "  \"$<TARGET_FILE:${lockdc_development_runtime_target}>\"\n")
+    endforeach()
+    string(APPEND lockdc_development_runtime_manifest ")\n")
+    file(GENERATE
+        OUTPUT "${CMAKE_BINARY_DIR}/bootlin-development-runtime-targets.cmake"
+        CONTENT "${lockdc_development_runtime_manifest}")
+endfunction()
 
 function(lc_configure_fatal_linker_warnings target)
     get_target_property(target_type ${target} TYPE)
@@ -258,6 +379,7 @@ function(lc_configure_c_target target)
         )
     endif()
     lc_configure_fatal_linker_warnings(${target})
+    lc_configure_development_runtime(${target})
 endfunction()
 
 function(lc_configure_c_test_target target)
@@ -277,6 +399,7 @@ function(lc_configure_c_test_target target)
         )
     endif()
     lc_configure_fatal_linker_warnings(${target})
+    lc_configure_development_runtime(${target})
 endfunction()
 
 function(lc_enable_coverage_if_requested target)
@@ -371,6 +494,7 @@ set(lc_sources
     src/lc_mutate_stream.c
     src/lc_pouch_control_migration.c
     src/lc_pouch_client.c
+    src/lc_pouch_history.c
     src/lc_pouch.c
     src/lc_pouch_crypto.c
     src/lc_pouch_index.c
@@ -385,7 +509,7 @@ set(lc_sources
     src/lc_pouch_state.c
     src/lc_queue_api.c
     src/lc_queue_stream_api.c
-    src/lc_workflow.c
+    src/lc_outbox.c
     src/lc_log.c
     src/lc_state_api.c
     src/lc_streaming.c
@@ -546,6 +670,12 @@ if(LOCKDC_BUILD_SHARED)
     add_library(lc_shared SHARED)
     add_library(lockdc::shared ALIAS lc_shared)
     lc_configure_library_target(lc_shared)
+    # Only declarations in include/lc/lc.h are part of the shared ABI.  The
+    # header marks those declarations default-visible while this target hides
+    # every implementation helper from the dynamic symbol table.
+    set_target_properties(lc_shared PROPERTIES
+        C_VISIBILITY_PRESET hidden
+    )
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_options(lc_shared PRIVATE "LINKER:--enable-new-dtags")
         set(lockdc_shared_install_rpath "$ORIGIN")
@@ -576,6 +706,13 @@ if(LOCKDC_BUILD_SHARED)
         INSTALL_RPATH_USE_LINK_PATH OFF
     )
     lc_add_release_privacy_scan(lc_shared)
+endif()
+
+# Release packaging needs only the public library artifacts.  Keep this
+# separate from the default `all` target, which intentionally includes the
+# complete local test fleet for developer builds.
+if(TARGET lc_static AND TARGET lc_shared)
+    add_custom_target(lockdc_release_artifacts DEPENDS lc_static lc_shared)
 endif()
 
 if(LOCKDC_BUILD_TESTS)
@@ -653,53 +790,53 @@ configure_file(
     @ONLY
 )
 
-set(LOCKDC_LUA_INCLUDE_DIR "")
-set(LOCKDC_LUA_LIBRARY "")
 if(LOCKDC_BUILD_LUA_BINDINGS)
-    find_path(LOCKDC_LUA_INCLUDE_DIR
-        NAMES lua.h
-        PATH_SUFFIXES include include/lua5.5 include/lua-5.5 lua5.5 lua-5.5
-        PATHS /usr/local /usr /usr/local/include /usr/include
-    )
-    if("${LOCKDC_LUA_INCLUDE_DIR}" STREQUAL "" AND EXISTS "/usr/local/include/lua.h")
-        set(LOCKDC_LUA_INCLUDE_DIR "/usr/local/include")
+    find_package(Lua 5.5.1 CONFIG REQUIRED)
+    find_package(CpktLuaRuntime 5.5.1 CONFIG REQUIRED)
+
+    add_executable(lockdc_lua_runner src/lua/lockdc_lua_runner.c)
+    target_link_libraries(lockdc_lua_runner PRIVATE cpkt::lua_runtime)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # Lua C modules resolve their API symbols from the embedding process.
+        target_link_options(lockdc_lua_runner PRIVATE "LINKER:--export-dynamic")
     endif()
-    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        find_library(LOCKDC_LUA_LIBRARY
-            NAMES lua5.5 lua-5.5 lua55
-            PATH_SUFFIXES lib lib64
-            PATHS /usr/local /usr /opt/local
+    lc_configure_c_target(lockdc_lua_runner)
+
+    if(LOCKDC_BUILD_SHARED)
+        add_library(lockdc_lua_core MODULE src/lua/lockdc_lua.c)
+        target_include_directories(lockdc_lua_core SYSTEM PRIVATE "${LUA_INCLUDE_DIR}")
+        target_include_directories(lockdc_lua_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(lockdc_lua_core PRIVATE
+            lc_shared
+            lc::curl_shared
+            lc::openssl_ssl_shared
+            lc::openssl_crypto_shared
+            lc::nghttp2_shared
+            lc::pslog_shared
+            lc::lonejson_shared
+            lc::liblql_shared
+            lc::libssh2_shared
+            lc::zlib_shared
         )
-    endif()
-    if(LOCKDC_BUILD_SHARED AND NOT "${LOCKDC_LUA_INCLUDE_DIR}" STREQUAL "")
-        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
-           CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR
-           NOT "${LOCKDC_LUA_LIBRARY}" STREQUAL "")
-            add_library(lockdc_lua_core MODULE src/lua/lockdc_lua.c)
-            target_include_directories(lockdc_lua_core SYSTEM PRIVATE "${LOCKDC_LUA_INCLUDE_DIR}")
-            target_include_directories(lockdc_lua_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-            target_link_libraries(lockdc_lua_core PRIVATE lc_shared)
-            if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
-                target_compile_options(lockdc_lua_core PRIVATE -Werror=long-long)
-            endif()
-            if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-                target_link_options(lockdc_lua_core PRIVATE "LINKER:--allow-shlib-undefined")
-            elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-                target_link_options(lockdc_lua_core PRIVATE "LINKER:-undefined,dynamic_lookup")
-            else()
-                target_link_libraries(lockdc_lua_core PRIVATE "${LOCKDC_LUA_LIBRARY}")
-            endif()
-            lc_configure_c_target(lockdc_lua_core)
-            set_target_properties(lockdc_lua_core PROPERTIES
-                PREFIX ""
-                OUTPUT_NAME core
-                LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lua/lockdc"
-            )
-        else()
-            message(STATUS
-                "Lua bindings requested but no Lua runtime library was found for ${CMAKE_SYSTEM_NAME}; "
-                "skipping lockdc_lua_core")
+        if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+            target_compile_options(lockdc_lua_core PRIVATE -Werror=long-long)
         endif()
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            target_link_options(lockdc_lua_core PRIVATE
+                "LINKER:--allow-shlib-undefined"
+                "LINKER:--no-as-needed")
+        elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+            target_link_options(lockdc_lua_core PRIVATE "LINKER:-undefined,dynamic_lookup")
+        else()
+            target_link_libraries(lockdc_lua_core PRIVATE Lua::Lua)
+        endif()
+        lc_configure_c_target(lockdc_lua_core)
+        lc_configure_development_module_runtime(lockdc_lua_core)
+        set_target_properties(lockdc_lua_core PROPERTIES
+            PREFIX ""
+            OUTPUT_NAME core
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lua/lockdc"
+        )
     endif()
 endif()
 
@@ -818,7 +955,8 @@ if(LOCKDC_BUILD_TESTS)
     endif()
 
     if(TARGET lc_shared AND TARGET lc_static
-       AND NOT CMAKE_CROSSCOMPILING
+       AND CMAKE_SYSTEM_NAME STREQUAL CMAKE_HOST_SYSTEM_NAME
+       AND CMAKE_SYSTEM_PROCESSOR STREQUAL CMAKE_HOST_SYSTEM_PROCESSOR
        AND CMAKE_BUILD_TYPE STREQUAL "Release")
         add_test(NAME release_tarball_sdk_test
             COMMAND ${CMAKE_COMMAND}
@@ -828,13 +966,16 @@ if(LOCKDC_BUILD_TESTS)
         )
         set_tests_properties(release_tarball_sdk_test PROPERTIES RUN_SERIAL TRUE)
 
-        add_test(NAME lua_release_package_test
-            COMMAND ${CMAKE_COMMAND}
-                -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
-                -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
-                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lua_release_package_test.cmake
-        )
-        set_tests_properties(lua_release_package_test PROPERTIES RUN_SERIAL TRUE)
+        if(TARGET lockdc_lua_runner)
+            add_test(NAME lua_release_package_test
+                COMMAND ${CMAKE_COMMAND}
+                    -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                    -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+                    -DLOCKDC_LUA_BIN=$<TARGET_FILE:lockdc_lua_runner>
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lua_release_package_test.cmake
+            )
+            set_tests_properties(lua_release_package_test PROPERTIES RUN_SERIAL TRUE)
+        endif()
 
         add_test(NAME release_checksums_stability_test
             COMMAND ${CMAKE_COMMAND}
@@ -874,6 +1015,18 @@ if(LOCKDC_BUILD_TESTS)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/c_only_configure_test.cmake
     )
     set_tests_properties(c_only_configure_test PROPERTIES RUN_SERIAL TRUE)
+
+    add_test(NAME cpp_public_header_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
+            -DLOCKDC_NM=${CMAKE_NM}
+            -DLOCKDC_SYSROOT=${CMAKE_SYSROOT}
+            -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp_public_header_test.cmake
+    )
+    set_tests_properties(cpp_public_header_test PROPERTIES RUN_SERIAL TRUE)
 
     add_test(NAME deferred_vendored_install_manifest_test
         COMMAND ${CMAKE_COMMAND}
@@ -947,6 +1100,9 @@ if(LOCKDC_BUILD_TESTS)
             -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
+            -DLOCKDC_SYSTEM_NAME=${CMAKE_SYSTEM_NAME}
+            -DLOCKDC_CMAKE_SYSROOT=${CMAKE_SYSROOT}
+            -DLOCKDC_CMAKE_READELF=${CMAKE_READELF}
             $<$<BOOL:${CMAKE_TOOLCHAIN_FILE}>:-DLOCKDC_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}>
             -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
             -DLOCKDC_DEPENDENCY_BUILD_ROOT=${LOCKDC_DEPENDENCY_BUILD_ROOT}
@@ -1062,6 +1218,7 @@ if(LOCKDC_BUILD_TESTS)
     add_test(NAME lifecycle_command_surface_test
         COMMAND ${CMAKE_COMMAND}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lifecycle_command_surface_test.cmake
     )
     set_tests_properties(lifecycle_command_surface_test PROPERTIES
@@ -1102,6 +1259,8 @@ if(LOCKDC_BUILD_FUZZERS OR LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS)
     add_subdirectory(tests/fuzz)
     lc_apply_default_test_timeouts()
 endif()
+
+lc_write_development_runtime_contract_manifest()
 
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     get_filename_component(_lockdc_gcc_dir "${CMAKE_C_COMPILER}" DIRECTORY)

@@ -3,14 +3,14 @@ local lockdc = require("lockdc")
 local endpoint = os.getenv("LOCKDC_URL") or "https://localhost:19441"
 local client_pem = os.getenv("LOCKDC_CLIENT_PEM")
   or "./devenv/volumes/lockd-disk-a-config/client.pem"
-local namespace_name = os.getenv("LOCKDC_NAMESPACE") or "default"
+local namespace = os.getenv("LOCKDC_NAMESPACE") or "default"
 local queue = os.getenv("LOCKDC_QUEUE") or "examples-lua-roundtrip"
 local owner = os.getenv("LOCKDC_OWNER") or "lua-example-queue"
 
 local client, err = lockdc.open({
   endpoints = { endpoint },
   client_bundle_source = { path = client_pem },
-  default_namespace = namespace_name,
+  default_namespace = namespace,
 })
 
 if client == nil then
@@ -49,11 +49,11 @@ if message == nil then
   error(("client:dequeue failed: %s"):format(dequeue_err.message))
 end
 
-local payload, written_or_err = message:payload_json()
+local payload, written_or_err = message:read_payload_json()
 if payload == nil then
   message:close()
   client:close()
-  error(("message:payload_json failed: %s"):format(written_or_err.message))
+  error(("message:read_payload_json failed: %s"):format(written_or_err.message))
 end
 
 print(("dequeued message %s attempts=%d op=%s"):format(

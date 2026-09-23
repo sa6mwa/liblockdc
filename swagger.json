@@ -3166,11 +3166,11 @@
                     "type": "string"
                 },
                 "state_fencing_token": {
-                    "description": "StateFencingToken is the fencing token for the associated workflow state lease.",
+                    "description": "StateFencingToken is the fencing token for the associated outbox state lease.",
                     "type": "integer"
                 },
                 "state_lease_id": {
-                    "description": "StateLeaseID identifies the associated workflow state lease.",
+                    "description": "StateLeaseID identifies the associated outbox state lease.",
                     "type": "string"
                 },
                 "txn_id": {
@@ -3532,11 +3532,11 @@
                     "type": "string"
                 },
                 "state_fencing_token": {
-                    "description": "StateFencingToken is the fencing token for the associated workflow state lease.",
+                    "description": "StateFencingToken is the fencing token for the associated outbox state lease.",
                     "type": "integer"
                 },
                 "state_lease_id": {
-                    "description": "StateLeaseID identifies the associated workflow state lease.",
+                    "description": "StateLeaseID identifies the associated outbox state lease.",
                     "type": "string"
                 },
                 "txn_id": {
@@ -3719,7 +3719,7 @@
                     "type": "string"
                 },
                 "state_fencing_token": {
-                    "description": "StateFencingToken is the fencing token for the associated workflow state lease.",
+                    "description": "StateFencingToken is the fencing token for the associated outbox state lease.",
                     "type": "integer"
                 },
                 "state_lease_expires_at_unix": {
@@ -3727,7 +3727,7 @@
                     "type": "integer"
                 },
                 "state_lease_id": {
-                    "description": "StateLeaseID identifies the associated workflow state lease.",
+                    "description": "StateLeaseID identifies the associated outbox state lease.",
                     "type": "string"
                 },
                 "state_txn_id": {
@@ -3852,11 +3852,11 @@
                     "type": "string"
                 },
                 "state_fencing_token": {
-                    "description": "StateFencingToken is the fencing token for the associated workflow state lease.",
+                    "description": "StateFencingToken is the fencing token for the associated outbox state lease.",
                     "type": "integer"
                 },
                 "state_lease_id": {
-                    "description": "StateLeaseID identifies the associated workflow state lease.",
+                    "description": "StateLeaseID identifies the associated outbox state lease.",
                     "type": "string"
                 },
                 "txn_id": {

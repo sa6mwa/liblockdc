@@ -159,7 +159,7 @@ the bootstrapped Go lockd disk server enables its storage encryption.
 both key and document result modes for scan and indexed engines. The default
 matrix includes sparse/dense equality, numeric range, `in`, array membership,
 case-sensitive and case-insensitive text, date, root OR, recursive exists,
-tenant/workflow/amount predicates, narrative text, and full-document text search
+tenant/outbox/amount predicates, narrative text, and full-document text search
 over production-shaped nested documents. `make benchmark-pouch-go-acceptance`
 keeps the same 4096-document cap and runs the broader indexed comparison plus a
 bounded scan subset.

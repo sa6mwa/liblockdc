@@ -239,7 +239,7 @@ if(NOT lockdc_lua_expected_manifest STREQUAL lockdc_lua_actual_manifest)
         "expected:\n  ${lockdc_lua_expected_manifest_text}\n"
         "actual:\n  ${lockdc_lua_actual_manifest_text}")
 endif()
-string(FIND "${lockdc_lua_inner_rockspec_text}" "\"lonejson == 0.43.0-1\"" inner_lonejson_index)
+string(FIND "${lockdc_lua_inner_rockspec_text}" "\"lonejson == 0.44.0-1\"" inner_lonejson_index)
 if(inner_lonejson_index EQUAL -1)
     message(FATAL_ERROR
         "Lua source rock embedded rockspec is missing the pinned lonejson dependency\n"
@@ -252,7 +252,7 @@ foreach(required_snippet
     "version = \"${LOCKDC_VERSION}-1\""
     "url = \"git+https://github.com/sa6mwa/liblockdc.git\""
     "tag = \"v${LOCKDC_VERSION}\""
-    "\"lonejson == 0.43.0-1\""
+    "\"lonejson == 0.44.0-1\""
     "scripts/build_lua_rock.sh"
 )
     string(FIND "${lockdc_lua_rockspec_text}" "${required_snippet}" snippet_index)
@@ -299,7 +299,7 @@ execute_process(
         -DLOCKDC_SDK_PREFIX=${lockdc_release_prefix}
         -DLOCKDC_ROCK_PATH=${lockdc_lua_src_rock_path}
         -DLOCKDC_LUA_TEST_SCRIPT=${LOCKDC_ROOT}/tests/lua/test_lockdc_luarocks_smoke.lua
-        "-DLOCKDC_LUA_TEST_ENV=LOCKDC_CFLAGS_EXTRA=-I${LOCKDC_EXTERNAL_ROOT}/curl/install/include -I${LOCKDC_EXTERNAL_ROOT}/openssl/install/include -I${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include -I${LOCKDC_EXTERNAL_ROOT}/pslog/install/include -I${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include -I${LOCKDC_EXTERNAL_ROOT}/liblql/install/include -I${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include -I${LOCKDC_EXTERNAL_ROOT}/zlib/install/include|LOCKDC_LIBS_EXTRA=-L${LOCKDC_EXTERNAL_ROOT}/curl/install/lib -L${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib -L${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib -L${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib -L${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib -L${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib -L${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib -L${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/curl/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib|LD_LIBRARY_PATH=${LOCKDC_EXTERNAL_ROOT}/curl/install/lib:${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib:${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib:${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib:${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib:${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib:${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib:${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib|LONEJSON_LIBDIR=${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+        -DLOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}
         -P "${LOCKDC_ROOT}/tests/lua_rock_install_and_run_test.cmake"
     RESULT_VARIABLE lua_result
     OUTPUT_VARIABLE lua_stdout

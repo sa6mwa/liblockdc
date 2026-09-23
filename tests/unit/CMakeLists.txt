@@ -26,6 +26,8 @@ function(lc_add_unit_test target_name)
   set_tests_properties(${target_name} PROPERTIES
     LABELS "unit;cross-runtime"
     TIMEOUT 60)
+  set_property(GLOBAL APPEND PROPERTY LOCKDC_CROSS_RUNTIME_TEST_TARGETS
+    ${target_name})
   if(LOCKDC_C_TEST_ENVIRONMENT)
     set_tests_properties(${target_name} PROPERTIES
       ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
@@ -74,6 +76,8 @@ function(lc_add_cross_runtime_https_unit_test_case target_name case_macro)
   lc_add_https_unit_test_case(${target_name} ${case_macro})
   set_tests_properties(${target_name} PROPERTIES
     LABELS "unit;transport;cross-runtime")
+  set_property(GLOBAL APPEND PROPERTY LOCKDC_CROSS_RUNTIME_TEST_TARGETS
+    ${target_name})
 endfunction()
 
 lc_add_unit_test(lc_unit_streams test_lc_streams.c)
@@ -163,13 +167,13 @@ target_link_options(lc_unit_xid_atfork PRIVATE
 )
 lc_add_unit_test(lc_unit_public_mock_usage test_lc_public_mock_usage.c mock_lc_public.c)
 lc_add_unit_test(lc_unit_consumer_service test_lc_consumer_service.c)
-lc_add_unit_test(lc_unit_workflow test_lc_workflow.c
+lc_add_unit_test(lc_unit_outbox test_lc_outbox.c
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
-target_compile_definitions(lc_unit_workflow PRIVATE LOCKDC_TEST_BUILD=1)
-# The workflow suite intentionally exercises durable expiry/recovery paths.
+target_compile_definitions(lc_unit_outbox PRIVATE LOCKDC_TEST_BUILD=1)
+# The outbox suite intentionally exercises durable expiry/recovery paths.
 # Its bounded waits can exceed the generic 60-second unit cap; use the
 # project-wide 120-second default rather than a 90-second near-boundary cutoff.
-set_tests_properties(lc_unit_workflow PROPERTIES TIMEOUT 120)
+set_tests_properties(lc_unit_outbox PROPERTIES TIMEOUT 120)
 target_link_options(lc_unit_consumer_service PRIVATE
   $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_client_open>
   $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_engine_client_subscribe>
@@ -374,6 +378,10 @@ lc_add_cross_runtime_https_unit_test_case(
   LC_HTTPS_CASE_PUBLIC_LEASE_ATTACH_RETRIES_NODE_PASSIVE_AND_CLEANS_PARSER_STATE
 )
 lc_add_cross_runtime_https_unit_test_case(
+  lc_unit_transport_https_engine_request_deadline_bounds_node_passive_failover
+  LC_HTTPS_CASE_ENGINE_REQUEST_DEADLINE_BOUNDS_NODE_PASSIVE_FAILOVER
+)
+lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_public_attachment_get_preserves_i64_timestamp_headers
   LC_HTTPS_CASE_PUBLIC_ATTACHMENT_GET_PRESERVES_I64_TIMESTAMP_HEADERS
 )
@@ -541,3 +549,25 @@ lc_add_https_unit_test_case(
   lc_unit_transport_https_public_queue_nack_rejects_invalid_intent
   LC_HTTPS_CASE_PUBLIC_QUEUE_NACK_REJECTS_INVALID_INTENT
 )
+
+# Keep the QEMU build closure and CTest selection in lockstep. A test added
+# with the cross-runtime label outside the registration helpers must fail at
+# configure time instead of surfacing later as a missing executable in CTest.
+get_property(lc_cross_runtime_test_targets GLOBAL PROPERTY
+  LOCKDC_CROSS_RUNTIME_TEST_TARGETS)
+get_property(lc_registered_unit_tests DIRECTORY PROPERTY TESTS)
+foreach(lc_registered_test IN LISTS lc_registered_unit_tests)
+  get_test_property(${lc_registered_test} LABELS lc_registered_test_labels)
+  if("cross-runtime" IN_LIST lc_registered_test_labels)
+    if(NOT TARGET ${lc_registered_test})
+      message(FATAL_ERROR
+        "cross-runtime test ${lc_registered_test} has no executable target")
+    endif()
+    if(NOT lc_registered_test IN_LIST lc_cross_runtime_test_targets)
+      message(FATAL_ERROR
+        "cross-runtime test ${lc_registered_test} is missing from the QEMU build closure")
+    endif()
+  endif()
+endforeach()
+add_custom_target(lockdc_cross_runtime_tests DEPENDS
+  ${lc_cross_runtime_test_targets})

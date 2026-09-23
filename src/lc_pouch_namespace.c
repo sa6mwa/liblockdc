@@ -33,14 +33,13 @@ static int lc_pouch_namespace_parse_u64(const char *text, size_t length,
 }
 
 char *lc_pouch_namespace_path(const lc_allocator *allocator,
-                              const char *root_path,
-                              const char *namespace_name) {
+                              const char *root_path, const char *ns) {
   char *namespaces_path;
   char *escaped;
   char *path;
 
   namespaces_path = lc_pouch_path_join(allocator, root_path, "namespaces");
-  escaped = lc_pouch_path_escape_name(allocator, namespace_name);
+  escaped = lc_pouch_path_escape_name(allocator, ns);
   path = namespaces_path != NULL && escaped != NULL
              ? lc_pouch_path_join(allocator, namespaces_path, escaped)
              : NULL;
@@ -583,9 +582,10 @@ static int lc_pouch_namespace_manifest_text_append(
   return LC_OK;
 }
 
-static int lc_pouch_namespace_manifest_write(
-    const lc_allocator *allocator, const char *namespace_name,
-    lc_pouch_namespace_manifest *manifest, lc_error *error) {
+static int
+lc_pouch_namespace_manifest_write(const lc_allocator *allocator, const char *ns,
+                                  lc_pouch_namespace_manifest *manifest,
+                                  lc_error *error) {
   char line[512];
   char max_segment_id[32];
   char state_max_version[32];
@@ -622,7 +622,7 @@ static int lc_pouch_namespace_manifest_write(
                "layout=%s\nversion=%lu\nnamespace=%s\n"
                "active_segment=%s\nmax_segment_id=%s\n"
                "state_max_version=%s\n",
-               LC_POUCH_LAYOUT_NAME, LC_POUCH_LAYOUT_VERSION, namespace_name,
+               LC_POUCH_LAYOUT_NAME, LC_POUCH_LAYOUT_VERSION, ns,
                manifest->active_segment, max_segment_id, state_max_version);
   if (written < 0 || (size_t)written >= sizeof(line)) {
     lc_free_with_allocator(allocator, manifest_path);
@@ -961,8 +961,7 @@ static int lc_pouch_marker_entries_read(const lc_allocator *allocator,
 }
 
 int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
-                                     const char *root_path,
-                                     const char *namespace_name,
+                                     const char *root_path, const char *ns,
                                      lc_pouch_namespace_manifest *out,
                                      unsigned long *cleanup_deleted_count,
                                      unsigned long *cleanup_pending_count,
@@ -990,8 +989,7 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
     *cleanup_pending_count = 0UL;
   }
   memset(out, 0, sizeof(*out));
-  out->namespace_path =
-      lc_pouch_namespace_path(allocator, root_path, namespace_name);
+  out->namespace_path = lc_pouch_namespace_path(allocator, root_path, ns);
   if (out->namespace_path == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch namespace path", NULL, NULL,
@@ -1067,8 +1065,7 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
                         NULL, NULL);
   }
   if (out->repaired) {
-    rc = lc_pouch_namespace_manifest_write(allocator, namespace_name, out,
-                                           error);
+    rc = lc_pouch_namespace_manifest_write(allocator, ns, out, error);
     if (rc != LC_OK) {
       lc_free_with_allocator(allocator, scanned_snapshot);
       lc_pouch_namespace_manifest_cleanup(allocator, out);
@@ -1081,7 +1078,7 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
 }
 
 int lc_pouch_namespace_manifest_rotate(const lc_allocator *allocator,
-                                       const char *namespace_name,
+                                       const char *ns,
                                        lc_pouch_namespace_manifest *manifest,
                                        uint64_t segment_id, lc_error *error) {
   char *active_segment;
@@ -1105,8 +1102,7 @@ int lc_pouch_namespace_manifest_rotate(const lc_allocator *allocator,
   if (segment_id > manifest->max_segment_id) {
     manifest->max_segment_id = segment_id;
   }
-  rc = lc_pouch_namespace_manifest_write(allocator, namespace_name, manifest,
-                                         error);
+  rc = lc_pouch_namespace_manifest_write(allocator, ns, manifest, error);
   if (rc == LC_OK) {
     manifest->repaired = 0;
   }
@@ -1114,7 +1110,7 @@ int lc_pouch_namespace_manifest_rotate(const lc_allocator *allocator,
 }
 
 int lc_pouch_namespace_manifest_install_snapshot(
-    const lc_allocator *allocator, const char *namespace_name,
+    const lc_allocator *allocator, const char *ns,
     lc_pouch_namespace_manifest *manifest, const char *snapshot_leaf,
     uint64_t snapshot_segment_id, lc_error *error) {
   char *snapshot_copy;
@@ -1136,8 +1132,7 @@ int lc_pouch_namespace_manifest_install_snapshot(
   lc_free_with_allocator(allocator, manifest->latest_snapshot);
   manifest->latest_snapshot = snapshot_copy;
   manifest->latest_snapshot_segment_id = snapshot_segment_id;
-  rc = lc_pouch_namespace_manifest_write(allocator, namespace_name, manifest,
-                                         error);
+  rc = lc_pouch_namespace_manifest_write(allocator, ns, manifest, error);
   if (rc == LC_OK) {
     manifest->repaired = 0;
   }
@@ -1189,18 +1184,16 @@ int lc_pouch_namespace_manifest_mark_obsolete_snapshot(
 }
 
 int lc_pouch_namespace_manifest_save(const lc_allocator *allocator,
-                                     const char *namespace_name,
+                                     const char *ns,
                                      lc_pouch_namespace_manifest *manifest,
                                      lc_error *error) {
-  if (manifest == NULL || manifest->borrowed || namespace_name == NULL ||
-      namespace_name[0] == '\0') {
+  if (manifest == NULL || manifest->borrowed || ns == NULL || ns[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch namespace manifest save requires owned manifest "
                         "and namespace",
                         NULL, NULL, NULL);
   }
-  return lc_pouch_namespace_manifest_write(allocator, namespace_name, manifest,
-                                           error);
+  return lc_pouch_namespace_manifest_write(allocator, ns, manifest, error);
 }
 
 static int lc_pouch_namespace_manifest_prune_obsolete_list(
@@ -1271,7 +1264,7 @@ static int lc_pouch_namespace_manifest_prune_obsolete_list(
 }
 
 int lc_pouch_namespace_manifest_cleanup_obsolete(
-    const lc_allocator *allocator, const char *namespace_name,
+    const lc_allocator *allocator, const char *ns,
     lc_pouch_namespace_manifest *manifest, uint64_t now_unix,
     uint64_t delete_grace_seconds, unsigned long *deleted_count,
     unsigned long *pending_count, lc_error *error) {
@@ -1309,8 +1302,7 @@ int lc_pouch_namespace_manifest_cleanup_obsolete(
     return rc;
   }
   if (changed) {
-    return lc_pouch_namespace_manifest_write(allocator, namespace_name,
-                                             manifest, error);
+    return lc_pouch_namespace_manifest_write(allocator, ns, manifest, error);
   }
   return LC_OK;
 }
@@ -1660,18 +1652,16 @@ void lc_pouch_namespace_manifest_cleanup(
 }
 
 int lc_pouch_namespace_ensure_layout(const lc_allocator *allocator,
-                                     const char *root_path,
-                                     const char *namespace_name,
+                                     const char *root_path, const char *ns,
                                      lc_error *error) {
   char *namespace_path;
   int rc;
 
-  if (namespace_name == NULL || namespace_name[0] == '\0') {
+  if (ns == NULL || ns[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch namespace name is required", NULL, NULL, NULL);
   }
-  namespace_path =
-      lc_pouch_namespace_path(allocator, root_path, namespace_name);
+  namespace_path = lc_pouch_namespace_path(allocator, root_path, ns);
   if (namespace_path == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch namespace path", NULL, NULL,
@@ -1709,17 +1699,16 @@ int lc_pouch_namespace_ensure_layout(const lc_allocator *allocator,
 }
 
 int lc_pouch_namespace_ensure(const lc_allocator *allocator,
-                              const char *root_path, const char *namespace_name,
+                              const char *root_path, const char *ns,
                               lc_error *error) {
   lc_pouch_namespace_manifest manifest;
   int rc;
 
-  rc = lc_pouch_namespace_ensure_layout(allocator, root_path, namespace_name,
-                                        error);
+  rc = lc_pouch_namespace_ensure_layout(allocator, root_path, ns, error);
   if (rc == LC_OK) {
     memset(&manifest, 0, sizeof(manifest));
-    rc = lc_pouch_namespace_manifest_open(allocator, root_path, namespace_name,
-                                          &manifest, NULL, NULL, error);
+    rc = lc_pouch_namespace_manifest_open(allocator, root_path, ns, &manifest,
+                                          NULL, NULL, error);
     lc_pouch_namespace_manifest_cleanup(allocator, &manifest);
   }
   return rc;

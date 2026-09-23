@@ -29,7 +29,9 @@ lockdc_import_cache_value(CMAKE_C_COMPILER)
 lockdc_import_cache_value(CMAKE_C_FLAGS)
 lockdc_import_cache_value(CMAKE_C_FLAGS_DEBUG)
 lockdc_import_cache_value(CMAKE_BUILD_TYPE)
+lockdc_import_cache_value(CMAKE_SYSROOT)
 lockdc_import_cache_value(LOCKDC_EXTERNAL_ROOT)
+include("${LOCKDC_ROOT}/tests/bootlin_runtime_test_support.cmake")
 
 if(NOT DEFINED LOCKDC_TEST_NAME OR LOCKDC_TEST_NAME STREQUAL "")
     message(FATAL_ERROR "LOCKDC_TEST_NAME is required")
@@ -71,34 +73,31 @@ if(DEFINED LOCKDC_TARGET_ID AND NOT LOCKDC_TARGET_ID STREQUAL "")
     endif()
 
     string(REGEX MATCH "^[^-]+" lockdc_target_arch "${LOCKDC_TARGET_ID}")
-    if(LOCKDC_TARGET_ID MATCHES "musl"
-       OR (DEFINED lockdc_host_arch AND NOT lockdc_host_arch STREQUAL "" AND NOT lockdc_target_arch STREQUAL lockdc_host_arch))
+    if(DEFINED lockdc_host_arch AND NOT lockdc_host_arch STREQUAL "" AND NOT lockdc_target_arch STREQUAL lockdc_host_arch)
         set(LOCKDC_RUN_LUA_SMOKE OFF)
         set(LOCKDC_RUN_LUAROCKS_VALIDATION OFF)
     endif()
 endif()
 
 find_program(LOCKDC_BASH_BIN NAMES bash)
-find_program(LOCKDC_LUA_BIN NAMES lua5.5)
 find_program(LOCKDC_LUAROCKS_BIN NAMES luarocks)
-find_program(LOCKDC_HOST_C_COMPILER NAMES cc gcc clang)
 
 if(NOT LOCKDC_RUN_LUAROCKS_VALIDATION)
-    message(STATUS "Skipping LuaRocks validation for ${LOCKDC_TEST_NAME}: target ${LOCKDC_TARGET_ID} is not buildable/loadable with the host Lua VM")
+    message(STATUS "Skipping LuaRocks validation for ${LOCKDC_TEST_NAME}: target ${LOCKDC_TARGET_ID} is not runnable on this host")
     return()
 endif()
 
 if(NOT LOCKDC_BASH_BIN)
     message(FATAL_ERROR "bash is required for LuaRocks validation")
 endif()
-if(NOT LOCKDC_LUA_BIN)
-    message(FATAL_ERROR "lua is required for LuaRocks validation")
+if(NOT DEFINED LOCKDC_LUA_BIN OR LOCKDC_LUA_BIN STREQUAL "")
+    message(FATAL_ERROR "a project-built Bootlin Lua runner is required for LuaRocks validation")
 endif()
 if(NOT LOCKDC_LUAROCKS_BIN)
     message(FATAL_ERROR "luarocks is required for LuaRocks validation")
 endif()
-if(NOT LOCKDC_HOST_C_COMPILER)
-    message(FATAL_ERROR "a host C compiler is required for LuaRocks validation")
+if(NOT CMAKE_C_COMPILER)
+    message(FATAL_ERROR "CMAKE_C_COMPILER is required for LuaRocks validation")
 endif()
 
 if(NOT DEFINED LOCKDC_SDK_PREFIX OR LOCKDC_SDK_PREFIX STREQUAL "")
@@ -132,9 +131,9 @@ else()
 endif()
 
 set(lonejson_cache_dir "${LOCKDC_BINARY_DIR}/lua-rock-cache")
-set(lonejson_src_rock "${lonejson_cache_dir}/lonejson-0.43.0-1.src.rock")
-set(lonejson_src_rock_url "https://github.com/sa6mwa/lonejson/releases/download/v0.43.0/lonejson-0.43.0-1.src.rock")
-set(lonejson_src_rock_sha256 "ce670561dbadd5a3e7b306b5a718b117c65d4628ecf3afb0eface73654ad2358")
+set(lonejson_src_rock "${lonejson_cache_dir}/lonejson-0.44.0-1.src.rock")
+set(lonejson_src_rock_url "https://github.com/sa6mwa/lonejson/releases/download/v0.44.0/lonejson-0.44.0-1.src.rock")
+set(lonejson_src_rock_sha256 "77446df62691aa80065d3050b9be605247cb9c52d58ae0bab80ced198f92737a")
 set(lua_tree_dir "${LOCKDC_BINARY_DIR}/lua-rock-tests/${LOCKDC_TEST_NAME}/tree")
 set(lua_rock_workdir "${LOCKDC_ROOT}")
 
@@ -162,47 +161,60 @@ if(NOT EXISTS "${lonejson_src_rock}")
     endif()
 endif()
 
-set(lockdc_sanitizer_flags "${CMAKE_C_FLAGS}")
+set(lockdc_luarocks_cflags "${CMAKE_C_FLAGS} -fPIC")
 if(DEFINED CMAKE_BUILD_TYPE AND NOT CMAKE_BUILD_TYPE STREQUAL "")
     string(TOUPPER "${CMAKE_BUILD_TYPE}" lockdc_build_type_upper)
     if(lockdc_build_type_upper STREQUAL "DEBUG")
-        string(APPEND lockdc_sanitizer_flags " ${CMAKE_C_FLAGS_DEBUG}")
+        string(APPEND lockdc_luarocks_cflags " ${CMAKE_C_FLAGS_DEBUG}")
     endif()
 endif()
 
-set(lockdc_asan_runtime "")
-if(lockdc_sanitizer_flags MATCHES "(^|[ 	])-fsanitize=([^ 	,]+,)*address([, ][^ 	,]+)*($|[ 	])")
-    execute_process(
-        COMMAND "${LOCKDC_HOST_C_COMPILER}" -print-file-name=libasan.so
-        OUTPUT_VARIABLE lockdc_asan_runtime_raw
-        RESULT_VARIABLE lockdc_asan_runtime_result
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    if(lockdc_asan_runtime_result EQUAL 0
-       AND NOT lockdc_asan_runtime_raw STREQUAL ""
-       AND NOT lockdc_asan_runtime_raw STREQUAL "libasan.so")
-        set(lockdc_asan_runtime "${lockdc_asan_runtime_raw}")
+set(lockdc_cpkt_lua_incdir "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/include")
+if(NOT EXISTS "${lockdc_cpkt_lua_incdir}/lua.h")
+    message(FATAL_ERROR "c.pkt.systems Lua headers are required: ${lockdc_cpkt_lua_incdir}/lua.h")
+endif()
+lockdc_resolve_bootlin_runtime(
+    "${CMAKE_SYSROOT}"
+    "${LOCKDC_EXTERNAL_ROOT}"
+    "${LOCKDC_SDK_PREFIX}/lib"
+    lockdc_runtime_loader
+    lockdc_runtime_dirs)
+set(lockdc_lua_external_link_flags "-Wl,--disable-new-dtags")
+set(lockdc_lua_pkg_config_path
+    "${LOCKDC_SDK_PREFIX}/lib/pkgconfig:${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/pkgconfig")
+foreach(lockdc_runtime_dir IN LISTS lockdc_runtime_dirs)
+    if(NOT lockdc_runtime_dir STREQUAL "${LOCKDC_SDK_PREFIX}/lib")
+        string(APPEND lockdc_lua_external_link_flags " -Wl,-rpath,${lockdc_runtime_dir}")
     endif()
+endforeach()
+string(FIND "${lockdc_lua_external_link_flags}" "-Wl,-rpath,${LOCKDC_SDK_PREFIX}/lib"
+    lockdc_sdk_rpath_injected)
+if(NOT lockdc_sdk_rpath_injected EQUAL -1)
+    message(FATAL_ERROR
+        "Lua rock validation must not inject the selected SDK library directory; "
+        "the prefix-selected module must provide that RPATH itself")
 endif()
 
 set(lua_build_root "${lua_rock_workdir}/.luarocks-build")
 
 set(test_env
-    "CC=${LOCKDC_HOST_C_COMPILER}"
     "LOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}"
     "LOCKDC_LUAROCKS_BIN=${LOCKDC_LUAROCKS_BIN}"
     "LOCKDC_LUA_VERSION=5.5"
     "LOCKDC_LONEJSON_SRC_ROCK=${lonejson_src_rock}"
+    "LOCKDC_LUAROCKS_CC=${CMAKE_C_COMPILER}"
+    "LOCKDC_LUAROCKS_CFLAGS=${lockdc_luarocks_cflags}"
+    "LOCKDC_LUAROCKS_LUA_INCDIR=${lockdc_cpkt_lua_incdir}"
 )
-if(NOT lockdc_asan_runtime STREQUAL "")
-    list(APPEND test_env "LOCKDC_LD_PRELOAD=${lockdc_asan_runtime}")
-    list(APPEND test_env "ASAN_OPTIONS=detect_leaks=0")
-endif()
+list(APPEND test_env "ASAN_OPTIONS=detect_leaks=0")
 
 if(DEFINED LOCKDC_EXTERNAL_ROOT AND NOT LOCKDC_EXTERNAL_ROOT STREQUAL "")
     set(lockdc_lua_external_include_flags "")
-    set(lockdc_lua_external_link_flags "")
-    set(lockdc_lua_external_library_path "")
+    set(lockdc_lua_cpkt_include_flags "")
+    if(EXISTS "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/include/lua.h")
+        set(lockdc_lua_cpkt_include_flags
+            "-I${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/include")
+    endif()
     foreach(lockdc_lua_external_dep curl openssl nghttp2 pslog lonejson liblql libssh2 zlib)
         set(lockdc_lua_external_prefix "${LOCKDC_EXTERNAL_ROOT}/${lockdc_lua_external_dep}/install")
         if(EXISTS "${lockdc_lua_external_prefix}/include")
@@ -210,30 +222,31 @@ if(DEFINED LOCKDC_EXTERNAL_ROOT AND NOT LOCKDC_EXTERNAL_ROOT STREQUAL "")
         endif()
         if(EXISTS "${lockdc_lua_external_prefix}/lib")
             string(APPEND lockdc_lua_external_link_flags " -L${lockdc_lua_external_prefix}/lib -Wl,-rpath,${lockdc_lua_external_prefix}/lib")
-            if(lockdc_lua_external_library_path STREQUAL "")
-                set(lockdc_lua_external_library_path "${lockdc_lua_external_prefix}/lib")
-            else()
-                string(APPEND lockdc_lua_external_library_path ":${lockdc_lua_external_prefix}/lib")
-            endif()
+        endif()
+        if(EXISTS "${lockdc_lua_external_prefix}/lib/pkgconfig")
+            string(APPEND lockdc_lua_pkg_config_path ":${lockdc_lua_external_prefix}/lib/pkgconfig")
         endif()
     endforeach()
 
     string(STRIP "${lockdc_lua_external_include_flags}" lockdc_lua_external_include_flags)
     string(STRIP "${lockdc_lua_external_link_flags}" lockdc_lua_external_link_flags)
     if(NOT lockdc_lua_external_include_flags STREQUAL "")
+        if(NOT lockdc_lua_cpkt_include_flags STREQUAL "")
+            string(APPEND lockdc_lua_external_include_flags " ${lockdc_lua_cpkt_include_flags}")
+        endif()
         list(APPEND test_env "LOCKDC_CFLAGS_EXTRA=${lockdc_lua_external_include_flags}")
+    elseif(NOT lockdc_lua_cpkt_include_flags STREQUAL "")
+        list(APPEND test_env "LOCKDC_CFLAGS_EXTRA=${lockdc_lua_cpkt_include_flags}")
     endif()
     if(NOT lockdc_lua_external_link_flags STREQUAL "")
         list(APPEND test_env "LOCKDC_LIBS_EXTRA=${lockdc_lua_external_link_flags}")
-    endif()
-    if(NOT lockdc_lua_external_library_path STREQUAL "")
-        list(APPEND test_env "LD_LIBRARY_PATH=${lockdc_lua_external_library_path}")
     endif()
     if(EXISTS "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib")
         list(APPEND test_env
             "LONEJSON_LIBDIR=${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib")
     endif()
 endif()
+list(APPEND test_env "PKG_CONFIG_PATH=${lockdc_lua_pkg_config_path}")
 
 if(DEFINED LOCKDC_LUA_TEST_ENV AND NOT LOCKDC_LUA_TEST_ENV STREQUAL "")
     string(REPLACE "|" ";" LOCKDC_LUA_TEST_ENV_LIST "${LOCKDC_LUA_TEST_ENV}")
