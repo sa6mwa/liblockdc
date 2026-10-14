@@ -1031,7 +1031,7 @@ static int lc_pouch_index_term_posting_table_find_position(
   return low < table->count && table->items[low].term_id == term_id;
 }
 
-static int lc_pouch_index_term_posting_table_reserve(
+int lc_pouch_index_term_posting_table_reserve(
     const lc_allocator *allocator, lc_pouch_index_term_posting_table *table,
     size_t needed, lc_error *error) {
   lc_pouch_index_term_posting_entry *next_items;
@@ -1056,6 +1056,11 @@ static int lc_pouch_index_term_posting_table_reserve(
                           NULL, NULL, NULL);
     }
     next_capacity *= 2U;
+  }
+  if (next_capacity > (size_t)-1 / sizeof(*next_items)) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "pouch index term posting table exceeds local limit",
+                        NULL, NULL, NULL);
   }
   next_items = (lc_pouch_index_term_posting_entry *)lc_alloc_with_allocator(
       allocator, next_capacity * sizeof(*next_items));
@@ -1335,47 +1340,30 @@ static void lc_pouch_index_term_generation_buffer_cleanup(
   memset(buffer, 0, sizeof(*buffer));
 }
 
+static int lc_pouch_index_term_generation_size_add(size_t *length, size_t added,
+                                                   lc_error *error) {
+  if (added > (size_t)-1 - *length - 1U) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "pouch index term generation exceeds local limit", NULL,
+                        NULL, NULL);
+  }
+  *length += added;
+  return LC_OK;
+}
+
 static int lc_pouch_index_term_generation_buffer_append(
-    const lc_allocator *allocator,
     lc_pouch_index_term_generation_buffer *buffer, const char *bytes,
     size_t length, lc_error *error) {
-  char *next_bytes;
-  size_t needed;
-  size_t next_capacity;
-
   if (buffer == NULL || (bytes == NULL && length > 0U)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index term generation append requires buffer",
                         NULL, NULL, NULL);
   }
-  if (length > ((size_t)-1) - buffer->length - 1U) {
+  if (length >= buffer->capacity ||
+      buffer->length >= buffer->capacity - length) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "pouch index term generation exceeds local limit", NULL,
-                        NULL, NULL);
-  }
-  needed = buffer->length + length + 1U;
-  if (needed > buffer->capacity) {
-    next_capacity = buffer->capacity == 0U ? 256U : buffer->capacity;
-    while (next_capacity < needed) {
-      if (next_capacity > ((size_t)-1 / 2U)) {
-        return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                            "pouch index term generation exceeds local limit",
-                            NULL, NULL, NULL);
-      }
-      next_capacity *= 2U;
-    }
-    next_bytes = (char *)lc_alloc_with_allocator(allocator, next_capacity);
-    if (next_bytes == NULL) {
-      return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to allocate pouch index term generation",
-                          NULL, NULL, NULL);
-    }
-    if (buffer->bytes != NULL) {
-      memcpy(next_bytes, buffer->bytes, buffer->length);
-      lc_free_with_allocator(allocator, buffer->bytes);
-    }
-    buffer->bytes = next_bytes;
-    buffer->capacity = next_capacity;
+                        "pouch index term generation exceeds measured size",
+                        NULL, NULL, NULL);
   }
   if (length > 0U) {
     memcpy(buffer->bytes + buffer->length, bytes, length);
@@ -1386,29 +1374,36 @@ static int lc_pouch_index_term_generation_buffer_append(
 }
 
 static int lc_pouch_index_term_generation_buffer_append_u8(
-    const lc_allocator *allocator,
     lc_pouch_index_term_generation_buffer *buffer, unsigned char value,
     lc_error *error) {
-  return lc_pouch_index_term_generation_buffer_append(
-      allocator, buffer, (const char *)&value, 1U, error);
+  if (buffer->length >= buffer->capacity - 1U) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "pouch index term generation exceeds measured size",
+                        NULL, NULL, NULL);
+  }
+  buffer->bytes[buffer->length++] = (char)value;
+  return LC_OK;
 }
 
 static int lc_pouch_index_term_generation_buffer_append_u64(
-    const lc_allocator *allocator,
     lc_pouch_index_term_generation_buffer *buffer, uint64_t value,
     lc_error *error) {
-  unsigned char bytes[8];
   size_t index;
 
-  for (index = 0U; index < sizeof(bytes); ++index) {
-    bytes[index] = (unsigned char)((value >> (index * 8U)) & 0xffU);
+  if (buffer->capacity - buffer->length <= 8U) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "pouch index term generation exceeds measured size",
+                        NULL, NULL, NULL);
   }
-  return lc_pouch_index_term_generation_buffer_append(
-      allocator, buffer, (const char *)bytes, sizeof(bytes), error);
+  for (index = 0U; index < 8U; ++index) {
+    buffer->bytes[buffer->length + index] =
+        (char)((value >> (index * 8U)) & 0xffU);
+  }
+  buffer->length += 8U;
+  return LC_OK;
 }
 
 static int lc_pouch_index_term_generation_buffer_append_string(
-    const lc_allocator *allocator,
     lc_pouch_index_term_generation_buffer *buffer, const char *value,
     lc_error *error) {
   size_t length;
@@ -1421,14 +1416,13 @@ static int lc_pouch_index_term_generation_buffer_append_string(
   }
   length = strlen(value);
   rc = lc_pouch_index_term_generation_buffer_append_u64(
-      allocator, buffer, (uint64_t)length, error);
+      buffer, (uint64_t)length, error);
   if (rc == LC_OK && length > 0U) {
-    rc = lc_pouch_index_term_generation_buffer_append(allocator, buffer, value,
-                                                      length, error);
+    rc = lc_pouch_index_term_generation_buffer_append(buffer, value, length,
+                                                      error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_index_term_generation_buffer_append(allocator, buffer, "\0",
-                                                      1U, error);
+    rc = lc_pouch_index_term_generation_buffer_append(buffer, "\0", 1U, error);
   }
   return rc;
 }
@@ -1467,6 +1461,7 @@ int lc_pouch_index_term_generation_encode(
   unsigned long field_count;
   unsigned long field_id;
   size_t index;
+  size_t encoded_length;
   int dense_term_ids;
   int rc;
 
@@ -1499,19 +1494,27 @@ int lc_pouch_index_term_generation_encode(
     qsort(sorted_terms, generation->terms.count, sizeof(sorted_terms[0]),
           lc_pouch_index_term_entry_compare);
   }
+  /* Measure the unchanged binary layout before allocating. A single output
+   * buffer avoids growth copies for each of the six packed term families. */
+  encoded_length = LC_POUCH_INDEX_TERM_GENERATION_MAGIC_LEN + 7U * 8U;
+  rc = lc_pouch_index_term_generation_size_add(&encoded_length, 9U, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_index_term_generation_size_add(&encoded_length,
+                                                 strlen(generation->ns), error);
+  }
   field_count = 0UL;
   previous_field_hex = NULL;
-  for (index = 0U; index < generation->terms.count; ++index) {
+  for (index = 0U; rc == LC_OK && index < generation->terms.count; ++index) {
     const lc_pouch_index_term_entry *term;
-    char value_buffer[7];
     const char *value_hex;
+    int new_field;
 
     term = generation->terms_sorted ? &generation->terms.items[index]
                                     : &sorted_terms[index];
-    value_hex = lc_pouch_index_term_entry_value_hex(term, value_buffer);
+    value_hex = term->value_hex;
     if (term->term_id == 0UL || term->field_hex == NULL ||
-        !lc_pouch_index_term_hex_token_valid(term->field_hex) ||
-        !lc_pouch_index_term_value_hex_token_valid(value_hex) ||
+        (!term->value_is_trigram_key &&
+         !lc_pouch_index_term_value_hex_token_valid(value_hex)) ||
         !lc_pouch_index_term_value_type_valid(term->value_type) ||
         (term->value_is_trigram_key && term->trigram_key > 0xffffffUL)) {
       lc_free_with_allocator(allocator, sorted_terms);
@@ -1519,8 +1522,18 @@ int lc_pouch_index_term_generation_encode(
                           "pouch index term generation contains invalid term",
                           NULL, NULL, "pouch");
     }
-    if (previous_field_hex == NULL ||
-        strcmp(previous_field_hex, term->field_hex) != 0) {
+    new_field = previous_field_hex == NULL ||
+                (previous_field_hex != term->field_hex &&
+                 strcmp(previous_field_hex, term->field_hex) != 0);
+    if (new_field) {
+      /* Lexically grouped terms share a field token. Validate that token once
+       * instead of rescanning it for every trigram in the field. */
+      if (!lc_pouch_index_term_hex_token_valid(term->field_hex)) {
+        lc_free_with_allocator(allocator, sorted_terms);
+        return lc_error_set(error, LC_ERR_INVALID, 0L,
+                            "pouch index term generation contains invalid term",
+                            NULL, NULL, "pouch");
+      }
       if (field_count == ULONG_MAX) {
         lc_free_with_allocator(allocator, sorted_terms);
         return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -1529,35 +1542,77 @@ int lc_pouch_index_term_generation_encode(
                             NULL, NULL, "pouch");
       }
       ++field_count;
+      rc = lc_pouch_index_term_generation_size_add(&encoded_length, 9U, error);
+      if (rc == LC_OK) {
+        rc = lc_pouch_index_term_generation_size_add(
+            &encoded_length, strlen(term->field_hex), error);
+      }
       previous_field_hex = term->field_hex;
     }
+    if (rc == LC_OK) {
+      /* ID, value type, field ID, encoding, and the encoded value. */
+      rc = lc_pouch_index_term_generation_size_add(
+          &encoded_length, term->value_is_trigram_key ? 21U : 27U, error);
+    }
+    if (rc == LC_OK && !term->value_is_trigram_key) {
+      rc = lc_pouch_index_term_generation_size_add(&encoded_length,
+                                                   strlen(value_hex), error);
+    }
+  }
+  for (index = 0U; rc == LC_OK && index < generation->postings.count; ++index) {
+    const lc_pouch_index_adaptive_posting *posting;
+    size_t payload_length;
+
+    posting = &generation->postings.items[index].posting;
+    payload_length = lc_pouch_index_adaptive_posting_selected_kind(posting) ==
+                             LC_POUCH_INDEX_ADAPTIVE_POSTING_DENSE
+                         ? posting->dense.length
+                         : posting->sparse.length;
+    /* ID, kind, count, maximum document ID, and payload length. */
+    rc = lc_pouch_index_term_generation_size_add(&encoded_length, 33U, error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_index_term_generation_size_add(&encoded_length,
+                                                   payload_length, error);
+    }
+  }
+  if (rc != LC_OK) {
+    lc_free_with_allocator(allocator, sorted_terms);
+    return rc;
+  }
+  buffer.capacity = encoded_length + 1U;
+  buffer.bytes = (char *)lc_alloc_with_allocator(allocator, buffer.capacity);
+  if (buffer.bytes == NULL) {
+    lc_free_with_allocator(allocator, sorted_terms);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch index term generation", NULL,
+                        NULL, NULL);
   }
   rc = lc_pouch_index_term_generation_buffer_append(
-      allocator, &buffer, LC_POUCH_INDEX_TERM_GENERATION_MAGIC,
+      &buffer, LC_POUCH_INDEX_TERM_GENERATION_MAGIC,
       LC_POUCH_INDEX_TERM_GENERATION_MAGIC_LEN, error);
   if (rc == LC_OK) {
     rc = lc_pouch_index_term_generation_buffer_append_u64(
-        allocator, &buffer, LC_POUCH_INDEX_TERM_GENERATION_VERSION, error);
+        &buffer, LC_POUCH_INDEX_TERM_GENERATION_VERSION, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_index_term_generation_buffer_append_u64(
-        allocator, &buffer, (uint64_t)generation->index_seq, error);
+        &buffer, (uint64_t)generation->index_seq, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_index_term_generation_buffer_append_u64(
-        allocator, &buffer, (uint64_t)generation->row_count, error);
+        &buffer, (uint64_t)generation->row_count, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_index_term_generation_buffer_append_u64(
-        allocator, &buffer, (uint64_t)generation->row_hash, error);
+        &buffer, (uint64_t)generation->row_hash, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_index_term_generation_buffer_append_string(
-        allocator, &buffer, generation->ns, error);
+        &buffer, generation->ns, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_index_term_generation_buffer_append_u64(
-        allocator, &buffer, (uint64_t)field_count, error);
+        &buffer, (uint64_t)field_count, error);
   }
   previous_field_hex = NULL;
   for (index = 0U; rc == LC_OK && index < generation->terms.count; ++index) {
@@ -1566,34 +1621,35 @@ int lc_pouch_index_term_generation_encode(
     term = generation->terms_sorted ? &generation->terms.items[index]
                                     : &sorted_terms[index];
     if (previous_field_hex == NULL ||
-        strcmp(previous_field_hex, term->field_hex) != 0) {
+        (previous_field_hex != term->field_hex &&
+         strcmp(previous_field_hex, term->field_hex) != 0)) {
       rc = lc_pouch_index_term_generation_buffer_append_string(
-          allocator, &buffer, term->field_hex, error);
+          &buffer, term->field_hex, error);
       previous_field_hex = term->field_hex;
     }
   }
   if (rc == LC_OK) {
     rc = lc_pouch_index_term_generation_buffer_append_u64(
-        allocator, &buffer, (uint64_t)generation->terms.count, error);
+        &buffer, (uint64_t)generation->terms.count, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_index_term_generation_buffer_append_u64(
-        allocator, &buffer, (uint64_t)generation->postings.count, error);
+        &buffer, (uint64_t)generation->postings.count, error);
   }
   previous_field_hex = NULL;
   field_id = 0UL;
   for (index = 0U; rc == LC_OK && index < generation->terms.count; ++index) {
     const lc_pouch_index_term_entry *term;
-    char value_buffer[7];
     const char *value_hex;
     unsigned char trigram_bytes[3];
     unsigned char value_encoding;
 
     term = generation->terms_sorted ? &generation->terms.items[index]
                                     : &sorted_terms[index];
-    value_hex = lc_pouch_index_term_entry_value_hex(term, value_buffer);
+    value_hex = term->value_hex;
     if (previous_field_hex == NULL ||
-        strcmp(previous_field_hex, term->field_hex) != 0) {
+        (previous_field_hex != term->field_hex &&
+         strcmp(previous_field_hex, term->field_hex) != 0)) {
       ++field_id;
       previous_field_hex = term->field_hex;
     }
@@ -1601,30 +1657,29 @@ int lc_pouch_index_term_generation_encode(
                          ? LC_POUCH_INDEX_TERM_VALUE_TRIGRAM
                          : LC_POUCH_INDEX_TERM_VALUE_STRING;
     rc = lc_pouch_index_term_generation_buffer_append_u64(
-        allocator, &buffer, (uint64_t)term->term_id, error);
+        &buffer, (uint64_t)term->term_id, error);
     if (rc == LC_OK) {
       rc = lc_pouch_index_term_generation_buffer_append_u8(
-          allocator, &buffer, (unsigned char)term->value_type, error);
+          &buffer, (unsigned char)term->value_type, error);
     }
     if (rc == LC_OK) {
       rc = lc_pouch_index_term_generation_buffer_append_u64(
-          allocator, &buffer, (uint64_t)field_id, error);
+          &buffer, (uint64_t)field_id, error);
     }
     if (rc == LC_OK) {
       rc = lc_pouch_index_term_generation_buffer_append_u8(
-          allocator, &buffer, value_encoding, error);
+          &buffer, value_encoding, error);
     }
     if (rc == LC_OK && value_encoding == LC_POUCH_INDEX_TERM_VALUE_TRIGRAM) {
       trigram_bytes[0] = (unsigned char)((term->trigram_key >> 16U) & 0xffUL);
       trigram_bytes[1] = (unsigned char)((term->trigram_key >> 8U) & 0xffUL);
       trigram_bytes[2] = (unsigned char)(term->trigram_key & 0xffUL);
       rc = lc_pouch_index_term_generation_buffer_append(
-          allocator, &buffer, (const char *)trigram_bytes,
-          sizeof(trigram_bytes), error);
+          &buffer, (const char *)trigram_bytes, sizeof(trigram_bytes), error);
     }
     if (rc == LC_OK && value_encoding == LC_POUCH_INDEX_TERM_VALUE_STRING) {
       rc = lc_pouch_index_term_generation_buffer_append_string(
-          allocator, &buffer, value_hex, error);
+          &buffer, value_hex, error);
     }
   }
   lc_free_with_allocator(allocator, sorted_terms);
@@ -1664,30 +1719,29 @@ int lc_pouch_index_term_generation_encode(
       payload_bytes = sparse->bytes;
     }
     rc = lc_pouch_index_term_generation_buffer_append_u64(
-        allocator, &buffer, (uint64_t)entry->term_id, error);
+        &buffer, (uint64_t)entry->term_id, error);
     if (rc == LC_OK) {
       rc = lc_pouch_index_term_generation_buffer_append_u8(
-          allocator, &buffer,
+          &buffer,
           kind == LC_POUCH_INDEX_ADAPTIVE_POSTING_DENSE ? (unsigned char)'d'
                                                         : (unsigned char)'s',
           error);
     }
     if (rc == LC_OK) {
       rc = lc_pouch_index_term_generation_buffer_append_u64(
-          allocator, &buffer, (uint64_t)count, error);
+          &buffer, (uint64_t)count, error);
     }
     if (rc == LC_OK) {
       rc = lc_pouch_index_term_generation_buffer_append_u64(
-          allocator, &buffer, (uint64_t)max_doc_id, error);
+          &buffer, (uint64_t)max_doc_id, error);
     }
     if (rc == LC_OK) {
       rc = lc_pouch_index_term_generation_buffer_append_u64(
-          allocator, &buffer, (uint64_t)payload_length, error);
+          &buffer, (uint64_t)payload_length, error);
     }
     if (rc == LC_OK && payload_length > 0U) {
       rc = lc_pouch_index_term_generation_buffer_append(
-          allocator, &buffer, (const char *)payload_bytes, payload_length,
-          error);
+          &buffer, (const char *)payload_bytes, payload_length, error);
     }
   }
   lc_free_with_allocator(allocator, sorted_terms);
@@ -1697,6 +1751,7 @@ int lc_pouch_index_term_generation_encode(
   }
   *out_bytes = buffer.bytes;
   *out_length = buffer.length;
+  buffer.bytes[buffer.length] = '\0';
   return LC_OK;
 }
 

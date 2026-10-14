@@ -44,6 +44,37 @@
 #define POUCH_SHARED_ROTATION_WRITERS 12U
 #define POUCH_SHARED_ACTIVE_TAIL_WRITES 64U
 
+/* Emulate time() lagging the fine realtime clock across a second boundary. */
+static pthread_mutex_t pouch_test_coarse_time_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int pouch_test_coarse_time_enabled;
+static time_t pouch_test_coarse_time;
+time_t __real_time(time_t *out);
+time_t __wrap_time(time_t *out) {
+  time_t result;
+  int enabled;
+
+  pthread_mutex_lock(&pouch_test_coarse_time_mutex);
+  enabled = pouch_test_coarse_time_enabled;
+  result = pouch_test_coarse_time;
+  pthread_mutex_unlock(&pouch_test_coarse_time_mutex);
+  if (!enabled) {
+    return __real_time(out);
+  }
+  if (out != NULL) {
+    *out = result;
+  }
+  return result;
+}
+
+static void pouch_test_set_coarse_time(int enabled) {
+  pthread_mutex_lock(&pouch_test_coarse_time_mutex);
+  pouch_test_coarse_time_enabled = enabled;
+  if (enabled) {
+    pouch_test_coarse_time = __real_time(NULL) - 2;
+  }
+  pthread_mutex_unlock(&pouch_test_coarse_time_mutex);
+}
+
 static const char *pouch_test_executable;
 #ifdef LOCKDC_TEST_CROSS_EMULATOR_SPEC
 static char pouch_test_cross_emulator_spec[POUCH_TEST_CROSS_EMULATOR_SPEC_MAX];
@@ -2546,6 +2577,85 @@ static void test_index_term_fields_select_merged_range(void **state) {
   assert_int_equal(byte_count, 88);
 }
 
+static void
+test_index_posting_reservation_preserves_existing_entries(void **state) {
+  lc_allocator allocator;
+  lc_allocator result_allocator;
+  pouch_fail_allocator_state alloc_state;
+  lc_pouch_index_term_posting_table table;
+  lc_pouch_index_docid_set docids;
+  lc_error error;
+  unsigned long sparse_docids[2];
+  unsigned long term_id;
+  size_t previous_capacity;
+  size_t previous_calls;
+  int rc;
+
+  (void)state;
+  memset(&alloc_state, 0, sizeof(alloc_state));
+  pouch_fail_allocator_init(&allocator, &alloc_state);
+  lc_allocator_init(&result_allocator);
+  memset(&table, 0, sizeof(table));
+  memset(&docids, 0, sizeof(docids));
+  lc_error_init(&error);
+  sparse_docids[0] = 2UL;
+  sparse_docids[1] = 2000UL;
+  rc = lc_pouch_index_term_posting_table_append_sorted_unique_trusted(
+      &allocator, &table, 1UL, sparse_docids, 2U, &error);
+  assert_int_equal(rc, LC_OK);
+  previous_capacity = table.capacity;
+  alloc_state.fail_at = alloc_state.calls + 1U;
+  rc = lc_pouch_index_term_posting_table_reserve(
+      &allocator, &table, previous_capacity + 1U, &error);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_int_equal(table.count, 1U);
+  assert_int_equal(table.capacity, previous_capacity);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  alloc_state.fail_at = 0U;
+
+  rc = lc_pouch_index_term_posting_table_reserve(&allocator, &table, 1000U,
+                                                 &error);
+  assert_int_equal(rc, LC_OK);
+  previous_calls = alloc_state.calls;
+  for (term_id = 2UL; term_id <= 1000UL; ++term_id) {
+    rc = lc_pouch_index_term_posting_table_append_sorted_unique_trusted(
+        &allocator, &table, term_id, sparse_docids, 2U, &error);
+    assert_int_equal(rc, LC_OK);
+  }
+  assert_int_equal(alloc_state.calls, previous_calls);
+  assert_int_equal(table.count, 1000U);
+  /* Both the relocated original inline posting and later appended postings
+   * must decode correctly without allocating another table buffer. */
+  for (term_id = 1UL; term_id <= 1000UL; term_id += 999UL) {
+    rc = lc_pouch_index_term_posting_table_append_to_set(
+        &table, term_id, &docids, &result_allocator, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_int_equal(docids.count, 2U);
+    assert_int_equal(docids.items[0], 2UL);
+    assert_int_equal(docids.items[1], 2000UL);
+    lc_pouch_index_docid_set_cleanup(&result_allocator, &docids);
+  }
+  previous_capacity = table.capacity;
+  previous_calls = alloc_state.calls;
+  rc = lc_pouch_index_term_posting_table_reserve(
+      &allocator, &table, (size_t)-1 / sizeof(table.items[0]) + 1U, &error);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_int_equal(alloc_state.calls, previous_calls);
+  assert_int_equal(table.count, 1000U);
+  assert_int_equal(table.capacity, previous_capacity);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = lc_pouch_index_term_posting_table_reserve(&allocator, &table, (size_t)-1,
+                                                 &error);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_int_equal(alloc_state.calls, previous_calls);
+  assert_int_equal(table.count, 1000U);
+  assert_int_equal(table.capacity, previous_capacity);
+  lc_pouch_index_term_posting_table_cleanup(&allocator, &table);
+  lc_error_cleanup(&error);
+}
+
 static void test_index_term_generation_roundtrips_typed_postings(void **state) {
   lc_allocator allocator;
   lc_error error;
@@ -2737,6 +2847,197 @@ static void test_index_term_generation_sorts_trusted_terms_without_changing_ids(
   lc_pouch_index_term_generation_cleanup(&allocator, &decoded);
   lc_pouch_index_term_generation_cleanup(&allocator, &generation);
   lc_free_with_allocator(&allocator, bytes);
+  lc_error_cleanup(&error);
+}
+
+static void test_index_term_generation_encodes_large_output_once(void **state) {
+  lc_allocator allocator;
+  lc_allocator output_allocator;
+  pouch_fail_allocator_state output_state;
+  lc_pouch_index_term_generation generation;
+  lc_pouch_index_term_generation decoded;
+  lc_pouch_index_docid_set docids;
+  lc_error error;
+  char field_hex[32];
+  char value_hex[8193];
+  char *unsorted_bytes;
+  char *sorted_bytes;
+  size_t unsorted_length;
+  size_t sorted_length;
+  size_t original_payload_length;
+  size_t index;
+  size_t doc_index;
+  unsigned long term_id;
+  unsigned long found_id;
+  unsigned long dense_docids[64];
+  unsigned long sparse_docids[2];
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  memset(&output_state, 0, sizeof(output_state));
+  pouch_fail_allocator_init(&output_allocator, &output_state);
+  memset(&generation, 0, sizeof(generation));
+  memset(&decoded, 0, sizeof(decoded));
+  memset(&docids, 0, sizeof(docids));
+  lc_error_init(&error);
+  unsorted_bytes = NULL;
+  sorted_bytes = NULL;
+  unsorted_length = 0U;
+  sorted_length = 0U;
+  generation.ns = lc_strdup_with_allocator(&allocator, "docs/large-generation");
+  assert_non_null(generation.ns);
+  generation.index_seq = 77UL;
+  generation.row_count = 64UL;
+  generation.row_hash = 9876UL;
+  for (doc_index = 0U; doc_index < 64U; ++doc_index) {
+    dense_docids[doc_index] = (unsigned long)doc_index;
+  }
+  sparse_docids[0] = 2UL;
+  sparse_docids[1] = 5000UL;
+  for (index = 0U; index < 160U; ++index) {
+    assert_true(snprintf(field_hex, sizeof(field_hex), "2f%04lx",
+                         (unsigned long)(index % 8U)) > 0);
+    if (index == 159U) {
+      memset(value_hex, 'a', sizeof(value_hex) - 1U);
+      value_hex[sizeof(value_hex) - 1U] = '\0';
+    } else {
+      assert_true(snprintf(value_hex, sizeof(value_hex), "%08lx",
+                           (unsigned long)index) > 0);
+    }
+    rc = lc_pouch_index_term_table_append_trusted(&allocator, &generation.terms,
+                                                  field_hex, value_hex, 's',
+                                                  &term_id, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_pouch_index_term_posting_table_append_sorted_unique_trusted(
+        &allocator, &generation.postings, term_id,
+        index % 2U == 0U ? dense_docids : sparse_docids,
+        index % 2U == 0U ? 64U : 2U, &error);
+    assert_int_equal(rc, LC_OK);
+  }
+  rc = lc_pouch_index_term_generation_encode(
+      &generation, &allocator, &unsorted_bytes, &unsorted_length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(unsorted_length > 16384U);
+  lc_pouch_index_term_generation_sort_terms(&generation);
+  rc = lc_pouch_index_term_generation_encode(
+      &generation, &output_allocator, &sorted_bytes, &sorted_length, &error);
+  assert_int_equal(rc, LC_OK);
+  /* Sorted input needs only the returned artifact allocation, regardless of
+   * output size. No intermediate growth buffers are retained or copied. */
+  assert_int_equal(output_state.calls, 1U);
+  assert_int_equal(sorted_length, unsorted_length);
+  assert_memory_equal(sorted_bytes, unsorted_bytes, sorted_length);
+  assert_int_equal(sorted_bytes[sorted_length], '\0');
+  rc = lc_pouch_index_term_generation_decode(&allocator, sorted_bytes,
+                                             sorted_length, 77UL, 64UL, 9876UL,
+                                             &decoded, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(decoded.terms.count, 160U);
+  assert_int_equal(decoded.postings.count, 160U);
+  assert_true(lc_pouch_index_term_table_find(&decoded.terms, field_hex,
+                                             value_hex, 's', &found_id));
+  rc = lc_pouch_index_term_posting_table_append_to_set(
+      &decoded.postings, found_id, &docids, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(docids.count, 2U);
+  assert_int_equal(docids.items[0], 2UL);
+  assert_int_equal(docids.items[1], 5000UL);
+  lc_free_with_allocator(&output_allocator, sorted_bytes);
+  sorted_bytes = NULL;
+
+  output_state.fail_at = output_state.calls + 1U;
+  rc = lc_pouch_index_term_generation_encode(
+      &generation, &output_allocator, &sorted_bytes, &sorted_length, &error);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_null(sorted_bytes);
+  assert_int_equal(sorted_length, 0U);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  output_state.fail_at = 0U;
+  original_payload_length = generation.postings.items[1].posting.sparse.length;
+  generation.postings.items[1].posting.sparse.length = (size_t)-1;
+  rc = lc_pouch_index_term_generation_encode(
+      &generation, &output_allocator, &sorted_bytes, &sorted_length, &error);
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_null(sorted_bytes);
+  assert_int_equal(sorted_length, 0U);
+  generation.postings.items[1].posting.sparse.length = original_payload_length;
+
+  lc_pouch_index_docid_set_cleanup(&allocator, &docids);
+  lc_pouch_index_term_generation_cleanup(&allocator, &decoded);
+  lc_pouch_index_term_generation_cleanup(&allocator, &generation);
+  lc_free_with_allocator(&allocator, unsorted_bytes);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_index_term_generation_validates_measured_records(void **state) {
+  lc_allocator allocator;
+  lc_pouch_index_term_generation generation;
+  lc_pouch_index_term_generation decoded;
+  lc_error error;
+  unsigned long term_id;
+  unsigned long doc_id;
+  char *bytes;
+  size_t length;
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  memset(&generation, 0, sizeof(generation));
+  memset(&decoded, 0, sizeof(decoded));
+  lc_error_init(&error);
+  bytes = NULL;
+  length = 0U;
+  generation.ns = lc_strdup_with_allocator(&allocator, "docs/empty-generation");
+  assert_non_null(generation.ns);
+  rc = lc_pouch_index_term_generation_encode(&generation, &allocator, &bytes,
+                                             &length, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_term_generation_decode(&allocator, bytes, length, 0UL,
+                                             0UL, 0UL, &decoded, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(decoded.terms.count, 0U);
+  assert_int_equal(decoded.postings.count, 0U);
+  lc_free_with_allocator(&allocator, bytes);
+  bytes = NULL;
+  lc_pouch_index_term_generation_cleanup(&allocator, &decoded);
+
+  rc = lc_pouch_index_term_table_append_trigram_trusted(
+      &allocator, &generation.terms, "2f76", 0x616263UL, &term_id, &error);
+  assert_int_equal(rc, LC_OK);
+  doc_id = 1UL;
+  rc = lc_pouch_index_term_posting_table_put(&allocator, &generation.postings,
+                                             term_id, &doc_id, 1U, &error);
+  assert_int_equal(rc, LC_OK);
+  generation.terms.items[0].field_hex = "zf76";
+  rc = lc_pouch_index_term_generation_encode(&generation, &allocator, &bytes,
+                                             &length, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(bytes);
+  assert_int_equal(length, 0U);
+  generation.terms.items[0].field_hex = "2f76";
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  generation.terms.items[0].trigram_key = 0x1000000UL;
+  rc = lc_pouch_index_term_generation_encode(&generation, &allocator, &bytes,
+                                             &length, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(bytes);
+  assert_int_equal(length, 0U);
+  generation.terms.items[0].trigram_key = 0x616263UL;
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  generation.postings.items[0].term_id = term_id + 1UL;
+  rc = lc_pouch_index_term_generation_encode(&generation, &allocator, &bytes,
+                                             &length, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(bytes);
+  assert_int_equal(length, 0U);
+  lc_pouch_index_term_generation_cleanup(&allocator, &generation);
   lc_error_cleanup(&error);
 }
 
@@ -12714,6 +13015,67 @@ test_shared_pouch_minted_lease_release_does_not_deadlock(void **state) {
   lc_update_res_cleanup(&update_res);
   lc_client_close(client);
   cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static int teardown_pouch_coarse_clock(void **state) {
+  (void)state;
+  pouch_test_set_coarse_time(0);
+  return 0;
+}
+
+static void
+test_client_queue_uses_fine_realtime_at_second_boundary(void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_message *message;
+  lc_error error;
+  char *crypto_key;
+  char root[512];
+  unsigned int mode;
+  int rc;
+
+  (void)state;
+  crypto_key = NULL;
+  lc_error_init(&error);
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  for (mode = 0U; mode < 4U; ++mode) {
+    client = NULL;
+    source = NULL;
+    message = NULL;
+    lc_enqueue_req_init(&enqueue_req);
+    memset(&enqueue_res, 0, sizeof(enqueue_res));
+    lc_dequeue_req_init(&dequeue_req);
+    make_root("queue-second-boundary", root, sizeof(root));
+    pouch_open_transform_client(root, mode, crypto_key, &client, &error);
+    /* Keep the production clock path: no injected queue clock or polling. */
+    assert_null(lc_pouch_test_queue_clock_gettime);
+    pouch_test_set_coarse_time(1);
+    enqueue_req.queue = "immediate";
+    rc = lc_source_from_memory("boundary", strlen("boundary"), &source, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+    lc_source_close(source);
+    assert_int_equal(rc, LC_OK);
+    dequeue_req.queue = "immediate";
+    dequeue_req.owner = "boundary-worker";
+    rc = client->dequeue(client, &dequeue_req, &message, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_non_null(message);
+    assert_string_equal(message->message_id, enqueue_res.message_id);
+    assert_int_equal(message->attempts, 1);
+    rc = message->ack(message, &error);
+    assert_int_equal(rc, LC_OK);
+    pouch_test_set_coarse_time(0);
+    lc_enqueue_res_cleanup(&enqueue_res);
+    lc_client_close(client);
+    cleanup_root(root);
+  }
+  lc_free_with_allocator(NULL, crypto_key);
   lc_error_cleanup(&error);
 }
 
@@ -36381,9 +36743,13 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_index_term_keys_build_exact_for_field_rejects_invalid_values),
       cmocka_unit_test(test_index_term_fields_select_merged_range),
+      cmocka_unit_test(
+          test_index_posting_reservation_preserves_existing_entries),
       cmocka_unit_test(test_index_term_generation_roundtrips_typed_postings),
       cmocka_unit_test(
           test_index_term_generation_sorts_trusted_terms_without_changing_ids),
+      cmocka_unit_test(test_index_term_generation_encodes_large_output_once),
+      cmocka_unit_test(test_index_term_generation_validates_measured_records),
       cmocka_unit_test(test_index_term_generation_reads_v1_artifact),
       cmocka_unit_test(
           test_index_term_generation_rejects_corrupt_identity_and_payload),
@@ -36413,6 +36779,9 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_pouch_public_api_rejects_reserved_lockd_namespaces),
       cmocka_unit_test(test_pouch_tc_surface_persists_local_single_node_state),
       cmocka_unit_test(test_public_core_contract_roundtrips_all_transforms),
+      cmocka_unit_test_teardown(
+          test_client_queue_uses_fine_realtime_at_second_boundary,
+          teardown_pouch_coarse_clock),
       cmocka_unit_test(test_state_etag_is_plaintext_sha256_content_hash),
       cmocka_unit_test(
           test_shared_pouch_minted_lease_release_does_not_deadlock),

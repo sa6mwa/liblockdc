@@ -9975,8 +9975,8 @@ static int lc_pouch_query_index_exact_generation_accumulator_flush(
     lc_pouch_query_index_exact_generation_accumulator *accumulator,
     lc_pouch_index_term_generation *generation, lc_error *error) {
   size_t index;
+  size_t posting_count;
   int rc;
-  (void)allocator;
 
   if (accumulator == NULL || generation == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -9984,10 +9984,25 @@ static int lc_pouch_query_index_exact_generation_accumulator_flush(
                         "and generation",
                         NULL, NULL, NULL);
   }
-  rc = LC_OK;
-  for (index = 0U; rc == LC_OK && index < accumulator->count; ++index) {
+  posting_count = 0U;
+  for (index = 0U; index < accumulator->count; ++index) {
     lc_pouch_query_index_exact_generation_docids_normalize(
         &accumulator->items[index]);
+    if (accumulator->items[index].docids.count > 0U) {
+      ++posting_count;
+    }
+  }
+  if (posting_count > (size_t)-1 - generation->postings.count) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "pouch index posting count exceeds local limit", NULL,
+                        NULL, "pouch");
+  }
+  /* The immutable batch size is known. Reserve once before appending instead
+   * of repeatedly moving and rebinding the same posting entries. */
+  rc = lc_pouch_index_term_posting_table_reserve(
+      allocator, &generation->postings,
+      generation->postings.count + posting_count, error);
+  for (index = 0U; rc == LC_OK && index < accumulator->count; ++index) {
     rc = lc_pouch_query_index_exact_generation_flush_posting(
         allocator, generation, accumulator->items[index].term_id,
         &accumulator->items[index].docids, error);

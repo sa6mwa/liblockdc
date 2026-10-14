@@ -64,7 +64,7 @@ POUCH_GO_PARITY_BENCHTIME ?= 1x
 # sub-millisecond filesystem and scheduler outliers in the release comparison.
 POUCH_GO_PARITY_COUNT ?= 5
 POUCH_GO_PARITY_MIN_SPEEDUP ?= 1.25
-POUCH_GO_PARITY_TIMEOUT ?= 15m
+POUCH_GO_PARITY_TIMEOUT ?= 90s
 POUCH_GO_DURABLE_BENCH ?= Production(PouchDurablePT|PouchDurableCrypto|LockdDiskDurableNoCrypto|LockdDiskDurableCrypto)
 POUCH_GO_DURABLE_BENCHTIME ?= 1x
 POUCH_GO_DURABLE_COUNT ?= 1
@@ -73,7 +73,7 @@ POUCH_GO_DURABLE_UPDATES ?= 2
 POUCH_GO_DURABLE_PAYLOAD_BYTES ?= 131072
 POUCH_GO_DURABLE_SEGMENT_TARGET_BYTES ?= 16384
 POUCH_GO_DURABLE_TIMEOUT ?= 90s
-POUCH_GO_DURABLE_GATE_TIMEOUT ?= 3m
+POUCH_GO_DURABLE_GATE_TIMEOUT ?= 90s
 POUCH_GO_CORE_SOAK_BENCH ?= ProductionPouch(PT|Crypto|Compression|CryptoCompression)
 POUCH_GO_CORE_SOAK_BENCHTIME ?= 4x
 POUCH_GO_CORE_SOAK_ROWS ?= 96
@@ -135,9 +135,9 @@ OUTBOX_BENCH_PAGE_CAPACITY ?= 16
 OUTBOX_BENCH_TIMEOUT ?= 10m
 OUTBOX_BENCH_HARDENING_DISPATCHERS ?= 2
 OUTBOX_COMMAND_WAIT_BENCH_ROWS ?= 64
-OUTBOX_BENCH_REMOTE_ENDPOINT ?= https://localhost:19441
-OUTBOX_BENCH_REMOTE_FAILOVER_ENDPOINT ?= https://localhost:19442
-OUTBOX_BENCH_REMOTE_BUNDLE ?= $(ROOT)/devenv/volumes/lockd-disk-a-config/client.pem
+OUTBOX_BENCH_REMOTE_ENDPOINT ?=
+OUTBOX_BENCH_REMOTE_FAILOVER_ENDPOINT ?=
+OUTBOX_BENCH_REMOTE_BUNDLE ?= $(ROOT)/build/devenv/credentials/disk/client.pem
 # This is a deliberately manual diagnostic campaign, not a release lane. Its
 # workloads are sized to remain below the 10 GiB local-disk budget while still
 # exercising multi-segment shared-root recovery with large attachments.
@@ -227,16 +227,18 @@ help:
 		'make test               Run the fast native ASan/UBSan Debug functional suite.' \
 		'make test-host          Run the pinned Bootlin host-executable GNU and musl release suites.' \
 		'make test-cross         Run the non-host cross release suites.' \
-		'make test-e2e           Run the mTLS/libcurl e2e preset against the local devenv.' \
+		'make test-e2e           Start/reuse the local stack, run mTLS/libcurl E2E, then verify teardown.' \
 		'make test-install-tree  Validate CMake and pkg-config consumers against the installed native SDK.' \
 		'make example-smoke-local Run local-service example smoke tests.' \
 		'make test-all           Run the complete native Debug and local-service E2E functional suite.' \
 		'make test-coverage      Run the coverage preset test suite and build the coverage report.' \
-		'make dev-up             Start the local compose-backed devenv and wait for generated client bundles.' \
-		'make dev-down           Stop and remove the local compose-backed devenv.' \
-		'make dev-reset          Stop the local compose-backed devenv and remove its generated state.' \
-		'make dev-ps             Show the local compose-backed devenv service state.' \
-		'make dev-logs           Show local compose-backed devenv logs.' \
+		'make dev-up             Start the local Podman Kube devenv and wait for generated client bundles.' \
+		'make dev-down           Stop and remove the local Podman Kube devenv.' \
+		'make dev-reset          Stop the local Podman Kube devenv and remove its generated state.' \
+		'make dev-ps             Show the local Podman Kube devenv service state.' \
+		'make dev-logs           Show local Podman Kube devenv logs.' \
+		'  Host port overrides: LOCKDC_DISK_A_PORT, LOCKDC_DISK_B_PORT, LOCKDC_S3_PORT, LOCKDC_MINIO_API_PORT, LOCKDC_MINIO_CONSOLE_PORT.' \
+		'  LOCKDC_E2E_KEEP_DEVSERVICES=1 explicitly keeps the E2E stack for debugging.' \
 		'make format             Run clang-format over repo .c and .h files.' \
 		'make finalize-slice     Run formatting plus the narrow debug test gate for an ordinary implementation slice.' \
 		'make valgrind           Build the valgrind preset and run the native Valgrind Memcheck subset.' \
@@ -257,7 +259,7 @@ help:
 		'make benchmark-outbox-command-wait Measure terminal command-receipt reads through the Pouch wait_command observer.' \
 		'make benchmark-outbox-hardening Run persisted-index, compacted, and shared-writer Pouch outbox reconciliation hardening cases serially.' \
 		'make worst-case-scenario Run the standalone 30-minute/10-GiB Pouch diagnostic campaign; never a test, prerelease, or release dependency.' \
-		'make benchmark-outbox-remote Start the compose devenv, then run the same outbox reconciliation workload through the disk lockd endpoint.' \
+		'make benchmark-outbox-remote Start the Podman Kube devenv, then run the same outbox reconciliation workload through the disk lockd endpoint.' \
 		'make benchmark-pouch-routine Prepare benchmark artifacts, then run all bounded native phase probes plus production and shared-root concurrency comparison in at most $(POUCH_GO_ROUTINE_TIMEOUT).' \
 		'make benchmark-pouch-perf-index-docs Run the isolated public-API indexed narrative document query perf case.' \
 		'make benchmark-pouch-perf-full-text-keys Run the isolated public-API full-text key query perf case.' \
@@ -368,6 +370,7 @@ build-fuzz:
 	$(TIMED) build-fuzz $(MAKE_RECURSE) __build-fuzz
 
 __build-fuzz: __deps-debug
+	bash ./scripts/cpkt-aflpp.sh ensure
 	$(CMAKE) --preset $(FUZZ_PRESET)
 	$(CMAKE) --build --preset $(FUZZ_PRESET)
 
@@ -437,31 +440,31 @@ dev-up:
 	$(TIMED) dev-up $(MAKE_RECURSE) __dev-up
 
 __dev-up:
-	bash ./scripts/dev-up.sh
+	bash ./scripts/devenv.sh up
 
 dev-down:
 	$(TIMED) dev-down $(MAKE_RECURSE) __dev-down
 
 __dev-down:
-	bash ./scripts/dev-down.sh
+	bash ./scripts/devenv.sh down
 
 dev-reset:
 	$(TIMED) dev-reset $(MAKE_RECURSE) __dev-reset
 
 __dev-reset:
-	bash ./scripts/dev-reset.sh
+	bash ./scripts/devenv.sh reset
 
 dev-ps:
 	$(TIMED) dev-ps $(MAKE_RECURSE) __dev-ps
 
 __dev-ps:
-	bash ./scripts/dev-ps.sh
+	bash ./scripts/devenv.sh ps
 
 dev-logs:
 	$(TIMED) dev-logs $(MAKE_RECURSE) __dev-logs
 
 __dev-logs:
-	bash ./scripts/dev-logs.sh
+	bash ./scripts/devenv.sh logs
 
 format:
 	$(TIMED) format $(MAKE_RECURSE) __format
@@ -730,8 +733,9 @@ benchmark-outbox-remote: __benchmark-outbox-prepare
 	  '$(OUTBOX_BENCH_TIMEOUT)' $(MAKE_RECURSE) __benchmark-outbox-remote
 
 __benchmark-outbox-remote:
-	LOCKDC_OUTBOX_BENCH_ENDPOINT='$(OUTBOX_BENCH_REMOTE_ENDPOINT)' \
-	  LOCKDC_OUTBOX_BENCH_FAILOVER_ENDPOINT='$(OUTBOX_BENCH_REMOTE_FAILOVER_ENDPOINT)' \
+	. '$(ROOT)/build/devenv/env.sh'; \
+	  LOCKDC_OUTBOX_BENCH_ENDPOINT="$(if $(OUTBOX_BENCH_REMOTE_ENDPOINT),$(OUTBOX_BENCH_REMOTE_ENDPOINT),$${LOCKDC_E2E_DISK_ENDPOINT})" \
+	  LOCKDC_OUTBOX_BENCH_FAILOVER_ENDPOINT="$(if $(OUTBOX_BENCH_REMOTE_FAILOVER_ENDPOINT),$(OUTBOX_BENCH_REMOTE_FAILOVER_ENDPOINT),$${LOCKDC_FALLBACK_URL})" \
 	  LOCKDC_OUTBOX_BENCH_CLIENT_BUNDLE='$(OUTBOX_BENCH_REMOTE_BUNDLE)' \
 	  LOCKDC_OUTBOX_BENCH_TERMINAL_ROWS='$(OUTBOX_BENCH_TERMINAL_ROWS)' \
 	  LOCKDC_OUTBOX_BENCH_CHURN_UPDATES='$(OUTBOX_BENCH_CHURN_UPDATES)' \
@@ -772,7 +776,10 @@ __benchmark-pouch-routine:
 	$(MAKE_RECURSE) __benchmark-pouch-go-production-bounded POUCH_GO_BOUNDED_PRODUCTION_TIMEOUT='$(POUCH_GO_ROUTINE_TIMEOUT)'
 	$(MAKE_RECURSE) __benchmark-pouch-go-concurrency POUCH_GO_CONCURRENCY_TIMEOUT='$(POUCH_GO_ROUTINE_TIMEOUT)' POUCH_GO_CONCURRENCY_WRITERS='$(POUCH_GO_ROUTINE_CONCURRENCY_WRITERS)' POUCH_GO_CONCURRENCY_WRITES_PER_WRITER='$(POUCH_GO_ROUTINE_CONCURRENCY_WRITES_PER_WRITER)' POUCH_GO_CONCURRENCY_PAYLOAD_BYTES='$(POUCH_GO_ROUTINE_CONCURRENCY_PAYLOAD_BYTES)'
 
-__benchmark-pouch-go-prepare: __build-x86_64-linux-gnu-release
+__benchmark-pouch-go-prepare:
+	bash ./scripts/deps.sh deps-x86_64-linux-gnu
+	$(CMAKE) --preset $(X86_64_GNU_RELEASE_PRESET)
+	$(CMAKE) --build --preset $(X86_64_GNU_RELEASE_PRESET) --target lc_static
 	mkdir -p $(ROOT)/.cache/go/pkg/mod $(ROOT)/.cache/go/build $(ROOT)/.cache/go/bin
 	cd benchmark && $(LOCKD_GO_CACHE_ENV) $(GO) mod download
 	cd $(LOCKD_GO_MODULE_DIR) && $(LOCKD_GO_CACHE_ENV) $(GO) build -o $(ROOT)/.cache/go/bin/lockd ./cmd/lockd
@@ -932,6 +939,10 @@ __benchmark-pouch-go-parity-gate:
 	    POUCH_GO_PRODUCTION_BENCHTIME='$(POUCH_GO_PARITY_BENCHTIME)' \
 	    POUCH_GO_BENCH_COUNT='$(POUCH_GO_PARITY_COUNT)' \
 	    POUCH_GO_PRODUCTION_TIMEOUT='$(POUCH_GO_PARITY_TIMEOUT)' \
+	    POUCH_GO_PRODUCTION_ROWS='$(POUCH_GO_BOUNDED_PRODUCTION_ROWS)' \
+	    POUCH_GO_PRODUCTION_UPDATES='$(POUCH_GO_BOUNDED_PRODUCTION_UPDATES)' \
+	    POUCH_GO_PRODUCTION_PAYLOAD_BYTES='$(POUCH_GO_BOUNDED_PRODUCTION_PAYLOAD_BYTES)' \
+	    POUCH_GO_PRODUCTION_SEGMENT_TARGET_BYTES='$(POUCH_GO_BOUNDED_PRODUCTION_SEGMENT_TARGET_BYTES)' \
 	    2>&1 | tee $(ROOT)/build/pouch-go-production.bench.txt
 	python3 scripts/pouch_benchmark_parity.py --min-speedup $(POUCH_GO_PARITY_MIN_SPEEDUP) $(ROOT)/build/pouch-go-production.bench.txt
 

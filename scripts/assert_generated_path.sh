@@ -57,7 +57,7 @@ lockdc_assert_generated_path() {
         return 1
     fi
     case "$canonical_candidate" in
-        "$canonical_repo_root"/build|"$canonical_repo_root"/build/*|"$canonical_repo_root"/dist|"$canonical_repo_root"/dist/*|"$canonical_repo_root"/.cache|"$canonical_repo_root"/.cache/*|"$canonical_repo_root"/.luarocks-build|"$canonical_repo_root"/.luarocks-build/*|"$canonical_repo_root"/devenv/volumes|"$canonical_repo_root"/devenv/volumes/*)
+        "$canonical_repo_root"/build|"$canonical_repo_root"/build/*|"$canonical_repo_root"/dist|"$canonical_repo_root"/dist/*|"$canonical_repo_root"/.cache|"$canonical_repo_root"/.cache/*|"$canonical_repo_root"/.luarocks-build|"$canonical_repo_root"/.luarocks-build/*)
             return 0
             ;;
         *)

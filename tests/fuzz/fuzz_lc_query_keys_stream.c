@@ -30,8 +30,7 @@ typedef struct fuzz_query_keys_reader {
 } fuzz_query_keys_reader;
 
 static const lonejson_field fuzz_query_keys_response_fields[] = {
-    LONEJSON_FIELD_STRING_ARRAY_STREAM_REQ(fuzz_query_keys_response, keys,
-                                           "keys"),
+    LONEJSON_FIELD_STRING_ARRAY_STREAM(fuzz_query_keys_response, keys, "keys"),
     LONEJSON_FIELD_STRING_ALLOC(fuzz_query_keys_response, cursor, "cursor"),
     LONEJSON_FIELD_U64_PRESENT(fuzz_query_keys_response, index_seq,
                                has_index_seq, "index_seq"),

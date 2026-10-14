@@ -55,7 +55,6 @@ lockdc_prune_install_tree("${LOCKDC_EXTERNAL_ROOT}/zlib/install")
 lockdc_prune_install_tree("${LOCKDC_EXTERNAL_ROOT}/openssl/install")
 lockdc_prune_install_tree("${LOCKDC_EXTERNAL_ROOT}/nghttp2/install")
 lockdc_prune_runtime_dependency_tree("${LOCKDC_EXTERNAL_ROOT}/pslog/install")
-lockdc_prune_install_tree("${LOCKDC_EXTERNAL_ROOT}/cmocka/install")
 lockdc_prune_runtime_dependency_tree("${LOCKDC_EXTERNAL_ROOT}/lonejson/install")
 lockdc_prune_runtime_dependency_tree("${LOCKDC_EXTERNAL_ROOT}/liblql/install")
 

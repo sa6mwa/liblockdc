@@ -402,6 +402,11 @@ int lc_pouch_index_term_table_append_trigram_trusted(
     unsigned long *term_id_out, lc_error *error);
 void lc_pouch_index_term_posting_table_cleanup(
     const lc_allocator *allocator, lc_pouch_index_term_posting_table *table);
+/** Reserves posting slots without changing existing entries. Inline posting
+ * storage is rebound after relocation; failure leaves the table intact. */
+int lc_pouch_index_term_posting_table_reserve(
+    const lc_allocator *allocator, lc_pouch_index_term_posting_table *table,
+    size_t needed, lc_error *error);
 int lc_pouch_index_term_posting_table_put(
     const lc_allocator *allocator, lc_pouch_index_term_posting_table *table,
     unsigned long term_id, const unsigned long *doc_ids, size_t doc_id_count,

@@ -1965,7 +1965,9 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
       lockdc_bench_add_ns(&out->update_ns, phase_start, lockdc_bench_now_ns());
       out->writes++;
       out->bytes += (long)json_len;
-      if ((out->writes % 128L) == 0L) {
+      /* Keep intermediate publication observable in bounded profiles too. */
+      if ((out->writes % 128L) == 0L ||
+          out->writes == rows * updates_per_key / 2L) {
         phase = "flush intermediate";
         phase_start = lockdc_bench_now_ns();
         rc = lockdc_bench_flush(client, &error);

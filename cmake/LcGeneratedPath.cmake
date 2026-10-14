@@ -34,7 +34,7 @@ function(lockdc_assert_generated_path root candidate)
         message(FATAL_ERROR "refusing generated path outside repository root: ${candidate}")
     endif()
     if(NOT lockdc_generated_relative MATCHES
-       "^(build|dist|\\.cache|\\.luarocks-build|devenv/volumes)(/|$)")
+       "^(build|dist|\\.cache|\\.luarocks-build)(/|$)")
         message(FATAL_ERROR "refusing path outside generated roots: ${candidate}")
     endif()
 endfunction()

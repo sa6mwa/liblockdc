@@ -6,14 +6,7 @@ set(curl_root "${LOCKDC_EXTERNAL_ROOT}/curl/install")
 set(curl_header "${curl_root}/include/curl/curl.h")
 set(curl_static_archive "${curl_root}/lib/libcurl.a")
 set(curl_shared_library "${curl_root}/lib/libcurl.so")
-set(cpkt_manifest "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/share/c.pkt.systems/manifest.txt")
-
-function(assert_literal_contains text needle description)
-    string(FIND "${text}" "${needle}" found_at)
-    if(found_at EQUAL -1)
-        message(FATAL_ERROR "curl dependency metadata is missing ${description}")
-    endif()
-endfunction()
+set(cpkt_manifest "${LOCKDC_EXTERNAL_ROOT}/cpkt/install/share/cpkt/packages/core.json")
 
 foreach(path IN ITEMS "${curl_header}" "${curl_static_archive}" "${curl_shared_library}")
     if(NOT EXISTS "${path}")
@@ -31,19 +24,18 @@ foreach(path IN ITEMS
 endforeach()
 
 if(NOT EXISTS "${cpkt_manifest}")
-    message(FATAL_ERROR "missing c.pkt.systems manifest: ${cpkt_manifest}")
+    message(FATAL_ERROR "missing cpkt manifest: ${cpkt_manifest}")
 endif()
 
 foreach(path IN ITEMS
-    "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/CURL/CURLConfig.cmake"
-    "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/pkgconfig/libcurl.pc")
+    "${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/CURL/CURLConfig.cmake"
+    "${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/pkgconfig/libcurl.pc")
     if(NOT EXISTS "${path}")
         message(FATAL_ERROR "missing curl dependency consumer metadata: ${path}")
     endif()
 endforeach()
 
-file(READ "${cpkt_manifest}" cpkt_manifest_text)
-assert_literal_contains("${cpkt_manifest_text}" "bundle_version=0.10.0" "c.pkt.systems bundle version")
-assert_literal_contains("${cpkt_manifest_text}" "curl_version=8.22.0" "curl bundle version")
-assert_literal_contains("${cpkt_manifest_text}" "libssh2_version=1.11.1" "libssh2 bundle version")
-assert_literal_contains("${cpkt_manifest_text}" "nghttp2_version=1.70.0" "nghttp2 bundle version")
+include("${CMAKE_CURRENT_LIST_DIR}/cpkt_manifest_test_support.cmake")
+lockdc_assert_cpkt_component("${cpkt_manifest}" curl "8.22.0")
+lockdc_assert_cpkt_component("${cpkt_manifest}" libssh2 "1.11.1")
+lockdc_assert_cpkt_component("${cpkt_manifest}" nghttp2 "1.70.0")

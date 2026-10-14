@@ -33,10 +33,15 @@ The failure message points at the matching GitHub release tarball URL for the
 current rock version and tells the user to set `LOCKDC_PREFIX` to the extracted
 SDK root or make `lockdc.pc` visible to `pkg-config`.
 
+GNU/Linux shared SDKs and the Lua extension modules linked against them require
+glibc 2.43 or newer. Use a Lua 5.5 runtime compatible with the SDK's target and
+libc; repository checks and examples use the project-built Bootlin runner
+described below.
+
 The generated rockspec expects:
 
 - package `lockdc`
-- `lonejson == 0.44.0-1`
+- `lonejson == 0.45.0-1`
 - Lua `>= 5.5, < 5.6`
 
 The lifecycle executes and packages only Lua 5.5. Each release includes the
@@ -44,6 +49,9 @@ standalone `liblockdc-lua-<version>.tar.gz` source package, the rendered
 `lockdc-<version>-1.rockspec`, and the matching `.src.rock`. The source rock
 embeds that exact standalone archive; all three artifacts are checksum-listed
 and recursively privacy-scanned before release.
+The Lua source payload includes this API guide, the Pouch/outbox retention and
+integration guides it links to, and the Lua examples. Its explicit release
+manifest excludes investigation notes and generated service state.
 
 For local examples and test modules, use the `LOCKDC_LUA_BIN` value printed by
 `make lua-env`. It names the project-built Lua 5.5 runner linked to the selected
@@ -69,7 +77,7 @@ The LuaRocks path export supplies the installed `lonejson` module as well as
 interpreter: prefix-selected `lockdc` modules carry their SDK runtime path and
 the lifecycle checks them through the Bootlin runner.
 
-The C SDK is pinned to the matching `lonejson 0.44.0` native dependency for
+The C SDK is pinned to the matching `lonejson 0.45.0` native dependency for
 mapped state load/save and internal typed JSON parsing. The Lua rock declares
 the corresponding Lua-facing `lonejson` rock so Lua JSON behavior and the C
 SDK JSON boundary stay in the same release line.
@@ -97,6 +105,13 @@ default. Embedded hosts that need a shared framework logger should create the
 `lc_client` in C with their own `pslog_logger *` and wrap that client for Lua
 through a host-side integration layer.
 
+The host owns that base logger and its output context. Keep them alive until
+the client and all derived handles, consumer services, and dispatchers have
+closed. SDK workers may log concurrently from native threads; output callbacks
+must support that execution context and must not enter a Lua state owned by
+another thread. The consumer callback's logger is borrowed and must not be
+destroyed by the handler.
+
 ## Public entrypoints
 
 The top-level module is:
@@ -121,6 +136,11 @@ Primary entrypoints:
 - `lockdc.pouch_crypto_generate_key()`
 - `lockdc.pouch_crypto_default_key_file()`
 - `lockdc.pouch_crypto_generate_key_file(path[, overwrite])`
+
+`lockdc.ERR_PENDING` means a durable transaction decision exists but participant
+application remains incomplete. Preserve its transaction ID and continue recovery;
+do not rerun application work or change the decision. See
+[the XA participation contract](xa.md) for PostgreSQL coordination and recovery.
 
 Primary handle types:
 
@@ -340,6 +360,10 @@ foreign effect. Use `outbox:dispatcher()` only in the dedicated worker or
 service domain that owns delivery. The complete lifecycle and host-integration
 contract is in [the outbox dispatch architecture](outbox-dispatch-architecture.md).
 
+Outbox support is currently Pouch-only. Remote lockd outboxes are unsupported
+because of [defects in the remote lockd server](inbox-outbox.md#remote-lockd):
+implicit-XA enrollment and public-state isolation.
+
 ```lua
 -- Request/producer domain: this is safe to construct without creating a
 -- background dispatcher.
@@ -347,6 +371,7 @@ local outbox = assert(client:new_outbox({
   namespace = "orders-outbox",
   owner = "orders-api",
   max_attempts = 100,
+  recovery_interval_seconds = 5,
 }))
 
 local txn = assert(outbox:append({
@@ -378,6 +403,7 @@ local worker_outbox = assert(worker_client:new_outbox({
   namespace = "orders-outbox",
   owner = "orders-api",
   max_attempts = 100,
+  recovery_interval_seconds = 5,
 }))
 local dispatcher = assert(worker_outbox:dispatcher())
 assert(dispatcher:run({
@@ -392,6 +418,10 @@ assert(dispatcher:run({
 
 `headers_json` is the durable serialized header envelope. Build it explicitly
 with `lockdc.encode_json` when the headers originate as a Lua table.
+The example selects a positive recovery cadence for shared-root delivery:
+Pouch defaults to no routine recovery scans, so a completely lost cross-process
+wake otherwise needs explicit reconciliation. Both processes use identical
+outbox settings, including all retention policies.
 `outbox:accept_inbox(message)`
 returns `nil, result` on an accepted duplicate, where `result.duplicate` is
 true. Otherwise it returns a `OutboxTransaction` and `result.accepted` is
@@ -416,6 +446,26 @@ on a remote lockd outbox is rejected rather than silently ignored. Automatic
 reclamation requires a live dispatcher and is exact-key maintenance, never a
 query or a side effect of `dispatcher:next()`. See
 [Pouch dead-letter retention](pouch-dead-letter-retention.md).
+
+Completed outbox envelopes, accepted inbox receipts, and completed/failed
+command receipts each default to 30 days independently. Configure
+`completed_retention_seconds`, `inbox_retention_seconds`, and
+`command_retention_seconds`: zero selects the default, positive values select
+seconds, and `-1` disables that type's reclamation, including its count cap.
+`completed_max_count`, `inbox_max_count`, and `command_max_count` are optional
+caps; zero, omission, or `false` leaves them unbounded. A positive cap permits
+early reclamation. Reclamation ends duplicate/idempotency protection and command
+status lookup; owned command results are removed with the receipt. Pending
+work is excluded. These settings are Pouch-only and require a live dispatcher;
+see [Pouch terminal receipt retention](pouch-terminal-retention.md).
+
+Numeric retention counts must be non-negative integers representable by the C
+`size_t` and Lua integer types; `true`, negative and fractional values are
+rejected. Durations must fit a C `long`. Time-policy changes affect future
+terminal transitions only, and records created before retention or while a type
+was disabled are not backfilled. Receipt reads, `wait_command()`, and
+`resume_command_by_id()` return their normal missing-record errors after
+cleanup; they never recreate the receipt.
 
 Outbox receivers are explicit and owned. Parent acceptance and append
 operations return a new `OutboxTransaction` only when they created fresh
@@ -445,7 +495,8 @@ durable work:
   or status reference to the caller.
   Invalid or unknown command IDs use the normal Lua failure result
   `nil, error, code`; only a timeout has a pending receipt to return.
-- `outbox:transaction(fn)` provides a lazy transaction proxy. Its first
+- `outbox:transaction(fn)` provides a transaction proxy with a stable reserved
+  global ID; its first
   participant may be `acquire`, `append`, `accept_inbox`, or
   `accept_command`; it commits on normal callback return and rolls back on an
   error or any failed staged operation, even when the callback elects to
@@ -458,7 +509,7 @@ durable work:
   receipt even when the callback does not return it; a duplicate before a
   domain participant is enrolled may still allow an independently fresh
   outbox receipt to commit.
-- `outbox:begin()` returns the same lazy transaction receiver for advanced
+- `outbox:begin()` returns the same transaction receiver for advanced
   code that needs explicit commit/rollback control. Its first participant has
   the same domain-acquire/command/inbox/outbox choices as `transaction(fn)`.
 - `outbox:dispatcher()` acquires the compatible local dispatcher. It has no
@@ -489,7 +540,7 @@ durable work:
   The first consumption choice binds a dispatcher to either raw pull or its
   caller Lua state's handler table; the other mode, another handler table, or
   another Lua state is rejected. A handler cannot recursively call `pump()` or
-  `run()` on that dispatcher (including through an alias), nor call blocking
+  `run()` on that dispatcher (including through an alias), nor call
   `stop()` or `wait()` while it owns the active job. It must return its terminal
   outcome before another job is consumed. Neither should run foreign effects in
   an HTTP route.
@@ -497,7 +548,9 @@ durable work:
   commit receipt as a bounded, process-local latency hint. It does not query
   the durable namespace; duplicate, unavailable, and overflowed hints are
   repaired by ordinary durable reconciliation.
-- `dispatcher:stats()` returns process-local counters;
+- `dispatcher:stats()` returns process-local counters, including
+  `terminal_reclaims` (retired markers, including stale ones) and
+  `terminal_reclaim_failures` (cleanup failures preserved for retry);
   `dispatcher:reconcile()` requests durable recovery.
 - `dispatcher:replay_dead_letter(outbox_key)` returns one dead-lettered effect
   to pending; `dispatcher:delete_dead_letter(outbox_key)` permanently deletes
@@ -507,6 +560,12 @@ durable work:
 - `outbox:close()` releases only the producer. `dispatcher:stop()` and
   `dispatcher:wait()` control the explicitly acquired dispatcher;
   `dispatcher:close()` releases a handle and does not stop shared work.
+  Stop/wait accept omitted or `-1` for an indefinite wait, `0` for a poll, or
+  positive milliseconds for a bounded wait. A timeout leaves it stopping;
+  `wait()` before stop is invalid. Finish or close jobs already returned to Lua
+  before waiting indefinitely: claim expiry alone does not close their local
+  handles. All stop/wait calls, including polls, are rejected inside a dispatcher
+  handler.
 - `client:close()` stops and joins private dispatcher workers but does not wait
   for a job already returned to Lua. That job remains usable for its terminal
   decision or close; stopped dispatcher wrappers reject new work and remain
@@ -585,6 +644,11 @@ Use `lockdc.xid_new()` to mint a valid transaction identifier for raw XA work.
 `target_backend_hash`. Each participant has `namespace`, `key`, and an
 optional `backend_hash`. `txn_replay` accepts `{ txn_id = ... }`. Decision and
 replay results include `txn_id`, `state`, and `correlation_id`.
+When C supplies a result while returning an error such as `ERR_PENDING`, Lua
+returns `nil, error, code, result`. That fourth value preserves the recorded
+decision; pending participant application does not erase it or imply rollback.
+An expired raw prepare can become rollback on replay. Managed undecided work
+requires fenced coordinator recovery; raw replay does not take over its owner.
 
 ```lua
 local txn_id = assert(lockdc.xid_new())
@@ -608,6 +672,12 @@ C requests and results directly to Lua tables. Terms must fit Lua's
 non-negative integer range. Result lists are ordinary dense Lua arrays in
 `endpoints` or `backends`.
 
+For Pouch, `tc_leader()` retains the last fencing `term` when `leader_id` is
+empty. Replacing an expired or released leader requires a strictly newer term;
+only the live current owner can reacquire its same term. Release and client
+restart do not reset this high-water mark. Check the Lua integer limit before
+advancing a term.
+
 `client:query_keys(req, handler)` has the same query request fields as
 `client:query`, but sends each decoded key directly to Lua instead of materializing
 the query response. Selectors are optional, so `engine = "scan"` with a cursor
@@ -616,6 +686,8 @@ or a table with a required `chunk(bytes)` function and optional `begin()` and
 `finish()` hooks.
 A key can arrive in multiple chunks, including inside a UTF-8 sequence; collect
 only the current key between `begin` and `finish` if complete strings are needed.
+An empty result, including a server response that omits `keys`, succeeds without
+invoking the key handlers.
 
 `client:acquire_for_update(req, handler)` wraps the common acquire, snapshot,
 update, release outbox. The handler receives a context table with:
@@ -786,3 +858,193 @@ Pedagogic examples live in:
 See also:
 
 - [examples/lua/README.md](../examples/lua/README.md)
+
+## Optional PostgreSQL participation
+
+The base Lua module and core libraries require no PostgreSQL client or cpktdb
+SDK. The optional [C participant provider](postgres.md) uses explicit application
+linkage and registration; enabling its CMake build does not load it into Lua.
+`client:xa_coordinator(config)` exposes the existing C coordinator. Its config
+accepts `owner_ttl_seconds`, `completed_retention_seconds` and
+`completed_max_records`, with the [C defaults and retention rules](postgres.md).
+The receiver has `register_start(name, configuration, deadline_ms)`,
+`begin_start(deadline_ms)`, `adopt_start(id, deadline_ms)`,
+`recover_start(id, deadline_ms)`, `retire_start(deadline_ms)` and
+`close_blocking()`. A C embedding explicitly registers linked drivers through
+[`lc_lua_xa_register_driver`](../src/lua/lockdc_lua.h); missing registration
+returns `nil, error, ERR_INVALID`. Configuration conversion is protected against
+Lua exceptions and its temporary is released before native operation advancement.
+
+Every start returns an operation. `advance()` returns `false` while pending,
+`true` on success, or `nil, error, code` on terminal failure. A terminal
+`ERR_PENDING` is distinguishable through `result().done`. `wait()` returns
+`{fd, events, deadline_ms}` for the application's event loop; READ=1, WRITE=2,
+and the deadline is absolute monotonic milliseconds. Start's nil/zero deadline
+selects 30 seconds; -1 means infinity. The facade performs no readiness polling.
+`result()` copies IDs, `done`, numeric `decision` (0 undecided, 1 commit, 2 abort),
+`applied`, `sqlstate` and `retired_count`. IDs are available before durable work.
+Close an operation with `close_blocking()` after observing/taking its result;
+`cancel()` preserves potentially prepared work for recovery.
+
+Successful begin/recovery transfers a transaction once through
+`operation:take_transaction()`. It has `id()`, `enroll_start(resource_id,
+deadline_ms)`, `acquire_start(request, deadline_ms)`, `renew_start(deadline_ms)`,
+`commit_start(deadline_ms)`, `rollback_start(deadline_ms)`, `borrow(resource_id)`
+and `close_blocking()`. Managed acquire supplies the transaction ID and rejects
+blocking waits; use `operation:take_lease()` once to obtain its lease. The request
+accepts the ordinary boolean `if_not_exists` create-only precondition; an existing
+record rejects acquisition without changing its contents. Operations
+and child handles retain native owners even after a parent wrapper closes. GC
+releases references and hands unfinished work to recovery; it never invents COMMIT.
+Managed acquisition requires namespace, key and owner strings without NUL bytes.
+
+For mixed outbox work, bind `outbox:begin()` with
+`box:bind_xa(transaction)`. An empty box selects the managed ID; existing work
+requires adopting `box:id()` first. Stage through the same box and drive
+`box:commit_start()` or `rollback_start()`. After applied COMMIT, ordinary
+`box:commit()` collects receipts once. It returns pending before application.
+Caught staged errors still mark the Lua transaction rollback-only; failures from
+direct XA operations or any bound box block commit through every other box.
+Callback-owned boxes reject terminal starts until their transaction callback
+has returned. Ordinary
+unbound Lua outbox callbacks retain their existing behavior.
+
+A borrow's `view()` exposes identity/kind metadata, and `close()` releases its
+reference. C query adapters consume either facade or core borrow values through
+[`lc_lua_xa_borrow_retain`](../src/lua/lockdc_lua.h), retain the token while results
+or callbacks use it, and revalidate with `lc_xa_borrow_view` before every native
+access. No native pointer or private userdata layout is part of the Lua API.
+Prepare requires every borrower/result to release protocol ownership first.
+
+`coordinator:transaction(callback, await)` owns begin, the final decision and
+cleanup. Supply an await function explicitly or as the coordinator config's
+`await` field. It must drive the passed operation to completion using its
+readiness/deadline; it may yield. The helper verifies the actual C terminal status
+before trusting a scheduler return. Callback-owned transactions offer `enroll(id)`,
+`acquire(request)`, `renew()`, `outbox(producer)` and
+`with_connection(id, adapter, callback)` conveniences. They use that same await
+function and perform no polling inside the library. Each adapter factory receives
+a checked borrow and returns a session with `close()`; its query/cursor methods
+use the public C interop token. The helper closes the session and borrow before
+prepare, including when a callback throws or yields. The query adapter owns
+protocol/result cleanup, rejects local transaction helpers, and never frees the
+borrowed native connection.
+
+Normal return commits and returns `{txn_id, decision, applied, outboxes, values}`;
+`values` is a packed callback-result array preserving nils. Callback exceptions
+or caught failures from staged work choose ABORT. The callback cannot manually
+commit, roll back or close its managed transaction, vote through a returned
+lease's `release()`, or start a terminal operation through a bound outbox.
+These lease guards and rollback-only tracking also apply to leases transferred
+through `acquire_start()` and `operation:take_lease()` inside the callback.
+Failure returns
+`nil, error, code, state`, preserving the global ID and last observed decision/
+application evidence. An await exception after COMMIT keeps COMMIT evidence;
+pending or cancelled phase-two work goes to recovery without SQL replay.
+Caught failures in reentrant staging calls remain rollback-only, including
+calls through another outbox bound to the same transaction. Successful nesting
+does not prevent COMMIT.
+
+The optional `lockdc.postgres` module registers `"postgres"` when required:
+`local postgres = require("lockdc.postgres")`. Use `postgres.register(name)` for
+an additional explicit alias. Build it with PostgreSQL and Lua bindings enabled,
+or install the separate `lockdc-postgres` rock alongside the matching `lockdc`
+rock. The rock uses the public shared provider target and requires
+`LOCKDC_PREFIX`, `LOCKDC_POSTGRES_PREFIX` and `CMAKE_PREFIX_PATH` to select the
+core/provider, compatible cpkt/cpktdb SDKs, and the core's public dependency SDKs
+(pslog, lonejson and liblql). A cross compiler additionally
+selects `LOCKDC_LUA_TOOLCHAIN_FILE`; headers come from the selected Lua 5.5 SDK.
+
+Fully static embeddings compile the facade sources, link the public static
+provider target, and preload `luaopen_lockdc_postgres` with `luaL_requiref`.
+The [`lc_lua_postgres_register`](../src/lua/lockdc_postgres_lua.h) C helper also
+remains available. This capability is absent from the base core module; requiring
+the optional module is explicit Lua module loading, not core plugin discovery.
+Provider callbacks and query adapters must remain linked for all retained tokens.
+Its
+configuration is `{resource_id=stable_id, connection_info=connection_string}`;
+the helper copies both strings and does not log connection configuration.
+An embedding can replace the default registry name by supplying another name.
+
+### Public resource and branch parity
+
+The Lua receivers delegate to the public C XA APIs, including PostgreSQL's
+native primitives through its `lc_xa_driver` table. There is one resource and
+branch interface for both manual and managed use; provider kind is metadata.
+
+| Receiver | Public operations |
+| --- | --- |
+| `client:xa_store()` | Open the retained Pouch journal |
+| Journal | `resource(name, configuration)`, `retain()`, `register_blocking(record)`, `enroll_blocking(record)`, `progress_blocking(record)`, `read_blocking(txn_id, branch_id)`, `close()` |
+| Resource | `identity()`, `register_start(deadline_ms)`, `branch_start(txn_id, deadline_ms)`, `recover_start(txn_id, branch_id, commit, deadline_ms)`, `status_start(txn_id, branch_id, deadline_ms)`, `inventory_start(after_gid, limit, deadline_ms)`, `close_blocking()` |
+| Branch | `record()`, `prepare_start(deadline_ms)`, `resolve_start(commit, deadline_ms)`, `borrow()`, `close()` |
+| Resource operation | `advance()`, `wait()`, `result()`, `cancel()`, `take_branch()`, `close_blocking()` |
+
+`coordinator:resource(resource_id)` exposes its registered manual receiver and
+retains the coordinator. Closing that view releases the reference, never closes
+the coordinator-owned native resource independently. Do not overlap manual and
+managed operations on the same resource. Independently opened resources retain
+their journal, and operations retain their resource/branch, even after a parent
+Lua receiver closes. C retain/release for coordinator, transaction and borrow
+lifetimes is represented by Lua owner references and checked C adapter retention;
+callback tables and opaque native/thread pointers remain C interop.
+
+Manual operations use the same advance/wait/deadline and error conventions as
+managed operations. `result().done` is false while pending; terminal results
+contain `record`, `native_outcome`, `sqlstate`, `row_count` and copied `rows`.
+Successful branch start/recovery transfers a branch exactly once using
+`take_branch()`. The creating operation retains a native lifetime pin even after
+transfer: closing the branch first defers destruction until operation close.
+An independently opened resource's close prevents new starts/borrows through its
+retained branches; existing operations can finish and branches remain inspectable
+and closeable. A coordinator-owned resource view instead releases its coordinator
+reference, as described above.
+Inventory is GID-ordered, limited to 64 rows, and diagnostic:
+nil/zero limit selects 64; the last returned GID is the next cursor. It never
+authorizes resolving foreign prepared transactions. Resolution's `commit`
+argument is boolean and must agree with the immutable global decision.
+Enroll every member before the first prepare seals the participant set. Prepare
+requires all borrows/results to close. Raw implicit XA can decide after all YES
+votes; an unvoted Pouch member holds the decision while application work stages.
+
+Branch records copy every public C field. GID, full XID, system/database/role
+identities are strings; `prepared_observed` is boolean; phase/evidence and
+completion time are integers. Journal reads additionally return the authoritative
+coordinator YES flag; `prepared_observed` only records native preparation evidence,
+including observation after ABORT without a YES vote.
+`borrow:view()` provides size, ABI/kind and resource/transaction/branch IDs,
+plus exact decimal `owner_process` and `generation` strings; native connection
+and opaque thread identity are available only to the public checked C adapter.
+`XA_*` constants mirror the C phases, evidence sources, outcomes and decisions.
+The optional PostgreSQL module additionally exports its C `OUTCOME_*` constants.
+Journal writes are explicitly blocking and retain the C validation/fencing rules.
+SQL execution belongs to the query adapter, as in the C API.
+Raw `txn_prepare`, `txn_commit`, `txn_rollback` and `txn_replay` require an exact
+string `txn_id` without NUL bytes; malformed identities return `ERR_INVALID`.
+
+```lua
+local coordinator = assert(client:xa_coordinator({ await = event_loop.await }))
+-- Drive/close register_start("postgres", config) for each stable resource ID.
+local receipt, err, code, state = coordinator:transaction(function(tx)
+  assert(tx:enroll(first_id))
+  assert(tx:enroll(second_id))
+  local box = assert(tx:outbox(outbox))
+  local order = assert(box:acquire({ namespace = "orders", key = order_key }))
+  assert(order:update(order_bytes))
+  tx:with_connection(first_id, query_adapter.borrow, function(sql)
+    sql:execute(statement, parameters)
+  end)
+  tx:with_connection(second_id, query_adapter.borrow, function(sql)
+    sql:execute(other_statement, other_parameters)
+  end)
+  assert(box:append(effect_identity, payload_source))
+end)
+```
+
+The [compiled embedding](../tests/integration/test_lua_postgres_xa.c) uses only
+this public bridge and cpktdb's public C89 facade. Its explicitly named blocking
+query helper is a bounded test adapter; application adapters may expose their
+own asynchronous operations. The [Lua E2E](../tests/lua/test_lockdc_postgres_xa.lua)
+checks real COMMIT and ABORT outcomes across two independent PostgreSQL instances,
+Pouch and outbox, including SQL failure and borrow release/GC. An ordinary
+unbound Lua outbox transaction does not enroll SQL automatically.

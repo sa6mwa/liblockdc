@@ -3,14 +3,7 @@ if(NOT DEFINED LOCKDC_EXTERNAL_ROOT OR LOCKDC_EXTERNAL_ROOT STREQUAL "")
 endif()
 
 set(libssh2_root "${LOCKDC_EXTERNAL_ROOT}/libssh2/install")
-set(cpkt_manifest "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/share/c.pkt.systems/manifest.txt")
-
-function(assert_literal_contains text needle description)
-    string(FIND "${text}" "${needle}" found_at)
-    if(found_at EQUAL -1)
-        message(FATAL_ERROR "libssh2 dependency metadata is missing ${description}")
-    endif()
-endfunction()
+set(cpkt_manifest "${LOCKDC_EXTERNAL_ROOT}/cpkt/install/share/cpkt/packages/core.json")
 
 foreach(path IN ITEMS
     "${libssh2_root}/lib/libssh2.a"
@@ -31,18 +24,17 @@ foreach(path IN ITEMS
 endforeach()
 
 if(NOT EXISTS "${cpkt_manifest}")
-    message(FATAL_ERROR "missing c.pkt.systems manifest: ${cpkt_manifest}")
+    message(FATAL_ERROR "missing cpkt manifest: ${cpkt_manifest}")
 endif()
 
 foreach(path IN ITEMS
-    "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/libssh2/libssh2-config.cmake"
-    "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/pkgconfig/libssh2.pc")
+    "${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/libssh2/libssh2-config.cmake"
+    "${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/pkgconfig/libssh2.pc")
     if(NOT EXISTS "${path}")
         message(FATAL_ERROR "missing libssh2 dependency consumer metadata: ${path}")
     endif()
 endforeach()
 
-file(READ "${cpkt_manifest}" cpkt_manifest_text)
-assert_literal_contains("${cpkt_manifest_text}" "bundle_version=0.10.0" "c.pkt.systems bundle version")
-assert_literal_contains("${cpkt_manifest_text}" "libssh2_version=1.11.1" "libssh2 bundle version")
-assert_literal_contains("${cpkt_manifest_text}" "zlib_version=1.3.2" "zlib bundle version")
+include("${CMAKE_CURRENT_LIST_DIR}/cpkt_manifest_test_support.cmake")
+lockdc_assert_cpkt_component("${cpkt_manifest}" libssh2 "1.11.1")
+lockdc_assert_cpkt_component("${cpkt_manifest}" zlib "1.3.2")

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <cmocka.h>
@@ -352,6 +353,36 @@ static void test_close_helpers_accept_null(void **state) {
   lc_sink_close(NULL);
 }
 
+static void test_file_source_opens_sparse_file_above_two_gib(void **state) {
+  char path[] = STREAMS_TMP_PREFIX "large-XXXXXX";
+  char bytes[4];
+  lc_source *source = NULL;
+  lc_error error;
+  int fd;
+
+  (void)state;
+  lc_error_init(&error);
+  fd = lc_test_tmp_mkstemp(path, STREAMS_TMP_PREFIX);
+  assert_true(fd >= 0);
+  assert_int_equal(write(fd, "wide", sizeof(bytes)), sizeof(bytes));
+  /* A sparse extent exercises large-file open without writing or reading
+   * gigabytes. The public source must still consume only the requested chunk.
+   */
+  assert_int_equal(ftruncate(fd, (off_t)(((uint64_t)1U << 31) + 4U)), 0);
+  assert_int_equal(close(fd), 0);
+  assert_int_equal(lc_source_from_file(path, &source, &error), LC_OK);
+  assert_int_equal(source->read(source, bytes, sizeof(bytes), &error),
+                   sizeof(bytes));
+  assert_memory_equal(bytes, "wide", sizeof(bytes));
+  assert_int_equal(source->reset(source, &error), LC_OK);
+  assert_int_equal(source->read(source, bytes, sizeof(bytes), &error),
+                   sizeof(bytes));
+  assert_memory_equal(bytes, "wide", sizeof(bytes));
+  lc_source_close(source);
+  lc_test_tmp_cleanup_path(path, STREAMS_TMP_PREFIX);
+  lc_error_cleanup(&error);
+}
+
 static void test_copy_rejects_null_endpoints(void **state) {
   lc_error error;
   int rc;
@@ -460,6 +491,7 @@ int main(void) {
       cmocka_unit_test(test_source_from_memory_can_reset_and_reread),
       cmocka_unit_test(test_source_constructors_reject_invalid_arguments),
       cmocka_unit_test(test_file_constructors_report_transport_failures),
+      cmocka_unit_test(test_file_source_opens_sparse_file_above_two_gib),
       cmocka_unit_test(test_close_helpers_accept_null),
       cmocka_unit_test(test_copy_rejects_null_endpoints),
       cmocka_unit_test(test_sink_memory_bytes_rejects_invalid_arguments),

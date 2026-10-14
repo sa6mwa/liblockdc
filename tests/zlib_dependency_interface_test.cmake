@@ -6,7 +6,7 @@ set(zlib_root "${LOCKDC_EXTERNAL_ROOT}/zlib/install")
 set(zlib_static_archive "${zlib_root}/lib/libz.a")
 set(zlib_shared_library "${zlib_root}/lib/libz.so")
 set(zlib_header "${zlib_root}/include/zlib.h")
-set(cpkt_manifest "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/share/c.pkt.systems/manifest.txt")
+set(cpkt_manifest "${LOCKDC_EXTERNAL_ROOT}/cpkt/install/share/cpkt/packages/core.json")
 
 foreach(path IN ITEMS
     "${zlib_static_archive}"
@@ -27,23 +27,16 @@ foreach(path IN ITEMS
 endforeach()
 
 if(NOT EXISTS "${cpkt_manifest}")
-    message(FATAL_ERROR "missing c.pkt.systems manifest: ${cpkt_manifest}")
+    message(FATAL_ERROR "missing cpkt manifest: ${cpkt_manifest}")
 endif()
 
 foreach(path IN ITEMS
-    "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/zlib/ZLIBConfig.cmake"
-    "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/pkgconfig/zlib.pc")
+    "${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/zlib/ZLIBConfig.cmake"
+    "${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/pkgconfig/zlib.pc")
     if(NOT EXISTS "${path}")
         message(FATAL_ERROR "missing zlib dependency consumer metadata: ${path}")
     endif()
 endforeach()
 
-file(READ "${cpkt_manifest}" cpkt_manifest_text)
-string(FIND "${cpkt_manifest_text}" "bundle_version=0.10.0" bundle_version_at)
-if(bundle_version_at EQUAL -1)
-    message(FATAL_ERROR "c.pkt.systems manifest is missing bundle version")
-endif()
-string(FIND "${cpkt_manifest_text}" "zlib_version=1.3.2" zlib_version_at)
-if(zlib_version_at EQUAL -1)
-    message(FATAL_ERROR "c.pkt.systems manifest is missing zlib version")
-endif()
+include("${CMAKE_CURRENT_LIST_DIR}/cpkt_manifest_test_support.cmake")
+lockdc_assert_cpkt_component("${cpkt_manifest}" zlib "1.3.2")

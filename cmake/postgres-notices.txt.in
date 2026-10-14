@@ -1,0 +1,17 @@
+liblockdc_postgres is licensed under the project MIT license.
+It uses the public cpktdb PostgreSQL C89 facade and official dependency targets.
+
+Consumed SDK releases: cpkt @LOCKDC_CPKT_VERSION@, cpktdb @LOCKDC_CPKTDB_VERSION@.
+Original SDK manifests in sdk-provenance/ record their build and payload identity.
+Their complete inventories describe those SDK bundles, including components this
+provider does not link. They are provenance, not this provider's runtime inventory.
+
+The PostgreSQL closure includes the cpktdb facade, PostgreSQL/libpq and its OAuth
+support, plus cpkt OpenLDAP, SASL/Kerberos, curl, OpenSSL and zlib dependencies.
+Curl also uses cpkt nghttp2 and libssh2. Native and system closures are supplied
+by their official imported targets for the selected platform. This installation
+does not copy third-party library payloads; supply the independent cpkt/cpktdb
+SDKs and preserve their licenses when redistributing a linked application.
+
+Complete upstream license texts are provided in licenses/. Core liblockdc and
+its additional dependencies retain their separate existing notices/provenance.

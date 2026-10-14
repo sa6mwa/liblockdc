@@ -401,8 +401,14 @@ typedef struct lc_client_config {
    * limit cannot strand its library-owned durable envelopes.
    */
   size_t http_json_response_limit_bytes;
-  /** Borrowed client logger used for SDK diagnostics. Defaults to a no-op
-   * logger. */
+  /**
+   * Borrowed client logger used for SDK diagnostics. `NULL` selects a no-op
+   * logger. The caller owns the base logger and its output context; keep them
+   * alive until the client and all derived handles, consumer services, and
+   * dispatchers have closed. SDK worker threads may emit concurrently, so
+   * custom output callbacks must be thread-safe and callable from native
+   * threads.
+   */
   pslog_logger *logger;
   /** Disables the automatic `sys=client.lockd` logger field derived by the
    * SDK when non-zero. */
@@ -469,7 +475,10 @@ enum {
   /** The lockd server rejected an otherwise valid request. */
   LC_ERR_SERVER = 5,
   /** A caller-supplied local wait deadline elapsed before completion. */
-  LC_ERR_TIMEOUT = 6
+  LC_ERR_TIMEOUT = 6,
+  /** A durable transaction is awaiting participant completion. Preserve its
+   * identity and decision; retry recovery rather than application work. */
+  LC_ERR_PENDING = 7
 };
 
 /**
@@ -1036,7 +1045,9 @@ typedef struct lc_txn_replay_req {
   const char *txn_id;
 } lc_txn_replay_req;
 
-/** Result returned by transaction replay. */
+/** Result returned by transaction replay. Pouch also populates this result on
+ * LC_ERR_PENDING: state is the durable decision and participant application
+ * remains incomplete. Release owned fields with the normal cleanup function. */
 typedef struct lc_txn_replay_res {
   /** Replayed transaction identifier. */
   char *txn_id;
@@ -1065,7 +1076,11 @@ typedef struct lc_txn_decision_req {
   const char *target_backend_hash;
 } lc_txn_decision_req;
 
-/** Result returned by TC prepare, commit, or rollback. */
+/** Result returned by TC prepare, commit, or rollback. Pouch also populates
+ * this result on LC_ERR_PENDING after recording a durable decision. The
+ * decision must not be reversed because participant application is pending.
+ * Release owned fields with lc_txn_decision_res_cleanup(), including on errors.
+ */
 typedef struct lc_txn_decision_res {
   /** Decided transaction identifier. */
   char *txn_id;
@@ -1075,13 +1090,460 @@ typedef struct lc_txn_decision_res {
   char *correlation_id;
 } lc_txn_decision_res;
 
+/** Durable external branch identity and progress. No SQL or credentials belong
+ * in this record. Native XIDs, system identifiers and OIDs are exact decimal
+ * text; do not narrow them.
+ * .txns owns the decision; this descriptor only records participant progress.
+ */
+typedef struct lc_xa_branch_record {
+  char txn_id[LC_XID_STRING_SIZE];
+  char resource_id[LC_XID_STRING_SIZE];
+  char branch_id[LC_XID_STRING_SIZE];
+  char gid[200];
+  char full_xid[21];
+  char system_id[21];
+  char database_oid[11];
+  char role_oid[11];
+  /** Durable native prepare acknowledgement/inventory observation. This is
+   * distinct from a coordinator YES vote, including recovery after ABORT. */
+  unsigned char prepared_observed;
+  unsigned char phase;    /**< LC_XA_ENROLLED through LC_XA_ABORTED. */
+  unsigned char evidence; /**< LC_XA_EVIDENCE_* completion source. */
+  lc_unix_seconds
+      completed_at_unix; /**< Zero until proven branch completion. */
+} lc_xa_branch_record;
+
+enum {
+  LC_XA_ENROLLED = 0,
+  LC_XA_PREPARE_SENT = 1,
+  LC_XA_PREPARED = 2,
+  LC_XA_COMMIT_SENT = 3,
+  LC_XA_ROLLBACK_SENT = 4,
+  LC_XA_COMMITTED = 5,
+  LC_XA_ABORTED = 6
+};
+enum {
+  LC_XA_EVIDENCE_NONE = 0,
+  LC_XA_EVIDENCE_ACK = 1,
+  LC_XA_EVIDENCE_NATIVE = 2,
+  LC_XA_EVIDENCE_RECONCILED = 3
+};
+
+/** Retained Pouch coordinator journal, independent of native client libraries.
+ * Calls are explicitly blocking and serialized by the coordinator. Asynchronous
+ * providers call them from a durability worker, never their socket owner loop.
+ * Close only after all worker calls finish; the journal pins its root client.
+ */
+typedef struct lc_xa_store lc_xa_store;
+/** Opens a local Pouch journal and retains its client. Clears *out on error. */
+int lc_xa_store_open(lc_client *client, lc_xa_store **out, lc_error *error);
+/** Retain a journal for an explicitly linked provider. Close releases a
+ * reference after its worker has stopped using the journal. */
+int lc_xa_store_retain(lc_xa_store *store, lc_error *error);
+/** Consumes one journal reference; wait for its worker calls before release. */
+void lc_xa_store_close(lc_xa_store *store);
+/** Register stable resource/backend identity in .xa. Re-registration must
+ * match. Only resource_id, system_id, database_oid and role_oid are used. */
+int lc_xa_store_register_blocking(lc_xa_store *store,
+                                  const lc_xa_branch_record *identity,
+                                  lc_error *error);
+/** Durably enrolls an exact branch identity before native prepare. Enrollment
+ * must precede sealing; an existing branch cannot change native identity. */
+int lc_xa_store_enroll_blocking(lc_xa_store *store,
+                                const lc_xa_branch_record *branch,
+                                lc_error *error);
+/** Validates phase-two direction against the immutable global decision before
+ * recording transmission intent. A provider must not send before this succeeds.
+ */
+int lc_xa_store_progress_blocking(lc_xa_store *store,
+                                  const lc_xa_branch_record *branch,
+                                  lc_error *error);
+/** Copies the descriptor and, when non-NULL, its authoritative coordinator YES
+ * vote into prepared. prepared_observed is separate native preparation
+ * evidence; an observed prepare after ABORT does not create a YES vote. */
+int lc_xa_store_read_blocking(lc_xa_store *store, const char *txn_id,
+                              const char *branch_id, lc_xa_branch_record *out,
+                              int *prepared, lc_error *error);
+
+/** Public adapter view. Initialize before use; size/version are checked before
+ * a provider callback. The native connection is borrowed, never owned. Retain
+ * the borrow while a cursor/result/callback uses this view and validate again
+ * before native access. owner_thread is an opaque identity, not pthread data.
+ */
+typedef struct lc_xa_connection_view {
+  size_t size;
+  unsigned long abi_version;
+  int resource_kind;
+  char resource_id[LC_XID_STRING_SIZE];
+  char txn_id[LC_XID_STRING_SIZE];
+  char branch_id[LC_XID_STRING_SIZE];
+  void *native_connection;
+  uint64_t owner_process;
+  const void *owner_thread;
+  uint64_t generation;
+} lc_xa_connection_view;
+
+#define LC_XA_CONNECTION_VIEW_ABI 1UL
+enum { LC_XA_RESOURCE_POSTGRES = 1 };
+typedef struct lc_xa_borrow lc_xa_borrow;
+/** Provider callbacks stay linked while any borrow reference lives. view must
+ * validate its retained native token before returning a pointer. release
+ * reclaims context, including on protocol error; it never transfers native
+ * ownership to an adapter. No callback is invoked from a foreign thread/fork.
+ */
+typedef struct lc_xa_borrow_callbacks {
+  int (*view)(void *context, lc_xa_connection_view *out, lc_error *error);
+  int (*release)(void *context, lc_error *error);
+} lc_xa_borrow_callbacks;
+/** Zeroes the view and sets the supported size/ABI before validation. */
+void lc_xa_connection_view_init(lc_xa_connection_view *view);
+/** Context ownership transfers only on success. */
+int lc_xa_borrow_open(const lc_xa_borrow_callbacks *callbacks, void *context,
+                      lc_xa_borrow **out, lc_error *error);
+/** Adds one owning-process/thread reference for a cursor/result/callback. */
+int lc_xa_borrow_retain(lc_xa_borrow *borrow, lc_error *error);
+/** Validates the current native scope and copies its borrowed connection view.
+ * A retained token remains releasable after native access has been invalidated.
+ */
+int lc_xa_borrow_view(lc_xa_borrow *borrow, lc_xa_connection_view *out,
+                      lc_error *error);
+/** Consumes one reference on the owning process/thread. The final release
+ * destroys the token even if provider cleanup reports an error; never retry
+ * that reference. Release results/cursors first: outstanding protocol fails the
+ * branch and preserves durable cleanup. Foreign-owner rejection releases none.
+ */
+int lc_xa_borrow_release(lc_xa_borrow *borrow, lc_error *error);
+
+/** Explicitly linked XA participant contract. No native client types or loader
+ * dependencies enter core. Providers copy configuration at open and keep their
+ * callbacks linked until the last resource/branch/operation/borrow is released.
+ */
+#define LC_XA_DRIVER_ABI 1UL
+typedef struct lc_xa_wait {
+  int fd;
+  unsigned int events; /**< READ=1, WRITE=2; zero when terminal. */
+  int64_t
+      deadline_ms; /**< Absolute CLOCK_MONOTONIC milliseconds, -1 infinity. */
+} lc_xa_wait;
+enum {
+  LC_XA_OUTCOME_UNKNOWN = 0,
+  LC_XA_OUTCOME_COMMITTED = 1,
+  LC_XA_OUTCOME_ABORTED = 2,
+  LC_XA_OUTCOME_IN_PROGRESS = 3,
+  LC_XA_OUTCOME_DISCARDED = 4
+};
+typedef struct lc_xa_inventory_row {
+  char gid[200];
+  char xid[11];
+  char database_oid[11];
+  char role_oid[11];
+} lc_xa_inventory_row;
+/** Terminal operation snapshot. Diagnostics contain SQLSTATE only, never SQL,
+ * parameters, credentials or raw native diagnostic text. */
+typedef struct lc_xa_result {
+  lc_xa_branch_record record;
+  int native_outcome;
+  size_t row_count;
+  lc_xa_inventory_row rows[64];
+  char sqlstate[6];
+} lc_xa_result;
+typedef struct lc_xa_driver {
+  size_t size;
+  unsigned long abi_version;
+  int resource_kind;
+  int (*open)(lc_xa_store *store, const void *configuration, void **resource,
+              lc_error *error);
+  void (*close_blocking)(void *resource);
+  const lc_xa_branch_record *(*identity)(void *resource);
+  int (*register_start)(void *resource, int64_t deadline_ms, void **operation,
+                        lc_error *error);
+  int (*branch_start)(void *resource, const char *txn_id, int64_t deadline_ms,
+                      void **operation, lc_error *error);
+  int (*prepare_start)(void *branch, int64_t deadline_ms, void **operation,
+                       lc_error *error);
+  int (*resolve_start)(void *branch, int commit, int64_t deadline_ms,
+                       void **operation, lc_error *error);
+  int (*recover_start)(void *resource, const char *txn_id,
+                       const char *branch_id, int commit, int64_t deadline_ms,
+                       void **operation, lc_error *error);
+  int (*status_start)(void *resource, const char *txn_id, const char *branch_id,
+                      int64_t deadline_ms, void **operation, lc_error *error);
+  int (*inventory_start)(void *resource, const char *after_gid, size_t limit,
+                         int64_t deadline_ms, void **operation,
+                         lc_error *error);
+  int (*advance)(void *operation, lc_error *error);
+  int (*wait)(void *operation, lc_xa_wait *out, lc_error *error);
+  /** Returns zero until terminal; otherwise copies the result. A successful
+   * start/recover yields one owned branch. Other operations yield none. */
+  int (*result)(void *operation, lc_xa_result *out, void **branch);
+  int (*cancel)(void *operation, lc_error *error);
+  void (*operation_close_blocking)(void *operation);
+  int (*borrow)(void *branch, lc_xa_borrow **out, lc_error *error);
+  const lc_xa_branch_record *(*branch_record)(void *branch);
+  void (*branch_close)(void *branch);
+} lc_xa_driver;
+typedef struct lc_xa_resource lc_xa_resource;
+typedef struct lc_xa_branch lc_xa_branch;
+typedef struct lc_xa_operation lc_xa_operation;
+/** The resource copies the function table and pins the journal. Its owning
+ * process/thread drives native I/O. Zero deadlines select the provider's 30s
+ * default; -1 selects infinity. Durability runs on the provider worker. */
+int lc_xa_resource_open(lc_xa_store *store, const lc_xa_driver *driver,
+                        const void *configuration, lc_xa_resource **out,
+                        lc_error *error);
+/** Borrowed identity while this live receiver remains retained. Backend fields
+ * become authoritative after successful registration; copy before later work.
+ */
+const lc_xa_branch_record *lc_xa_resource_identity(lc_xa_resource *resource);
+/** Starts provider capability/backend validation and durable registration. */
+int lc_xa_resource_register_start(lc_xa_resource *resource, int64_t deadline_ms,
+                                  lc_xa_operation **out, lc_error *error);
+/** Starts/enrolls a branch under the caller's valid global ID. Successful
+ * completion makes one branch available through lc_xa_operation_take_branch().
+ */
+int lc_xa_resource_branch_start(lc_xa_resource *resource, const char *txn_id,
+                                int64_t deadline_ms, lc_xa_operation **out,
+                                lc_error *error);
+/** Recovers exact journal/backend identity without SQL replay. commit is zero
+ * or one and must match the durable decision; success yields one owned branch.
+ */
+int lc_xa_resource_recover_start(lc_xa_resource *resource, const char *txn_id,
+                                 const char *branch_id, int commit,
+                                 int64_t deadline_ms, lc_xa_operation **out,
+                                 lc_error *error);
+/** Observes an enrolled native outcome without resolving or publishing work. */
+int lc_xa_resource_status_start(lc_xa_resource *resource, const char *txn_id,
+                                const char *branch_id, int64_t deadline_ms,
+                                lc_xa_operation **out, lc_error *error);
+/** Starts bounded diagnostic inventory (at most 64 rows). PostgreSQL uses GID
+ * order, NULL for the first cursor and zero for its default limit of 64. */
+int lc_xa_resource_inventory_start(lc_xa_resource *resource,
+                                   const char *after_gid, size_t limit,
+                                   int64_t deadline_ms, lc_xa_operation **out,
+                                   lc_error *error);
+/** Consumes the receiver and prevents new starts/borrows, including on retained
+ * branches. Existing operations finish; retained branches remain inspectable
+ * and closeable. Final release may wait for journal fsync, never network I/O.
+ */
+int lc_xa_resource_close_blocking(lc_xa_resource *resource, lc_error *error);
+/** Starts durable prepare/YES voting. Drain protocol and release SQL
+ * borrows/results first; enroll every member before the first prepare. */
+int lc_xa_branch_prepare_start(lc_xa_branch *branch, int64_t deadline_ms,
+                               lc_xa_operation **out, lc_error *error);
+/** Resolves in the immutable decision's direction; commit must be zero or one.
+ * Timeout/cancellation cannot reverse an already durable COMMIT. */
+int lc_xa_branch_resolve_start(lc_xa_branch *branch, int commit,
+                               int64_t deadline_ms, lc_xa_operation **out,
+                               lc_error *error);
+/** Opens an exact-connection borrow for application work on an open branch. */
+int lc_xa_branch_borrow(lc_xa_branch *branch, lc_xa_borrow **out,
+                        lc_error *error);
+/** Borrowed branch record while this receiver is live; copy before later work.
+ */
+const lc_xa_branch_record *lc_xa_branch_record_get(lc_xa_branch *branch);
+/** Consumes the caller reference. Native destruction waits for every pin,
+ * including the creating operation after lc_xa_operation_take_branch(), to be
+ * released. */
+int lc_xa_branch_close(lc_xa_branch *branch, lc_error *error);
+/** Advances bounded native work. LC_ERR_PENDING with a NULL result needs wait/
+ * advance; a non-NULL result is terminal, including pending recovery. */
+int lc_xa_operation_advance(lc_xa_operation *operation, lc_error *error);
+/** Copies current readiness after nonterminal LC_ERR_PENDING. Honor the
+ * absolute deadline; an already due deadline requires immediate advancement. */
+int lc_xa_operation_wait(lc_xa_operation *operation, lc_xa_wait *out,
+                         lc_error *error);
+/** NULL until terminal (or for a foreign owner). The snapshot is borrowed until
+ * operation close; a result alone does not prove a successful return status. */
+const lc_xa_result *lc_xa_operation_result(lc_xa_operation *operation);
+/** Transfer the successful start/recover branch exactly once. Unclaimed
+ * branches are closed by operation_close_blocking; result never owns a shell.
+ */
+int lc_xa_operation_take_branch(lc_xa_operation *operation, lc_xa_branch **out,
+                                lc_error *error);
+/** Stops owned transmissions, preserving potentially prepared work for
+ * recovery. Pending journal cleanup is completed by the blocking close. */
+int lc_xa_operation_cancel(lc_xa_operation *operation, lc_error *error);
+/** Consumes the operation, closes unclaimed branches and releases retained
+ * branch/resource pins. May wait for durability cleanup, never native I/O. */
+int lc_xa_operation_close_blocking(lc_xa_operation *operation, lc_error *error);
+
+/** Managed participation in the existing Pouch transaction coordinator. Native
+ * providers are linked explicitly and registered through lc_xa_driver. */
+typedef struct lc_xa_coordinator lc_xa_coordinator;
+typedef struct lc_xa_transaction lc_xa_transaction;
+typedef struct lc_xa_coordinator_operation lc_xa_coordinator_operation;
+typedef struct lc_xa_coordinator_config {
+  /** Zero selects 30 seconds. Renew during long application work; operations
+   * renew automatically while advanced at their advertised readiness/deadline.
+   */
+  long owner_ttl_seconds;
+  /** Completed coordinator history age. Zero selects 30 days; -1 disables
+   * age retirement. Unfinished work and live owners are never retired. */
+  long completed_retention_seconds;
+  /** Optional completed-history count cap; zero means unlimited. Oldest
+   * eligible records retire first, independently of outbox/receipt policies. */
+  size_t completed_max_records;
+} lc_xa_coordinator_config;
+enum {
+  LC_XA_DECISION_UNDECIDED = 0,
+  LC_XA_DECISION_COMMIT = 1,
+  LC_XA_DECISION_ABORT = 2
+};
+/** Borrowed operation snapshot. IDs exist before durable work starts and remain
+ * available after errors/cancellation. decision is observed from .txns; applied
+ * is true only after this operation proves every participant's application. */
+typedef struct lc_xa_coordinator_result {
+  char txn_id[LC_XID_STRING_SIZE];
+  char resource_id[LC_XID_STRING_SIZE];
+  int done;
+  int decision;
+  int applied;
+  /** Number of complete histories removed by a retirement operation. */
+  size_t retired_count;
+  char sqlstate[6];
+} lc_xa_coordinator_result;
+/** Opens the local Pouch coordinator with zero/default policy when config is
+ * NULL. Retains the client; native operations use the owning process/thread. */
+int lc_xa_coordinator_open(lc_client *client,
+                           const lc_xa_coordinator_config *config,
+                           lc_xa_coordinator **out, lc_error *error);
+/** Runs completed-history maintenance on the serialized journal worker. The
+ * same policy runs automatically at open and once per minute while idle;
+ * enabled count caps also run on final transaction release. Drive the
+ * operation to observe cleanup errors. */
+int lc_xa_coordinator_retire_start(lc_xa_coordinator *coordinator,
+                                   int64_t deadline_ms,
+                                   lc_xa_coordinator_operation **out,
+                                   lc_error *error);
+/** Adds an owning-process/thread reference. Child operations and transactions
+ * also retain this receiver independently of the caller's reference. */
+int lc_xa_coordinator_retain(lc_xa_coordinator *coordinator, lc_error *error);
+/** Consumes one reference. Final release stops the journal worker and native
+ * resources; may wait for journal fsync, never native network responses. */
+int lc_xa_coordinator_close_blocking(lc_xa_coordinator *coordinator,
+                                     lc_error *error);
+/** Copies linked driver/configuration and starts backend registration. Close
+ * each operation before starting another on this coordinator. */
+int lc_xa_coordinator_register_start(lc_xa_coordinator *coordinator,
+                                     const lc_xa_driver *driver,
+                                     const void *configuration,
+                                     int64_t deadline_ms,
+                                     lc_xa_coordinator_operation **out,
+                                     lc_error *error);
+/** Diagnostic/manual resource receiver, borrowed while coordinator is retained.
+ * The coordinator owns it: do not close it or overlap its operations with
+ * managed operations. No driver configuration/credentials enter the journal. */
+lc_xa_resource *lc_xa_coordinator_resource(lc_xa_coordinator *coordinator,
+                                           const char *resource_id);
+/** Creates a global ID before durable work. Successful completion transfers an
+ * independently owned transaction through
+ * lc_xa_coordinator_operation_take_transaction(). */
+int lc_xa_coordinator_begin_start(lc_xa_coordinator *coordinator,
+                                  int64_t deadline_ms,
+                                  lc_xa_coordinator_operation **out,
+                                  lc_error *error);
+/** Adopts an existing local, unvoted Pouch transaction (for outbox-first use),
+ * or reserves its known ID before its first participant. Existing decisions,
+ * external branches and active ownership cannot be adopted. */
+int lc_xa_coordinator_adopt_start(lc_xa_coordinator *coordinator,
+                                  const char *txn_id, int64_t deadline_ms,
+                                  lc_xa_coordinator_operation **out,
+                                  lc_error *error);
+/** Recovery never replays SQL. An active other owner yields LC_ERR_PENDING;
+ * fenced abandoned undecided work selects ABORT. Missing registered resources
+ * remain pending and cannot publish Pouch state/effects. */
+int lc_xa_coordinator_recover_start(lc_xa_coordinator *coordinator,
+                                    const char *txn_id, int64_t deadline_ms,
+                                    lc_xa_coordinator_operation **out,
+                                    lc_error *error);
+/** Borrowed stable global ID while this transaction is retained; NULL for a
+ * foreign owner. Copy the ID before releasing the final reference. */
+const char *lc_xa_transaction_id(lc_xa_transaction *transaction);
+/** Adds one owning-process/thread transaction reference. */
+int lc_xa_transaction_retain(lc_xa_transaction *transaction, lc_error *error);
+/** Releases a reference. Final close invalidates branch access and relinquishes
+ * its owner lease, retaining durable identity/decision for recovery. */
+int lc_xa_transaction_close_blocking(lc_xa_transaction *transaction,
+                                     lc_error *error);
+/** Enrolls a registered native resource under the same global ID. Enroll every
+ * participant before commit seals the set; success does not vote YES. */
+int lc_xa_transaction_enroll_start(lc_xa_transaction *transaction,
+                                   const char *resource_id, int64_t deadline_ms,
+                                   lc_xa_coordinator_operation **out,
+                                   lc_error *error);
+/** Pouch acquire on the journal worker, bound automatically to the global ID.
+ * No blocking acquire wait is accepted. Configuration strings are copied. */
+int lc_xa_transaction_acquire_start(lc_xa_transaction *transaction,
+                                    const lc_acquire_req *request,
+                                    int64_t deadline_ms,
+                                    lc_xa_coordinator_operation **out,
+                                    lc_error *error);
+/** Opens a checked connection scope for an already enrolled native resource. */
+int lc_xa_transaction_borrow(lc_xa_transaction *transaction,
+                             const char *resource_id, lc_xa_borrow **out,
+                             lc_error *error);
+/** Refreshes the fenced owner lease during long application work. Drive this
+ * operation before expiry; renewal does not prepare or resolve participants. */
+int lc_xa_transaction_renew_start(lc_xa_transaction *transaction,
+                                  int64_t deadline_ms,
+                                  lc_xa_coordinator_operation **out,
+                                  lc_error *error);
+/** Seal enrollment, prepare all members, persist the immutable decision,
+ * resolve native participants, then apply Pouch. A failed prepare selects
+ * ABORT; errors after durable COMMIT retain COMMIT. Release every SQL
+ * borrow/result first. */
+int lc_xa_transaction_commit_start(lc_xa_transaction *transaction,
+                                   int64_t deadline_ms,
+                                   lc_xa_coordinator_operation **out,
+                                   lc_error *error);
+/** Selects ABORT for undecided work and resolves/applies in the durable
+ * direction. An existing COMMIT is preserved and can never become ABORT. */
+int lc_xa_transaction_rollback_start(lc_xa_transaction *transaction,
+                                     int64_t deadline_ms,
+                                     lc_xa_coordinator_operation **out,
+                                     lc_error *error);
+/** Advances bounded work. Inspect result->done on LC_ERR_PENDING: zero needs
+ * wait/advance; nonzero is terminal and may still need subsequent recovery. */
+int lc_xa_coordinator_operation_advance(lc_xa_coordinator_operation *operation,
+                                        lc_error *error);
+/** Wait after LC_ERR_PENDING unless result.done is true. A negative fd with an
+ * already due deadline means advance immediately; do not add a polling delay.
+ */
+int lc_xa_coordinator_operation_wait(lc_xa_coordinator_operation *operation,
+                                     lc_xa_wait *out, lc_error *error);
+/** Borrowed snapshot available before first advancement, including the global
+ * ID for begin/adopt/recover. Inspect done and the advance status together;
+ * copy fields before closing the operation. NULL for a foreign owner. */
+const lc_xa_coordinator_result *
+lc_xa_coordinator_operation_result(lc_xa_coordinator_operation *operation);
+/** Successful begin/adopt/recovery transfers its preallocated transaction once.
+ */
+int lc_xa_coordinator_operation_take_transaction(
+    lc_xa_coordinator_operation *operation, lc_xa_transaction **out,
+    lc_error *error);
+/** Successful acquire transfers its independently owned lease once. */
+int lc_xa_coordinator_operation_take_lease(
+    lc_xa_coordinator_operation *operation, lc_lease **out, lc_error *error);
+/** Stops further native transmission. In-flight journal work is observed before
+ * reclamation; cancellation never changes durable COMMIT or invents rollback.
+ */
+int lc_xa_coordinator_operation_cancel(lc_xa_coordinator_operation *operation,
+                                       lc_error *error);
+/** Consumes the operation and releases any unclaimed transaction/lease. Stops
+ * unfinished native work and waits for journal cleanup, preserving the durable
+ * decision and recoverable identity. */
+int lc_xa_coordinator_operation_close_blocking(
+    lc_xa_coordinator_operation *operation, lc_error *error);
+
 /** Request used to acquire the TC leader lease. */
 typedef struct lc_tc_lease_acquire_req {
   /** Non-empty identity of the leadership candidate. */
   const char *candidate_id;
   /** Endpoint advertised for the candidate. */
   const char *candidate_endpoint;
-  /** Candidate term; stale terms are rejected. */
+  /** Candidate term; stale terms are rejected. Pouch requires a newer term
+   * after expiry/release; only its live current owner can reuse the same term.
+   */
   lc_tc_term term;
   /** Requested leader-lease TTL in milliseconds. */
   long ttl_ms;
@@ -1147,11 +1609,14 @@ typedef struct lc_tc_lease_release_res {
 
 /** Snapshot of the current transaction coordinator leader. */
 typedef struct lc_tc_leader_res {
-  /** Owned current leader identity, or `NULL` when no leader is active. */
+  /** Owned current leader identity; `NULL` or empty when no leader is active.
+   * Pouch returns an owned empty string. */
   char *leader_id;
-  /** Owned current leader endpoint, or `NULL` when no leader is active. */
+  /** Owned current leader endpoint; `NULL` or empty when no leader is active.
+   * Pouch returns an owned empty string. */
   char *leader_endpoint;
-  /** Current transaction-coordinator term. */
+  /** Current transaction-coordinator term. Pouch preserves the last term even
+   * with no active leader; advance it for a new leadership epoch. */
   lc_tc_term term;
   /** Current leader-lease expiry as a Unix timestamp. */
   lc_unix_seconds expires_at_unix;
@@ -1604,8 +2069,8 @@ typedef struct lc_consumer_message {
   /** Active SDK client for this consumer loop. Safe to reuse inside the
    * callback. */
   lc_client *client;
-  /** Borrowed client logger configured on the parent client. Always non-NULL.
-   */
+  /** Borrowed SDK logger for this callback. Always non-NULL; do not destroy it.
+   * Its base logger follows `lc_client_config.logger` ownership rules. */
   pslog_logger *logger;
   /** Resolved consumer name. Defaults to the queue name when omitted. */
   const char *name;
@@ -1730,10 +2195,19 @@ typedef struct lc_consumer_service_config {
 /** Settings for one inbox/outbox namespace.
  *
  * `ns` is required. All zero duration/count fields use the
- * documented defaults; negative values, invalid retry ranges, and claim TTLs
- * that cannot produce an `lc_unix_seconds` deadline are rejected during
+ * documented defaults; negative values other than documented retention
+ * opt-outs, invalid retry ranges, and claim TTLs that cannot produce an
+ * `lc_unix_seconds` deadline are rejected during
  * `lc_client_new_outbox()`. Dispatcher resources are created only by
  * `lc_outbox_dispatcher_get_or_start()`.
+ * Automatic retention requires a live dispatcher. All producers and
+ * dispatchers for one namespace must use the same settings. Explicit
+ * retention settings are rejected for remote lockd.
+ * Retention is asynchronous: a positive count cap can reclaim before expiry.
+ * Reclamation ends duplicate/idempotency protection and command status lookup.
+ * Time-policy changes affect future terminal transitions only; existing marker
+ * deadlines remain unchanged. Records written before retention, or while a
+ * type is disabled, are not backfilled. See docs/pouch-terminal-retention.md.
  */
 typedef struct lc_outbox_config {
   /** Required namespace that contains both inbox and outbox records. */
@@ -1789,11 +2263,45 @@ typedef struct lc_outbox_config {
   size_t dead_letter_max_count;
   /**
    * Pouch-only logical retained-byte cap, including envelope payload and a
-   * stateful checkpoint when present. Zero defaults to 64 MiB; `UINT64_MAX`
-   * disables this capacity bound. An explicit value is rejected for remote
-   * lockd rather than ignored.
+   * stateful checkpoint when present. Zero defaults to 64 MiB;
+   * `~(uint64_t)0U` disables this capacity bound. An explicit value is rejected
+   * for remote lockd rather than ignored.
    */
   uint64_t dead_letter_max_bytes;
+  /**
+   * Pouch-only completed outbox envelope retention, measured from completion.
+   * Zero selects 30 days; positive values select seconds; `-1` disables
+   * reclamation for this type, including its count cap. Other negatives are
+   * invalid. Reclamation ends duplicate protection for the effect identity.
+   */
+  long completed_retention_seconds;
+  /**
+   * Optional Pouch-only completed envelope cap per namespace. Zero or
+   * `SIZE_MAX` leaves the count unbounded. A positive cap permits reclamation
+   * before the time window expires, ending duplicate protection early.
+   */
+  size_t completed_max_count;
+  /**
+   * Pouch-only accepted inbox receipt retention. Zero selects 30 days;
+   * positive values select seconds; `-1` disables reclamation and its count
+   * cap. Reclamation permits a redelivered message identity to execute again.
+   */
+  long inbox_retention_seconds;
+  /** Optional Pouch-only inbox receipt cap per namespace; zero or `SIZE_MAX`
+   * is unbounded. A positive cap permits early reclamation and ends duplicate
+   * protection early. */
+  size_t inbox_max_count;
+  /**
+   * Pouch-only completed/failed command receipt retention from its terminal
+   * timestamp. Zero selects 30 days; positive values select seconds; `-1`
+   * disables reclamation and its count cap. Reclamation also removes owned
+   * result attachments and ends idempotency and status lookup for the identity.
+   */
+  long command_retention_seconds;
+  /** Optional Pouch-only terminal command cap per namespace; zero or `SIZE_MAX`
+   * is unbounded. A positive cap permits early reclamation and ends idempotency
+   * protection early. */
+  size_t command_max_count;
 } lc_outbox_config;
 
 /** Streaming representation requested from `export_dead_letters()`. */
@@ -1846,6 +2354,11 @@ typedef struct lc_outbox_stats {
   uint64_t dead_letter_reclaims;
   /** Monotonic Pouch retention maintenance failures retained for retry. */
   uint64_t dead_letter_reclaim_failures;
+  /** Monotonic completed/inbox/command retention markers safely retired,
+   * including stale markers whose parent no longer matches. */
+  uint64_t terminal_reclaims;
+  /** Monotonic terminal retention failures preserved for retry. */
+  uint64_t terminal_reclaim_failures;
   /** Owned latest dispatcher error text, or `NULL`. */
   char *last_error;
 } lc_outbox_stats;
@@ -2504,13 +3017,26 @@ struct lc_consumer_service {
 };
 
 /**
- * One owned outbox transaction. Its first participating operation lazily
- * creates an explicit xid; later participant acquires automatically carry
- * that xid. Only this receiver can make the terminal decision.
+ * One owned outbox transaction. Its stable xid exists before the first
+ * participant; later acquires automatically carry that xid. A bound managed XA
+ * transaction chooses the terminal decision and gates all publication.
  * If an operation fails after enrolling a later participant, implicit XA has
  * rolled the xid back; close this transaction and begin a new one to retry.
  */
 struct lc_outbox_transaction {
+  /** Stable global ID, borrowed until close. Minting it performs no storage
+   * I/O. */
+  const char *(*id)(lc_outbox_transaction *self);
+  /** Bind to an open managed transaction on the same local Pouch root. Before
+   * the first member, this selects the managed ID. After members exist, IDs
+   * must match (adopt this outbox's ID first). The coordinator pins this facade
+   * across operations; no SQL/provider types enter the outbox interface. */
+  int (*bind_xa)(lc_outbox_transaction *self, lc_xa_transaction *transaction,
+                 lc_error *error);
+  int (*commit_start)(lc_outbox_transaction *self, int64_t deadline_ms,
+                      lc_xa_coordinator_operation **out, lc_error *error);
+  int (*rollback_start)(lc_outbox_transaction *self, int64_t deadline_ms,
+                        lc_xa_coordinator_operation **out, lc_error *error);
   /**
    * Accepts one durable command receipt in this transaction.
    *
@@ -2794,7 +3320,8 @@ struct lc_outbox {
   /**
    * Resumes a pending command by its component-generated command id. This is
    * intended for a claimed command-bound outbox job's supervisor. A terminal
-   * command returns `*out_txn == NULL` and its current receipt.
+   * command returns `*out_txn == NULL` and its current receipt. With valid
+   * output arguments, failure also clears `*out_txn`.
    */
   int (*resume_command_by_id)(lc_outbox *self, const char *command_id,
                               lc_outbox_transaction **out_txn,
@@ -2840,13 +3367,20 @@ struct lc_outbox {
  * on caller demand.
  */
 struct lc_outbox_dispatcher {
-  /** Waits for, claims, and returns one outbox job on consumer demand. */
+  /**
+   * Claims one owned job on consumer demand; failure clears `*out`.
+   * Zero probes only in-memory candidates without starting recovery; `-1`
+   * waits indefinitely, positive milliseconds bound the pull, and other
+   * negatives are invalid. Foreground pulls never run receipt retention.
+   */
   int (*next)(lc_outbox_dispatcher *self, long timeout_ms, lc_outbox_job **out,
               lc_error *error);
   /** Copies one committed durable outbox key into the bounded wake queue. */
   int (*notify_outbox_key)(lc_outbox_dispatcher *self, const char *outbox_key,
                            lc_error *error);
-  /** Returns a cheap process-local dispatcher observability snapshot. */
+  /** Copies process-local counters without querying storage. `out` must be
+   * initialized; release its owned error text with `lc_outbox_stats_cleanup()`.
+   */
   int (*get_stats)(lc_outbox_dispatcher *self, lc_outbox_stats *out,
                    lc_error *error);
   /** Requests asynchronous bounded durable reconciliation. */
@@ -2864,9 +3398,16 @@ struct lc_outbox_dispatcher {
                              const lc_dead_letter_export_opts *options,
                              lc_sink *dst, lc_dead_letter_export_res *out,
                              lc_error *error);
-  /** Stops this dispatcher and waits up to `deadline_ms` for its thread. */
+  /**
+   * Requests stop and waits for private infrastructure and caller-owned jobs.
+   * Zero polls; `-1` waits indefinitely; positive milliseconds bound the wait.
+   * A timeout leaves the dispatcher stopping and jobs usable. Finish or close
+   * handed-out jobs before an indefinite wait; lease expiry alone does not
+   * release their local handles. This operation is idempotent.
+   */
   int (*stop)(lc_outbox_dispatcher *self, long deadline_ms, lc_error *error);
-  /** Waits up to `deadline_ms` for a requested stop to finish. */
+  /** Observes an already requested stop with the same deadlines as `stop()`;
+   * returns `LC_ERR_INVALID` if stop has not been requested. */
   int (*wait)(lc_outbox_dispatcher *self, long deadline_ms, lc_error *error);
   /** Releases one caller reference; it does not stop the dispatcher. */
   void (*close)(lc_outbox_dispatcher *self);
@@ -2876,7 +3417,10 @@ struct lc_outbox_dispatcher {
    * Waits for and claims one outbox job with its paired durable state lease.
    *
    * On failure no job escapes. The returned job owns the state lease exposed
-   * by `lc_outbox_job_state()` until terminalization or close. This consumes
+   * by `lc_outbox_job_state()` until terminalization or close; callers must not
+   * close that borrowed lease. Requires Pouch and uses `next()` timeouts.
+   * Before its probe, a bounded exact-key checkpoint cleanup may run; receipt
+   * retention remains private dispatcher work. This consumes
    * one formerly reserved ABI-4 extension slot.
    */
   int (*next_with_state)(lc_outbox_dispatcher *self, long timeout_ms,
@@ -3034,19 +3578,21 @@ struct lc_client {
   /** Triggers an index flush for the selected namespace. */
   int (*flush_index)(lc_client *self, const lc_index_flush_req *req,
                      lc_index_flush_res *out, lc_error *error);
-  /** Reapplies a durable transaction decision by identifier. An expired
-   * prepared decision is converted to rollback before it is applied. */
+  /** Replays a durable decision. Expired raw prepare becomes rollback;
+   * managed undecided work requires fenced coordinator recovery. On
+   * LC_ERR_PENDING, out retains the decision while application is incomplete.
+   */
   int (*txn_replay)(lc_client *self, const lc_txn_replay_req *req,
                     lc_txn_replay_res *out, lc_error *error);
   /** Prepares a transaction decision. */
   int (*txn_prepare)(lc_client *self, const lc_txn_decision_req *req,
                      lc_txn_decision_res *out, lc_error *error);
-  /** Commits and applies a durable transaction decision. Matching participant
-   * leases are released as part of the decision. */
+  /** Records COMMIT and applies/releases matching participants. Pouch returns
+   * LC_ERR_PENDING with out populated while external completion is unproven. */
   int (*txn_commit)(lc_client *self, const lc_txn_decision_req *req,
                     lc_txn_decision_res *out, lc_error *error);
-  /** Rolls back and applies a durable transaction decision. Matching
-   * participant leases are released as part of the decision. */
+  /** Records/applies ABORT without reversing COMMIT. Pouch may return
+   * LC_ERR_PENDING with out populated while external cleanup is incomplete. */
   int (*txn_rollback)(lc_client *self, const lc_txn_decision_req *req,
                       lc_txn_decision_res *out, lc_error *error);
   /** Acquires a TC lease. */
@@ -3120,6 +3666,7 @@ struct lc_client {
                               const lc_consumer_service_config *config,
                               lc_consumer_service **out, lc_error *error);
   /** Creates a threadless inbox/outbox producer owned by this client.
+   * Outbox workflows currently require Pouch; remote lockd is unsupported.
    */
   int (*new_outbox)(lc_client *self, const lc_outbox_config *config,
                     lc_outbox **out, lc_error *error);
@@ -3169,6 +3716,7 @@ struct lc_client {
                             void *handler_context, lc_error *error);
   /**
    * Streams key query result strings through chunked callbacks.
+   * An empty response may omit `keys`; it succeeds without invoking handlers.
    *
    * Extension slots are appended to keep method offsets stable within the
    * current shared-library ABI line.
@@ -3239,6 +3787,8 @@ int lc_error_set(lc_error *error, int code, long http_status,
  * actionable error if its process-wide XID generator cannot initialize.
  */
 int lc_xid_new(char out[LC_XID_STRING_SIZE], lc_error *error);
+/** Reports whether text is a canonical rs/xid identifier. */
+int lc_xid_is_valid(const char *text);
 /**
  * Initializes an allocator override to use the default allocator.
  *
@@ -3762,7 +4312,9 @@ int lc_queue_extend(lc_client *client, const lc_extend_op *req,
 /** Streams query results into `dst`. */
 int lc_query(lc_client *client, const lc_query_req *req, lc_sink *dst,
              lc_query_res *out, lc_error *error);
-/** Streams key query result strings through chunked callbacks. */
+/** Streams key query result strings through chunked callbacks.
+ * An empty response may omit `keys`; it succeeds without invoking handlers.
+ */
 int lc_query_keys(lc_client *client, const lc_query_req *req,
                   const lc_query_key_handler *handler, void *context,
                   lc_query_res *out, lc_error *error);
@@ -3777,19 +4329,20 @@ int lc_update_namespace_config(lc_client *client,
 /** Triggers an index flush for the selected namespace. */
 int lc_flush_index(lc_client *client, const lc_index_flush_req *req,
                    lc_index_flush_res *out, lc_error *error);
-/** Reapplies a durable transaction decision by identifier. An expired prepared
- * decision is converted to rollback before it is applied. */
+/** Replays a durable decision. Expired raw prepare becomes rollback; managed
+ * undecided work requires fenced coordinator recovery. On LC_ERR_PENDING,
+ * out retains the decision while participant application remains incomplete. */
 int lc_txn_replay(lc_client *client, const lc_txn_replay_req *req,
                   lc_txn_replay_res *out, lc_error *error);
 /** Prepares a transaction decision. */
 int lc_txn_prepare(lc_client *client, const lc_txn_decision_req *req,
                    lc_txn_decision_res *out, lc_error *error);
-/** Commits and applies a durable transaction decision. Matching participant
- * leases are released as part of the decision. */
+/** Records COMMIT and applies/releases matching participants. Pouch returns
+ * LC_ERR_PENDING with out populated while external completion is unproven. */
 int lc_txn_commit(lc_client *client, const lc_txn_decision_req *req,
                   lc_txn_decision_res *out, lc_error *error);
-/** Rolls back and applies a durable transaction decision. Matching participant
- * leases are released as part of the decision. */
+/** Records/applies ABORT without reversing COMMIT. Pouch may return
+ * LC_ERR_PENDING with out populated while external cleanup is incomplete. */
 int lc_txn_rollback(lc_client *client, const lc_txn_decision_req *req,
                     lc_txn_decision_res *out, lc_error *error);
 /** Acquires a TC lease. */
@@ -3859,6 +4412,7 @@ int lc_client_new_consumer_service(lc_client *client,
                                    const lc_consumer_service_config *config,
                                    lc_consumer_service **out, lc_error *error);
 /** Creates a threadless inbox/outbox producer; clears `*out` on error.
+ * Outbox workflows currently require Pouch; remote lockd is unsupported.
  */
 int lc_client_new_outbox(lc_client *client, const lc_outbox_config *config,
                          lc_outbox **out, lc_error *error);
@@ -4046,7 +4600,9 @@ int lc_outbox_resume_command(lc_outbox *outbox,
                              const lc_command_identity *identity,
                              lc_outbox_transaction **out_txn,
                              lc_command_receipt *receipt, lc_error *error);
-/** Resumes a pending command by component-generated command id. */
+/** Resumes a pending command by component-generated command id. With valid
+ * output arguments, failure clears `*out_txn`; a terminal command succeeds
+ * with `*out_txn == NULL` and its current receipt. */
 int lc_outbox_resume_command_by_id(lc_outbox *outbox, const char *command_id,
                                    lc_outbox_transaction **out_txn,
                                    lc_command_receipt *receipt,
@@ -4109,11 +4665,15 @@ int lc_outbox_dispatcher_delete_dead_letter(lc_outbox_dispatcher *dispatcher,
 int lc_outbox_dispatcher_export_dead_letters(
     lc_outbox_dispatcher *dispatcher, const lc_dead_letter_export_opts *options,
     lc_sink *dst, lc_dead_letter_export_res *out, lc_error *error);
-/** Requests stop and waits up to `deadline_ms` for dispatcher infrastructure.
- */
+/** Requests stop and waits for private infrastructure and caller-owned jobs.
+ * Zero polls; `-1` waits indefinitely; positive milliseconds bound the wait.
+ * Timeout leaves the dispatcher stopping and handed-out jobs usable. Finish
+ * or close those jobs before an indefinite wait; expiry alone does not release
+ * their local handles. Repeated stop calls are safe. */
 int lc_outbox_dispatcher_stop(lc_outbox_dispatcher *dispatcher,
                               long deadline_ms, lc_error *error);
-/** Waits up to `deadline_ms` for an already requested dispatcher stop. */
+/** Observes an already requested stop with the same deadlines as `stop()`.
+ * Returns `LC_ERR_INVALID` if stop has not been requested. */
 int lc_outbox_dispatcher_wait(lc_outbox_dispatcher *dispatcher,
                               long deadline_ms, lc_error *error);
 /** Releases one dispatcher handle reference without stopping it. */
@@ -4161,6 +4721,21 @@ void lc_outbox_job_close(lc_outbox_job *job);
 int lc_outbox_transaction_acquire(lc_outbox_transaction *transaction,
                                   const lc_outbox_participant_request *request,
                                   lc_outbox_participant **out, lc_error *error);
+const char *lc_outbox_transaction_id(lc_outbox_transaction *transaction);
+int lc_outbox_transaction_bind_xa(lc_outbox_transaction *transaction,
+                                  lc_xa_transaction *xa, lc_error *error);
+/** Delegates terminal work to the bound coordinator. Drive/close the returned
+ * operation, then collect preallocated receipts through commit().
+ * Unbound outboxes continue to use their ordinary synchronous terminal methods.
+ */
+int lc_outbox_transaction_commit_start(lc_outbox_transaction *transaction,
+                                       int64_t deadline_ms,
+                                       lc_xa_coordinator_operation **out,
+                                       lc_error *error);
+int lc_outbox_transaction_rollback_start(lc_outbox_transaction *transaction,
+                                         int64_t deadline_ms,
+                                         lc_xa_coordinator_operation **out,
+                                         lc_error *error);
 /**
  * Stages one immutable outbox effect and its payload in a transaction.
  * `entry->payload_digest` must bind the exact payload bytes without requiring

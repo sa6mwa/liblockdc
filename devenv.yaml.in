@@ -1,0 +1,633 @@
+# Rootless Podman Kube; generated paths and checkout ports are rendered by scripts/devenv.sh.
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "@POD_NAME@",
+    "annotations": {
+      "io.podman.annotations.userns": "keep-id:uid=0,gid=0"
+    }
+  },
+  "spec": {
+    "restartPolicy": "Never",
+    "securityContext": {
+      "runAsUser": 0,
+      "runAsGroup": 0
+    },
+    "initContainers": [
+      {
+        "name": "disk-ca",
+        "image": "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z",
+        "args": [
+          "if [ -s /opt/lockd/config/ca.pem ]; then exit 0; fi; exec /tools/lockd auth new ca --cn lockd-root --out /opt/lockd/config/ca.pem"
+        ],
+        "volumeMounts": [
+          {
+            "name": "disk-config",
+            "mountPath": "/opt/lockd/config",
+            "readOnly": false
+          },
+          {
+            "name": "disk-data",
+            "mountPath": "/opt/lockd/storage",
+            "readOnly": false
+          },
+          {
+            "name": "bootstrap-tools",
+            "mountPath": "/tools",
+            "readOnly": true
+          }
+        ],
+        "command": [
+          "/bin/sh",
+          "-ec"
+        ]
+      },
+      {
+        "name": "disk-server",
+        "image": "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z",
+        "args": [
+          "if [ -s /opt/lockd/config/server.pem ]; then exit 0; fi; exec /tools/lockd auth new server --ca-in /opt/lockd/config/ca.pem --cn lockd-anywhere --hosts lockd-disk-a,lockd-disk-b,localhost,127.0.0.1 --out /opt/lockd/config/server.pem"
+        ],
+        "volumeMounts": [
+          {
+            "name": "disk-config",
+            "mountPath": "/opt/lockd/config",
+            "readOnly": false
+          },
+          {
+            "name": "disk-data",
+            "mountPath": "/opt/lockd/storage",
+            "readOnly": false
+          },
+          {
+            "name": "bootstrap-tools",
+            "mountPath": "/tools",
+            "readOnly": true
+          }
+        ],
+        "command": [
+          "/bin/sh",
+          "-ec"
+        ]
+      },
+      {
+        "name": "disk-client",
+        "image": "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z",
+        "args": [
+          "if [ -s /opt/lockd/config/client.pem ]; then exit 0; fi; exec /tools/lockd auth new client --ca-in /opt/lockd/config/ca.pem --cn lockd-client -n default=rw --out /opt/lockd/config/client.pem"
+        ],
+        "volumeMounts": [
+          {
+            "name": "disk-config",
+            "mountPath": "/opt/lockd/config",
+            "readOnly": false
+          },
+          {
+            "name": "disk-data",
+            "mountPath": "/opt/lockd/storage",
+            "readOnly": false
+          },
+          {
+            "name": "bootstrap-tools",
+            "mountPath": "/tools",
+            "readOnly": true
+          }
+        ],
+        "command": [
+          "/bin/sh",
+          "-ec"
+        ]
+      },
+      {
+        "name": "disk-tc-client",
+        "image": "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z",
+        "args": [
+          "if [ -s /opt/lockd/config/tc-client.pem ]; then exit 0; fi; exec /tools/lockd auth new tcclient --ca-in /opt/lockd/config/ca.pem --cn lockd-tc-client --out /opt/lockd/config/tc-client.pem"
+        ],
+        "volumeMounts": [
+          {
+            "name": "disk-config",
+            "mountPath": "/opt/lockd/config",
+            "readOnly": false
+          },
+          {
+            "name": "disk-data",
+            "mountPath": "/opt/lockd/storage",
+            "readOnly": false
+          },
+          {
+            "name": "bootstrap-tools",
+            "mountPath": "/tools",
+            "readOnly": true
+          }
+        ],
+        "command": [
+          "/bin/sh",
+          "-ec"
+        ]
+      },
+      {
+        "name": "s3-ca",
+        "image": "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z",
+        "args": [
+          "if [ -s /opt/lockd/config/ca.pem ]; then exit 0; fi; exec /tools/lockd auth new ca --cn lockd-root --out /opt/lockd/config/ca.pem"
+        ],
+        "volumeMounts": [
+          {
+            "name": "s3-config",
+            "mountPath": "/opt/lockd/config",
+            "readOnly": false
+          },
+          {
+            "name": "s3-data",
+            "mountPath": "/opt/lockd/storage",
+            "readOnly": false
+          },
+          {
+            "name": "bootstrap-tools",
+            "mountPath": "/tools",
+            "readOnly": true
+          }
+        ],
+        "command": [
+          "/bin/sh",
+          "-ec"
+        ]
+      },
+      {
+        "name": "s3-server",
+        "image": "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z",
+        "args": [
+          "if [ -s /opt/lockd/config/server.pem ]; then exit 0; fi; exec /tools/lockd auth new server --ca-in /opt/lockd/config/ca.pem --cn lockd-anywhere --hosts lockd-s3,localhost,127.0.0.1 --out /opt/lockd/config/server.pem"
+        ],
+        "volumeMounts": [
+          {
+            "name": "s3-config",
+            "mountPath": "/opt/lockd/config",
+            "readOnly": false
+          },
+          {
+            "name": "s3-data",
+            "mountPath": "/opt/lockd/storage",
+            "readOnly": false
+          },
+          {
+            "name": "bootstrap-tools",
+            "mountPath": "/tools",
+            "readOnly": true
+          }
+        ],
+        "command": [
+          "/bin/sh",
+          "-ec"
+        ]
+      },
+      {
+        "name": "s3-client",
+        "image": "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z",
+        "args": [
+          "if [ -s /opt/lockd/config/client.pem ]; then exit 0; fi; exec /tools/lockd auth new client --ca-in /opt/lockd/config/ca.pem --cn lockd-client -n default=rw --out /opt/lockd/config/client.pem"
+        ],
+        "volumeMounts": [
+          {
+            "name": "s3-config",
+            "mountPath": "/opt/lockd/config",
+            "readOnly": false
+          },
+          {
+            "name": "s3-data",
+            "mountPath": "/opt/lockd/storage",
+            "readOnly": false
+          },
+          {
+            "name": "bootstrap-tools",
+            "mountPath": "/tools",
+            "readOnly": true
+          }
+        ],
+        "command": [
+          "/bin/sh",
+          "-ec"
+        ]
+      },
+      {
+        "name": "s3-tc-client",
+        "image": "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z",
+        "args": [
+          "if [ -s /opt/lockd/config/tc-client.pem ]; then exit 0; fi; exec /tools/lockd auth new tcclient --ca-in /opt/lockd/config/ca.pem --cn lockd-tc-client --out /opt/lockd/config/tc-client.pem"
+        ],
+        "volumeMounts": [
+          {
+            "name": "s3-config",
+            "mountPath": "/opt/lockd/config",
+            "readOnly": false
+          },
+          {
+            "name": "s3-data",
+            "mountPath": "/opt/lockd/storage",
+            "readOnly": false
+          },
+          {
+            "name": "bootstrap-tools",
+            "mountPath": "/tools",
+            "readOnly": true
+          }
+        ],
+        "command": [
+          "/bin/sh",
+          "-ec"
+        ]
+      },
+      {
+        "name": "mem-ca",
+        "image": "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z",
+        "args": [
+          "if [ -s /opt/lockd/config/ca.pem ]; then exit 0; fi; exec /tools/lockd auth new ca --cn lockd-root --out /opt/lockd/config/ca.pem"
+        ],
+        "volumeMounts": [
+          {
+            "name": "mem-config",
+            "mountPath": "/opt/lockd/config",
+            "readOnly": false
+          },
+          {
+            "name": "mem-data",
+            "mountPath": "/opt/lockd/storage",
+            "readOnly": false
+          },
+          {
+            "name": "bootstrap-tools",
+            "mountPath": "/tools",
+            "readOnly": true
+          }
+        ],
+        "command": [
+          "/bin/sh",
+          "-ec"
+        ]
+      },
+      {
+        "name": "mem-server",
+        "image": "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z",
+        "args": [
+          "if [ -s /opt/lockd/config/server.pem ]; then exit 0; fi; exec /tools/lockd auth new server --ca-in /opt/lockd/config/ca.pem --cn lockd-anywhere --hosts localhost,127.0.0.1 --out /opt/lockd/config/server.pem"
+        ],
+        "volumeMounts": [
+          {
+            "name": "mem-config",
+            "mountPath": "/opt/lockd/config",
+            "readOnly": false
+          },
+          {
+            "name": "mem-data",
+            "mountPath": "/opt/lockd/storage",
+            "readOnly": false
+          },
+          {
+            "name": "bootstrap-tools",
+            "mountPath": "/tools",
+            "readOnly": true
+          }
+        ],
+        "command": [
+          "/bin/sh",
+          "-ec"
+        ]
+      }
+    ],
+    "containers": [
+      {
+        "name": "minio",
+        "image": "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z",
+        "args": [
+          "server",
+          "/data",
+          "--console-address",
+          ":9001"
+        ],
+        "env": [
+          {
+            "name": "MINIO_ROOT_USER",
+            "value": "lockddev"
+          },
+          {
+            "name": "MINIO_ROOT_PASSWORD",
+            "value": "lockddevpass"
+          }
+        ],
+        "ports": [
+          {
+            "containerPort": 9000,
+            "hostPort": "@LOCKDC_MINIO_API_PORT@",
+            "hostIP": "127.0.0.1"
+          },
+          {
+            "containerPort": 9001,
+            "hostPort": "@LOCKDC_MINIO_CONSOLE_PORT@",
+            "hostIP": "127.0.0.1"
+          }
+        ],
+        "volumeMounts": [
+          {
+            "name": "minio-data",
+            "mountPath": "/data",
+            "readOnly": false
+          }
+        ]
+      },
+      {
+        "name": "minio-init",
+        "image": "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z",
+        "command": [
+          "/bin/sh",
+          "-ec"
+        ],
+        "args": [
+          "mc alias set local http://localhost:9000 lockddev lockddevpass; mc mb --ignore-existing local/lockd-client-s3; mc anonymous set none local/lockd-client-s3"
+        ],
+        "env": [
+          {
+            "name": "MC_CONFIG_DIR",
+            "value": "/mc"
+          }
+        ],
+        "volumeMounts": [
+          {
+            "name": "mc-config",
+            "mountPath": "/mc",
+            "readOnly": false
+          }
+        ]
+      },
+      {
+        "name": "lockd-disk-a",
+        "image": "docker.io/pktsystems/lockd:v0.8.1",
+        "args": [
+          "--store",
+          "disk:///opt/lockd/storage",
+          "--listen",
+          ":9341",
+          "--listen-proto",
+          "tcp"
+        ],
+        "env": [
+          {
+            "name": "LOCKD_CONFIG_DIR",
+            "value": "/opt/lockd/config"
+          },
+          {
+            "name": "LOCKD_OTLP_ENDPOINT",
+            "value": ""
+          }
+        ],
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "150M"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "disk-config",
+            "mountPath": "/opt/lockd/config",
+            "readOnly": true
+          },
+          {
+            "name": "disk-data",
+            "mountPath": "/opt/lockd/storage",
+            "readOnly": false
+          }
+        ],
+        "ports": [
+          {
+            "containerPort": 9341,
+            "hostPort": "@LOCKDC_DISK_A_PORT@",
+            "hostIP": "127.0.0.1"
+          }
+        ]
+      },
+      {
+        "name": "lockd-disk-b",
+        "image": "docker.io/pktsystems/lockd:v0.8.1",
+        "args": [
+          "--store",
+          "disk:///opt/lockd/storage",
+          "--listen",
+          ":9342",
+          "--listen-proto",
+          "tcp"
+        ],
+        "env": [
+          {
+            "name": "LOCKD_CONFIG_DIR",
+            "value": "/opt/lockd/config"
+          },
+          {
+            "name": "LOCKD_OTLP_ENDPOINT",
+            "value": ""
+          }
+        ],
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "150M"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "disk-config",
+            "mountPath": "/opt/lockd/config",
+            "readOnly": true
+          },
+          {
+            "name": "disk-data",
+            "mountPath": "/opt/lockd/storage",
+            "readOnly": false
+          }
+        ],
+        "ports": [
+          {
+            "containerPort": 9342,
+            "hostPort": "@LOCKDC_DISK_B_PORT@",
+            "hostIP": "127.0.0.1"
+          }
+        ]
+      },
+      {
+        "name": "lockd-s3",
+        "image": "docker.io/pktsystems/lockd:v0.8.1",
+        "args": [
+          "--store",
+          "s3://localhost:9000/lockd-client-s3/liblockdc?insecure=1&path-style=1",
+          "--listen",
+          ":9343",
+          "--listen-proto",
+          "tcp"
+        ],
+        "env": [
+          {
+            "name": "LOCKD_CONFIG_DIR",
+            "value": "/opt/lockd/config"
+          },
+          {
+            "name": "LOCKD_OTLP_ENDPOINT",
+            "value": ""
+          },
+          {
+            "name": "LOCKD_S3_ACCESS_KEY_ID",
+            "value": "lockddev"
+          },
+          {
+            "name": "LOCKD_S3_SECRET_ACCESS_KEY",
+            "value": "lockddevpass"
+          }
+        ],
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "150M"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "s3-config",
+            "mountPath": "/opt/lockd/config",
+            "readOnly": true
+          },
+          {
+            "name": "s3-data",
+            "mountPath": "/opt/lockd/storage",
+            "readOnly": false
+          }
+        ],
+        "ports": [
+          {
+            "containerPort": 9343,
+            "hostPort": "@LOCKDC_S3_PORT@",
+            "hostIP": "127.0.0.1"
+          }
+        ]
+      },
+      {
+        "name": "lockd-mem",
+        "image": "docker.io/pktsystems/lockd:v0.8.1",
+        "args": [
+          "--disable-mtls",
+          "--connguard-enabled=false",
+          "--store",
+          "mem://",
+          "--listen",
+          "/run/lockd/lockd.sock",
+          "--listen-proto",
+          "unix"
+        ],
+        "env": [
+          {
+            "name": "LOCKD_CONFIG_DIR",
+            "value": "/opt/lockd/config"
+          },
+          {
+            "name": "LOCKD_OTLP_ENDPOINT",
+            "value": ""
+          }
+        ],
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "150M"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "mem-config",
+            "mountPath": "/opt/lockd/config",
+            "readOnly": true
+          },
+          {
+            "name": "mem-data",
+            "mountPath": "/opt/lockd/storage",
+            "readOnly": false
+          },
+          {
+            "name": "mem-run",
+            "mountPath": "/run/lockd",
+            "readOnly": false
+          }
+        ]
+      }
+    ],
+    "volumes": [
+      {
+        "name": "disk-config",
+        "hostPath": {
+          "path": "@DEVENV_ROOT@/credentials/disk",
+          "type": "Directory"
+        }
+      },
+      {
+        "name": "s3-config",
+        "hostPath": {
+          "path": "@DEVENV_ROOT@/credentials/s3",
+          "type": "Directory"
+        }
+      },
+      {
+        "name": "mem-config",
+        "hostPath": {
+          "path": "@DEVENV_ROOT@/credentials/mem",
+          "type": "Directory"
+        }
+      },
+      {
+        "name": "disk-data",
+        "hostPath": {
+          "path": "@DEVENV_ROOT@/state/disk",
+          "type": "Directory"
+        }
+      },
+      {
+        "name": "s3-data",
+        "hostPath": {
+          "path": "@DEVENV_ROOT@/state/s3",
+          "type": "Directory"
+        }
+      },
+      {
+        "name": "mem-data",
+        "hostPath": {
+          "path": "@DEVENV_ROOT@/state/mem",
+          "type": "Directory"
+        }
+      },
+      {
+        "name": "mem-run",
+        "hostPath": {
+          "path": "@DEVENV_ROOT@/state/mem-run",
+          "type": "Directory"
+        }
+      },
+      {
+        "name": "minio-data",
+        "hostPath": {
+          "path": "@DEVENV_ROOT@/state/minio",
+          "type": "Directory"
+        }
+      },
+      {
+        "name": "mc-config",
+        "hostPath": {
+          "path": "@DEVENV_ROOT@/state/mc",
+          "type": "Directory"
+        }
+      },
+      {
+        "name": "bootstrap-tools",
+        "hostPath": {
+          "path": "@DEVENV_ROOT@/state/bootstrap",
+          "type": "Directory"
+        }
+      }
+    ]
+  }
+}

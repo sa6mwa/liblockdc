@@ -897,7 +897,7 @@ int lc_engine_client_index_flush(lc_engine_client *client,
                                  lc_engine_error *error) {
   lc_engine_index_flush_request body_src;
   lonejson_field body_fields[2];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_index_flush_response_json parsed;
   size_t body_field_count;
   int rc;
@@ -935,7 +935,7 @@ int lc_engine_client_txn_replay(lc_engine_client *client,
                                 lc_engine_error *error) {
   lc_engine_txn_replay_request body_src;
   lonejson_field body_fields[1];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_txn_response_json parsed;
   size_t body_field_count;
   int rc;
@@ -1029,7 +1029,7 @@ int lc_engine_client_txn_decide(lc_engine_client *client,
                                 lc_engine_error *error) {
   lc_engine_txn_decision_body_json body_src;
   lonejson_field body_fields[6];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_txn_response_json parsed;
   size_t body_field_count;
   int rc;
@@ -1063,7 +1063,7 @@ int lc_engine_client_txn_commit(lc_engine_client *client,
   lc_engine_txn_decision_request effective_request;
   lc_engine_txn_decision_body_json body_src;
   lonejson_field body_fields[6];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_txn_response_json parsed;
   size_t body_field_count;
   int rc;
@@ -1098,7 +1098,7 @@ int lc_engine_client_txn_rollback(lc_engine_client *client,
   lc_engine_txn_decision_request effective_request;
   lc_engine_txn_decision_body_json body_src;
   lonejson_field body_fields[6];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_txn_response_json parsed;
   size_t body_field_count;
   int rc;
@@ -1131,7 +1131,7 @@ int lc_engine_client_tc_lease_acquire(
     lc_engine_tc_lease_acquire_response *response, lc_engine_error *error) {
   lc_engine_tc_lease_acquire_request body_src;
   lonejson_field body_fields[4];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_tc_lease_response_json parsed;
   size_t body_field_count;
   int rc;
@@ -1168,7 +1168,7 @@ int lc_engine_client_tc_lease_renew(
     lc_engine_tc_lease_renew_response *response, lc_engine_error *error) {
   lc_engine_tc_lease_renew_request body_src;
   lonejson_field body_fields[3];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_tc_lease_response_json parsed;
   size_t body_field_count;
   int rc;
@@ -1203,7 +1203,7 @@ int lc_engine_client_tc_lease_release(
     lc_engine_tc_lease_release_response *response, lc_engine_error *error) {
   lc_engine_tc_lease_release_request body_src;
   lonejson_field body_fields[2];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_tc_release_response_json parsed;
   size_t body_field_count;
   int rc;
@@ -1253,7 +1253,7 @@ int lc_engine_client_tc_cluster_announce(
     lc_engine_tc_cluster_response *response, lc_engine_error *error) {
   lc_engine_tc_cluster_announce_request body_src;
   lonejson_field body_fields[1];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_tc_cluster_response_json parsed;
   size_t body_field_count;
   int rc;
@@ -1320,7 +1320,7 @@ int lc_engine_client_tcrm_register(
     lc_engine_tcrm_register_response *response, lc_engine_error *error) {
   lc_engine_tcrm_register_request body_src;
   lonejson_field body_fields[2];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_tcrm_register_response_json parsed;
   size_t body_field_count;
   int rc;
@@ -1353,7 +1353,7 @@ int lc_engine_client_tcrm_unregister(
     lc_engine_tcrm_unregister_response *response, lc_engine_error *error) {
   lc_engine_tcrm_unregister_request body_src;
   lonejson_field body_fields[2];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_tcrm_register_response_json parsed;
   size_t body_field_count;
   int rc;

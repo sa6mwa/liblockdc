@@ -22,8 +22,13 @@ not for a normal `luarocks install` flow.
 declared by `lockdc` rather than repackaging a separate `lockd` Lua client or a
 competing JSON binding.
 
-For this release line, the `lockdc` rock declares `lonejson == 0.44.0-1`. That
-matches the native `lonejson 0.44.0` dependency used by the C SDK for mapped
+PostgreSQL XA additionally uses the optional `lockdc-postgres` rock and the
+native provider/cpktdb SDKs. Core Lua remains usable without them. Static hosts
+preload the linked registration entry point. See the [Lua XA guide](../../docs/lua.md#optional-postgresql-participation)
+for managed transactions, manual participant APIs and checked query adapters.
+
+For this release line, the `lockdc` rock declares `lonejson == 0.45.0-1`. That
+matches the native `lonejson 0.45.0` dependency used by the C SDK for mapped
 state load/save and internal JSON response parsing.
 
 When running from this repository after installing `lockdc` and `lonejson` into
@@ -50,12 +55,14 @@ The examples read these variables when present:
 - `LOCKDC_OWNER`
 - `LOCKDC_QUEUE`
 
-Defaults assume the local development environment from this repository.
+Source the generated environment to use the checkout-specific endpoints and
+client bundles from the local Podman Kube environment.
 
 Start it with:
 
 ```bash
 make dev-up
+source build/devenv/env.sh
 ```
 
 ## Examples

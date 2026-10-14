@@ -16,8 +16,10 @@ assert_contains([=[download_timeout=${LOCKDC_DEPENDENCY_DOWNLOAD_TIMEOUT:-300}]=
 assert_contains([=[local_download_root=${LOCKDC_DOWNLOAD_ROOT:-$repo_root/.cache/downloads}]=] "repository-local archive staging root")
 assert_contains([=[acquire_verified_archive()]=] "verified archive acquisition wrapper")
 assert_contains([=[-DLOCKDC_ARCHIVE_TIMEOUT="$download_timeout"]=] "download timeout passed to archive helper")
-assert_contains([=[https://github.com/sa6mwa/c.pkt.systems/releases/download/v$cpkt_version/$cpkt_asset_name]=] "c.pkt.systems release URL")
-assert_contains([=[$local_download_root/$cpkt_asset_name]=] "local c.pkt.systems archive staging path")
+assert_contains([=[https://github.com/c89systems/cpkt/releases/download/v$cpkt_version/$cpkt_asset_name]=] "cpkt release URL")
+assert_contains([=[$local_download_root/$cpkt_asset_name]=] "local cpkt archive staging path")
+assert_contains([=[https://github.com/c89systems/cpktdb/releases/download/v$cpktdb_version/$cpktdb_asset_name]=] "cpktdb release URL")
+assert_contains([=[$local_download_root/$cpktdb_asset_name]=] "local cpktdb archive staging path")
 
 foreach(helper_snippet
     [=[${CPKT_DEPENDENCY_CACHE}/archives/sha256/${lockdc_archive_sha256}]=]

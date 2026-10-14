@@ -8,6 +8,7 @@ endif()
 
 include("${LOCKDC_ROOT}/tests/bootlin_runtime_test_support.cmake")
 lockdc_import_cmake_cache_value("${LOCKDC_BINARY_DIR}" CMAKE_SYSROOT)
+lockdc_import_cmake_cache_value("${LOCKDC_BINARY_DIR}" CMAKE_TOOLCHAIN_FILE)
 
 if(EXISTS "${LOCKDC_BINARY_DIR}/package-metadata.cmake")
     include("${LOCKDC_BINARY_DIR}/package-metadata.cmake")
@@ -312,7 +313,7 @@ int main(void) {
 
 set(lockdc_consumer_prefix_path
     "${install_prefix}"
-    "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install"
+    "${LOCKDC_EXTERNAL_ROOT}/cpkt/install"
     "${LOCKDC_EXTERNAL_ROOT}/pslog/install"
     "${LOCKDC_EXTERNAL_ROOT}/lonejson/install"
     "${LOCKDC_EXTERNAL_ROOT}/liblql/install")
@@ -325,17 +326,21 @@ set(lockdc_consumer_configure_command
     "-DCMAKE_C_COMPILER=${LOCKDC_C_COMPILER}"
     "-DCMAKE_C_FLAGS_DEBUG=${LOCKDC_C_FLAGS_DEBUG}"
     "-DCMAKE_PREFIX_PATH=${lockdc_consumer_prefix_path_arg}"
-    "-DCURL_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/CURL"
-    "-DOpenSSL_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/OpenSSL"
-    "-DZLIB_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/zlib"
-    "-Dnghttp2_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/nghttp2"
-    "-DLibssh2_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/libssh2"
+    "-Dlockdc_DIR=${install_prefix}/lib/cmake/lockdc"
+    "-DCURL_DIR=${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/CURL"
+    "-DOpenSSL_DIR=${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/OpenSSL"
+    "-DZLIB_DIR=${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/zlib"
+    "-Dnghttp2_DIR=${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/nghttp2"
+    "-DLibssh2_DIR=${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/libssh2"
     "-Dpslog_DIR=${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/cmake/pslog"
     "-Dlonejson_DIR=${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/cmake/lonejson"
     "-Dliblql_DIR=${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib/cmake/liblql"
     "-DLOCKDC_BOOTLIN_RUNTIME_LOADER=${lockdc_bootlin_runtime_loader}"
     "-DLOCKDC_BOOTLIN_RUNTIME_DIRS=${lockdc_bootlin_runtime_dirs_arg}"
 )
+if(DEFINED CMAKE_TOOLCHAIN_FILE AND NOT CMAKE_TOOLCHAIN_FILE STREQUAL "")
+    list(APPEND lockdc_consumer_configure_command "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}")
+endif()
 if(DEFINED LOCKDC_BUILD_TYPE AND NOT LOCKDC_BUILD_TYPE STREQUAL "")
     list(APPEND lockdc_consumer_configure_command
         "-DCMAKE_BUILD_TYPE=${LOCKDC_BUILD_TYPE}"
@@ -384,7 +389,7 @@ endif()
 
 set(lockdc_pkgconfig_path_entries
     "${install_prefix}/lib/pkgconfig"
-    "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/pkgconfig"
+    "${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/pkgconfig"
     "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/pkgconfig"
     "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/pkgconfig"
     "${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib/pkgconfig")

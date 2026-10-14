@@ -22,9 +22,10 @@ This cutover splits those roles:
 - a host decides its process topology, scheduling, and language-runtime
   ownership.
 
-The cutover is intentionally breaking and ships in ABI generation 4, one
-generation after the previously released ABI 3. Future incompatible public C
-layout changes require a new ABI generation. There is no compatibility
+The dispatcher cutover shipped in ABI generation 4 after ABI 3. The terminal
+retention configuration and statistics extend public C layouts and advance
+the current ABI to generation 5 from released ABI 4. Future incompatible
+public C layout changes require a new ABI generation. There is no compatibility
 constructor and no legacy implicit-thread mode.
 
 `outbox` is deliberately the distributed-systems term for this transactional
@@ -158,11 +159,11 @@ snapshot, query, or allocation on the stateless pull path. It is deliberately
 stateful-pull maintenance rather than generic Pouch retention, because only
 the outbox can interpret the parent/sidecar relationship.
 
-Dead-letter remains an operator-visible replay state, so its sidecar remains
-until replay, `delete_dead_letter()`, or Pouch's automatic dead-letter
-retention reclaims the terminal envelope. Both explicit and automatic removal
-delete the sidecar and its attachments before consuming the envelope and
-payload, preserving a retryable management boundary on failure. Automatic
+Dead-letter remains an operator-visible replay state, so its sidecar survives
+replay and remains until a later completion, `delete_dead_letter()`, or Pouch's
+automatic dead-letter retention reclaims the terminal envelope. Both explicit
+and automatic removal delete the sidecar and its attachments before consuming
+the envelope and payload, preserving a retryable management boundary on failure. Automatic
 retention is separately scheduled from a durable exact-key marker and never
 performs a namespace query or scan on the delivery path; its defaults and
 crash/multiwriter semantics are specified in
@@ -171,6 +172,14 @@ state-retention sweep skips reserved outbox-state keys: only parent-aware
 outbox transitions may reclaim them. An application that has safely exported
 or no longer needs a large in-flight checkpoint may explicitly remove its
 state through the borrowed lease before terminalizing the job.
+
+Completed envelopes, accepted inbox receipts, and completed/failed commands
+have independent 30-day [terminal receipt retention](pouch-terminal-retention.md)
+defaults. Optional count caps can reclaim before expiry. This is dispatcher
+maintenance, separate from checkpoint cleanup on a stateful pull. Removing a
+receipt ends its duplicate/idempotency protection and command-status lookup;
+pending or claimed work is excluded. Producers and foreground reads remain
+threadless and do not trigger this reclamation.
 
 Stateful and stateless consumers can safely compete at the storage level, but
 a deployed handler that relies on checkpoints must ensure every consumer for
@@ -292,7 +301,8 @@ One live dispatcher exists at most once for a `(client instance, canonical
 outbox configuration)` registry key. The key includes every configuration
 field, after defaults and validation have been applied: namespace, owner,
 transaction and claim TTLs, retry policy, notification capacity, recovery
-cadence, shutdown request timeout, and dead-letter startup policy. Comparing
+cadence, shutdown request timeout, dead-letter startup policy, and every
+dead-letter and terminal-retention duration/count/byte limit. Comparing
 canonical owned values, rather than caller pointers, makes the result stable.
 
 Different `lc_client` instances never share a registry entry. They can safely
@@ -517,6 +527,11 @@ the durable namespace. Pouch additionally reports monotonic
 `dead_letter_reclaims` and `dead_letter_reclaim_failures`; these are control
 marker maintenance outcomes, including harmless stale-marker disposal after a
 replay, rather than foreground-delivery work.
+Terminal receipt maintenance similarly reports `terminal_reclaims` and
+`terminal_reclaim_failures`. Reclaim counters include safely retired stale
+markers and therefore are not counts of application records deleted. A damaged
+marker remains retryable and reports an error while the advisory cursor allows
+other eligible work to progress.
 
 ## Lua outbox and dispatcher façade
 

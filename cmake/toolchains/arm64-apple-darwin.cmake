@@ -2,15 +2,38 @@ set(CMAKE_SYSTEM_NAME Darwin)
 set(CMAKE_SYSTEM_PROCESSOR arm64)
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
-if(DEFINED ENV{OSXCROSS_ROOT} AND NOT "$ENV{OSXCROSS_ROOT}" STREQUAL "")
-    set(LOCKDC_OSXCROSS_ROOT "$ENV{OSXCROSS_ROOT}")
-elseif(DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
-    set(LOCKDC_OSXCROSS_ROOT "$ENV{HOME}/.local/cross/osxcross")
-else()
-    message(FATAL_ERROR "OSXCROSS_ROOT is not set and HOME is unavailable")
+get_filename_component(_lockdc_toolchain_resolver
+    "${CMAKE_CURRENT_LIST_DIR}/../../scripts/cpkt-toolchains.sh" ABSOLUTE)
+set(_lockdc_discovery_command "${CMAKE_COMMAND}" -E env)
+if(DEFINED LOCKDC_OSXCROSS_HOST AND NOT LOCKDC_OSXCROSS_HOST STREQUAL "")
+    list(APPEND _lockdc_discovery_command "CPKT_OSXCROSS_HOST=${LOCKDC_OSXCROSS_HOST}")
+elseif(NOT DEFINED ENV{CPKT_OSXCROSS_HOST} OR "$ENV{CPKT_OSXCROSS_HOST}" STREQUAL "")
+    if(DEFINED ENV{LOCKDC_OSXCROSS_HOST} AND NOT "$ENV{LOCKDC_OSXCROSS_HOST}" STREQUAL "")
+        list(APPEND _lockdc_discovery_command "CPKT_OSXCROSS_HOST=$ENV{LOCKDC_OSXCROSS_HOST}")
+    endif()
 endif()
-
-set(LOCKDC_OSXCROSS_HOST "arm64-apple-darwin25" CACHE STRING "osxcross target host triple")
+execute_process(
+    COMMAND ${_lockdc_discovery_command} "${_lockdc_toolchain_resolver}" discover arm64-apple-darwin
+    RESULT_VARIABLE _lockdc_discovery_result
+    OUTPUT_VARIABLE _lockdc_toolchain_description
+    ERROR_VARIABLE _lockdc_discovery_error)
+if(NOT _lockdc_discovery_result EQUAL 0 OR
+   NOT _lockdc_toolchain_description MATCHES "(^|\n)status=ready(\n|$)")
+    message(FATAL_ERROR
+        "Darwin osxcross and pinned host MIG are not ready. Run scripts/cpkt-toolchains.sh ensure arm64-apple-darwin and reconfigure. ${_lockdc_discovery_error}")
+endif()
+foreach(_lockdc_key root prefix mig migcom mig_revision)
+    string(REGEX MATCH "(^|\n)${_lockdc_key}=([^\r\n]+)" _lockdc_match "${_lockdc_toolchain_description}")
+    if(NOT _lockdc_match)
+        message(FATAL_ERROR "Darwin resolver did not report ${_lockdc_key}")
+    endif()
+    set(_lockdc_resolved_${_lockdc_key} "${CMAKE_MATCH_2}")
+endforeach()
+set(LOCKDC_OSXCROSS_ROOT "${_lockdc_resolved_root}")
+set(LOCKDC_OSXCROSS_HOST "${_lockdc_resolved_prefix}" CACHE STRING "osxcross target host triple" FORCE)
+set(LOCKDC_HOST_MIG "${_lockdc_resolved_mig}" CACHE FILEPATH "Pinned Linux host MIG" FORCE)
+set(LOCKDC_HOST_MIGCOM "${_lockdc_resolved_migcom}" CACHE FILEPATH "Pinned Linux host MIG compiler" FORCE)
+set(LOCKDC_HOST_MIG_REVISION "${_lockdc_resolved_mig_revision}" CACHE STRING "Pinned host MIG revision" FORCE)
 set(LOCKDC_MACOS_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum macOS deployment target")
 set(CMAKE_OSX_DEPLOYMENT_TARGET "${LOCKDC_MACOS_DEPLOYMENT_TARGET}" CACHE STRING "" FORCE)
 
@@ -28,6 +51,7 @@ set(LOCKDC_OTOOL "${LOCKDC_OSXCROSS_BIN_DIR}/${LOCKDC_OSXCROSS_HOST}-otool" CACH
 
 foreach(_lockdc_required_tool
         CMAKE_C_COMPILER
+        CMAKE_CXX_COMPILER
         CMAKE_AR
         CMAKE_RANLIB
         CMAKE_LINKER
@@ -58,7 +82,7 @@ file(GLOB _lockdc_osxcross_sdks LIST_DIRECTORIES true "${LOCKDC_OSXCROSS_ROOT}/S
 if(NOT _lockdc_osxcross_sdks)
     message(FATAL_ERROR "failed to locate a usable osxcross macOS SDK under ${LOCKDC_OSXCROSS_ROOT}/SDK")
 endif()
-list(SORT _lockdc_osxcross_sdks)
+list(SORT _lockdc_osxcross_sdks COMPARE NATURAL)
 list(REVERSE _lockdc_osxcross_sdks)
 list(GET _lockdc_osxcross_sdks 0 LOCKDC_OSXCROSS_SDK)
 if(NOT EXISTS "${LOCKDC_OSXCROSS_SDK}/usr/include")

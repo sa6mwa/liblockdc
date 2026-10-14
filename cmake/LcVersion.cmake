@@ -1,3 +1,6 @@
+set(LOCKDC_VERSION_OVERRIDE "$ENV{LOCKDC_VERSION_OVERRIDE}" CACHE STRING
+    "Override the detected liblockdc package version with an explicit semantic version.")
+
 function(lc_detect_version out_var)
   set(_lc_version "0.0.0")
   if(DEFINED LOCKDC_VERSION_SOURCE_DIR AND NOT "${LOCKDC_VERSION_SOURCE_DIR}" STREQUAL "")

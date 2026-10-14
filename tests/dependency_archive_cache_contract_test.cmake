@@ -227,8 +227,8 @@ endif()
 file(READ "${clean_script}" clean_script_text)
 foreach(forbidden_snippet
     "CPKT_DEPENDENCY_CACHE"
-    ".cache/c.pkt.systems/deps"
-    "c.pkt.systems/deps")
+    ".cache/cpkt/deps"
+    "cpkt/deps")
     string(FIND "${clean_script_text}" "${forbidden_snippet}" forbidden_index)
     if(NOT forbidden_index EQUAL -1)
         message(FATAL_ERROR "clean script must not remove the shared dependency archive cache")

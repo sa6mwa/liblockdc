@@ -106,6 +106,9 @@ func runPouchProductionC(b *testing.B, rows, updatesPerKey, payloadBytes, segmen
 		if rc != 0 {
 			b.Fatalf("pouch production benchmark failed: rc=%d rows=%d updates=%d payload=%d segment_target=%d error=%q", int(rc), rows, updatesPerKey, payloadBytes, segmentTargetBytes, C.GoString(&result.error[0]))
 		}
+		if rows*updatesPerKey >= 2 && result.flush_intermediate_ns <= 0 {
+			b.Fatal("pouch production workload did not measure intermediate publication")
+		}
 		totalCNS += uint64(result.c_ns)
 	}
 	if b.N > 0 {

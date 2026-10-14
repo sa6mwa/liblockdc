@@ -1,6 +1,6 @@
 # Vectis outbox integration handover
 
-Status: implementation handover guide. This is the integration entry point for
+This is the integration entry point for
 a Vectis supervisor. It defines the contract that Vectis must preserve when it
 uses liblockdc's transactional outbox. It does not implement Vectis's
 supervisor, IPC, handler registry, or application workflow policy.
@@ -15,6 +15,9 @@ replacing the detailed authorities:
 - [Pouch storage](pouch-storage.md) defines local-root operation and recovery.
 - [Typed Pouch open settings](pouch-open-settings-api.md) defines the preferred
   C and Lua configuration surface for a local root.
+- [Terminal receipt retention](pouch-terminal-retention.md) and
+  [dead-letter retention](pouch-dead-letter-retention.md) define cleanup windows,
+  overload limits, and the end of idempotency protection.
 - [Lua bindings](lua.md) defines the complete Lua facade. The Vectis dispatcher
   integration itself uses raw C pull mode, not Lua `run()` or `pump()`.
 
@@ -46,10 +49,10 @@ Vectis may build activities, graphs, and supervisor policy on top of it; those
 concepts are not interpreted or persisted by liblockdc.
 
 This handover covers the implemented and verified Pouch deployment. The remote
-Lockd protocol has the same intended outbox model, but its multi-participant
-implicit-XA enrollment remains outside the currently verified operational
-scope. A Vectis release using this integration must therefore use Pouch until
-that remote endpoint limitation is resolved.
+Lockd protocol has the same intended outbox model, but server defects in
+multi-participant implicit-XA enrollment and public-state isolation prevent
+remote outbox support. A Vectis release using this integration must use Pouch
+until both [server limitations](inbox-outbox.md#remote-lockd) are resolved.
 
 ## Required process topology
 
@@ -101,6 +104,15 @@ must use compatible values when it creates an outbox or obtains the dispatcher.
 Configuration disagreement is an error, not a signal to create another local
 dispatcher.
 
+Canonical configuration includes all retention fields. Completed envelopes,
+accepted inbox receipts, and completed/failed command receipts independently
+default to 30 days with no count cap; dead letters default to 30 days, 1,024
+envelopes, or 64 MiB. A live dispatcher performs cleanup even without consumer
+demand. Select each window to cover retries, redelivery, and command-status
+clients: reclamation ends idempotency protection and removes owned results.
+An optional count cap permits earlier reclamation. Existing unmarked receipts
+are not backfilled; changing a time window affects future terminal transitions.
+
 For shared-root Pouch dispatch, set a positive
 `lc_outbox_config.recovery_interval_seconds` that meets the application's
 maximum delayed-delivery objective. Its Pouch default is zero, which disables
@@ -145,6 +157,10 @@ returns the latest owned pending receipt. A route can map that timeout to its
 normal `202 Accepted` status resource, or map a terminal command result to its
 own final response. The bounded wait never changes supervisor ownership or the
 foreign-effect ordering described below.
+
+Status resources must also handle a terminal receipt being reclaimed. Neither
+receipt reads nor `resume_command_by_id()` reconstruct an expired command;
+after cleanup a reused command identity may be accepted as new work.
 
 A duplicate receipt from an append/command/inbox call denotes already durable
 work. It can be forwarded as a harmless latency hint, but it is not a fresh

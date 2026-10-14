@@ -3,8 +3,13 @@
 Pouch automatically reclaims outbox dead letters. The policy exists to keep a
 failed foreign effect observable long enough to diagnose or replay without
 letting an unattended dispatcher namespace become a permanent retention sink.
-It applies only to local Pouch outboxes. Remote lockd deployments retain their
-server-owned policy.
+It applies only to local Pouch outboxes. Remote lockd outboxes remain
+unsupported until the [server limitations](inbox-outbox.md#remote-lockd) are
+resolved.
+
+Completed outbox envelopes, inbox receipts, and terminal commands use separate
+[terminal receipt retention](pouch-terminal-retention.md) settings. Their count
+caps are disabled by default; the dead-letter limits below remain unchanged.
 
 ## Default policy
 
@@ -96,6 +101,14 @@ turn cursor even after a busy collision, so one long-held marker cannot starve
 other due or over-capacity work. The cursor is advisory only; a restart safely
 starts a new bounded turn. No dispatcher lock is held across normal delivery,
 and no foreground pull waits for retention work.
+
+Unreadable marker bodies participate in that turn by validated filename
+identity. Their errors remain observable, and the marker and parent are left
+intact for diagnosis and retry. A damaged marker cannot prevent later healthy
+dead letters from being reclaimed, including under count or byte overload.
+Its name still consumes count capacity; untrusted bytes are not included in
+the measured byte total. Repairing a marker does not bypass its expiry or the
+configured capacity limits.
 
 When the control hierarchy is first created, Pouch syncs each parent directory
 before publishing a marker, so a durable terminal parent cannot rely on a

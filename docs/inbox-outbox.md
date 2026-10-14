@@ -8,8 +8,9 @@ cutover is specified separately in
 [the outbox dispatch architecture](outbox-dispatch-architecture.md).
 Where that document differs from an older outbox receiver or private-thread
 description below, the dispatch architecture governs the implementation.
-Remote lockd verification is deferred only because its current implicit-XA
-enrollment defect breaks multi-participant atomicity.
+Outbox support is currently Pouch-only. Remote lockd outboxes are unsupported
+because of server defects in implicit-XA enrollment and public-state isolation,
+as described under [Remote lockd](#remote-lockd).
 
 ## Purpose
 
@@ -19,8 +20,9 @@ command acceptance, record an external-effect intent, and later perform that
 effect without the dual-write failure window.
 
 The implementation uses existing liblockdc state, attachment, transaction,
-lease, and query capabilities. It works against either a remote lockd endpoint
-or local Pouch storage. It does not use lockd queues.
+lease, and query capabilities. The API models remote lockd and local Pouch
+storage, but only Pouch currently satisfies the verified outbox contract. It
+does not use lockd queues.
 
 The component provides at-least-once handoff. It cannot guarantee exactly once
 for an effect outside lockd/Pouch. The stable `effect_key` delivered to the
@@ -84,13 +86,22 @@ Ordinary application credentials do not call the privileged transaction
 coordinator API. Each terminal outbox release uses the endpoint's implicit
 XA path. Current remote lockd incorrectly permits the first, non-explicit
 lease to publish on its release after a later participant joins. liblockdc does
-not rely on that behavior; remote multi-participant outbox atomicity remains
-unavailable until lockd fixes the reported defect. The outbox API remains
-available for remote endpoints so a fixed lockd works without a client-library
-upgrade: lockd exposes no endpoint-version capability that would let liblockdc
-reliably gate only affected server versions. Applications requiring atomic
-remote multi-participant outboxes must therefore deploy a lockd version with
-the reported fix.
+not rely on that behavior. Remote lockd outboxes are currently unsupported;
+use Pouch for outbox workflows. The endpoint-neutral API remains available for
+upstream verification, but its availability does not establish remote outbox
+support.
+
+The pinned E2E server, lockd v0.8.1, also exposes uncommitted state through
+lease-free public reads. After committing a `pending` record and staging
+`completed` under a new lease, `/v1/get?public=1` returns the staged body,
+version, and ETag; rollback restores the committed `pending` record. Staged
+removals can similarly hide a committed record from public reads. This defect
+is in the server's state-read selection and occurs with its state cache enabled
+or disabled; it also reproduces through raw HTTP without liblockdc. Before
+remote outbox support can be established, verification must prove that public
+reads remain on the published state until commit and retain that state after
+rollback, in addition to proving implicit XA enrollment. See
+[lockd v0.8.1's state-read implementation](https://github.com/sa6mwa/lockd/blob/v0.8.1/internal/core/state.go).
 
 ### Local Pouch
 
@@ -857,7 +868,7 @@ digests; source-supplied identity strings are never concatenated into paths.
 A command receipt without its associated domain/outbox transaction is not the
 feature's correctness goal. The public command-receipt API is endpoint-neutral
 and uses the same outbox composition for Pouch and remote lockd. This release
-proves it for Pouch first; compose-backed remote E2E proof remains deferred
+proves it for Pouch first; Podman-backed remote E2E proof remains deferred
 until lockd repairs its implicit-XA enrollment contract.
 
 ### Message consumer that starts an owned command
@@ -1274,17 +1285,20 @@ configuration must additionally bound:
 
 ### Receipt retention and privacy
 
-Command receipt, inbox, ordinary outbox evidence, and external-delivery
-evidence have different retention purposes and must have independently
-configured retention policies. Pouch dead-letter envelopes are the narrow
-exception: their automatic 30-day/capacity policy is defined above and does
-not imply automatic deletion of command receipts, inbox receipts, pending
-outbox records, or completed outbox evidence.
+Pouch completed outbox envelopes, accepted inbox receipts, and completed or
+failed command receipts have independent 30-day retention defaults and optional
+count caps, disabled by default. Dead letters retain their separate
+30-day/capacity policy. Pending commands and pending, retrying, or claimed
+outbox records are excluded. Automatic reclamation requires a live dispatcher.
+See [Pouch terminal receipt retention](pouch-terminal-retention.md) for the
+configuration, existing-data boundary, and restart safety rules.
+
 A receipt must outlive the maximum retry, redelivery, and client-status window
 for its boundary; deleting it earlier deliberately reopens duplicate execution
-for that identity. v0 defaults to no automatic deletion. A later retention
-sweeper may delete only terminal records older than an explicit configured
-window and must remove a command result attachment atomically with its receipt.
+for that identity. An explicit count cap also permits early reclamation.
+Command result attachments are removed atomically with their terminal receipt.
+Remote outboxes, including their retention semantics, remain unsupported until
+the [server limitations](#remote-lockd) are resolved.
 
 The durable `request_digest` is comparison material, not audit payload. It and
 all result, source, and outbox attachments may be sensitive. Public errors,
@@ -1533,28 +1547,22 @@ outbox E2E suite above proves that topology's survival behavior.
 
 Timing is reported rather than enforced as a universal pass/fail threshold:
 storage media, remote TLS, and lockd deployment topology materially affect the
-absolute number. Before v1, record representative Pouch and remote baselines
-on the supported deployment hardware and promote agreed budgets into an
-explicit performance gate.
+absolute number. `make bench-gate` enforces a 1.25x median Pouch speedup against
+the matching Go disk configuration on every comparable core operation, using
+bounded fixtures and five samples for default and strict durability separately.
+Larger scale and stress profiles remain available for deployment-specific work.
 
-## Remaining Proof Obligations and Future Work
+## Compatibility boundary
 
 The durable record rules in this document remain the outbox compatibility
 boundary. Threadless producer and explicit-dispatcher receiver names,
 lifecycle, and Lua ownership are governed by
-[the outbox dispatch architecture](outbox-dispatch-architecture.md). Future
-public-surface changes require the same API and ABI review. The remaining
-component-specific work is:
-
-1. Define the command-result safe-response contract and terminal failure code
-   taxonomy without making liblockdc an HTTP status-code policy engine.
-2. Define independent terminal retention windows for command, inbox, outbox,
-   dead-letter, and optional request/result attachments before adding an
-   automatic sweeper.
-3. Establish quantitative recovery-query performance budgets from the Pouch and
-   remote-lockd benchmark matrix before treating indexing as sufficient.
-4. Prove remote command receipt composition only after the upstream implicit-XA
-   enrollment fix is available in the repository's pinned E2E lockd image.
+[the outbox dispatch architecture](outbox-dispatch-architecture.md).
+Public-surface changes require the same API and ABI review. Applications own
+command-result response policy and failure-code taxonomy; liblockdc persists
+the selected terminal result without choosing HTTP status codes.
+Remote command receipt composition is unsupported under the
+[remote lockd constraints](#remote-lockd).
 
 ## Design Basis
 

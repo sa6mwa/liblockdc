@@ -163,20 +163,58 @@ set(lockdc_lua_source_extract_root "${lockdc_lua_source_unpack_root}/liblockdc-l
 foreach(required_source
     "LICENSE"
     "README.md"
+    "CHANGELOG.md"
     "RELEASE_MANIFEST"
     "VERSION"
+    "docs/lua.md"
+    "docs/pouch-terminal-retention.md"
+    "docs/pouch-dead-letter-retention.md"
+    "docs/outbox-dispatch-architecture.md"
+    "docs/outbox-vectis-handover.md"
+    "docs/inbox-outbox.md"
+    "docs/xa.md"
+    "docs/pouch-open-settings-api.md"
+    "docs/pouch-storage.md"
+    "docs/worst-case-scenario.md"
+    "examples/lua/README.md"
+    "examples/lua/outbox_dispatcher.lua"
+    "examples/outbox_producer.c"
     "include/lc/lc.h"
+    "include/lc/postgres.h"
     "lockdc.rockspec.in"
+    "lockdc-postgres.rockspec.in"
     "src/lua/lockdc_lua.c"
-    "src/lc_api_internal.h"
-    "src/lc_engine_api.h"
-    "src/lc_intcompat.h"
-    "src/lc_pouch.h"
+    "src/lua/lockdc_xa_lua.c"
+    "src/lua/lockdc_xa_resource_lua.c"
+    "src/lua/lockdc_xa_provider_lua.c"
+    "src/lua/lockdc_lua.h"
+    "src/lua/lockdc_lua_internal.h"
+    "src/lua/lockdc_postgres_lua.c"
+    "src/lua/lockdc_postgres_lua.h"
     "scripts/assert_generated_path.sh"
     "scripts/build_lua_rock.sh"
+    "scripts/build_postgres_lua_rock.sh"
 )
     if(NOT EXISTS "${lockdc_lua_source_extract_root}/${required_source}")
         message(FATAL_ERROR "Lua source rock is missing required source: ${required_source}")
+    endif()
+    if(required_source MATCHES "^docs/" OR required_source STREQUAL "README.md"
+       OR required_source STREQUAL "CHANGELOG.md")
+        file(SHA256 "${LOCKDC_ROOT}/${required_source}" current_doc_digest)
+        file(SHA256 "${lockdc_lua_source_extract_root}/${required_source}" packaged_doc_digest)
+        if(NOT current_doc_digest STREQUAL packaged_doc_digest)
+            message(FATAL_ERROR "Lua source package contains stale documentation: ${required_source}")
+        endif()
+    endif()
+endforeach()
+
+foreach(excluded_guide
+    docs/pouch-replay-investigation.md
+    docs/lockd-implicit-xa-handover.md
+    docs/lockd-memory-queue-watch-race.md
+    docs/lockd-durable-crypto-index-freshness.md)
+    if(EXISTS "${lockdc_lua_source_extract_root}/${excluded_guide}")
+        message(FATAL_ERROR "Lua source package contains an investigation note: ${excluded_guide}")
     endif()
 endforeach()
 
@@ -239,7 +277,7 @@ if(NOT lockdc_lua_expected_manifest STREQUAL lockdc_lua_actual_manifest)
         "expected:\n  ${lockdc_lua_expected_manifest_text}\n"
         "actual:\n  ${lockdc_lua_actual_manifest_text}")
 endif()
-string(FIND "${lockdc_lua_inner_rockspec_text}" "\"lonejson == 0.44.0-1\"" inner_lonejson_index)
+string(FIND "${lockdc_lua_inner_rockspec_text}" "\"lonejson == 0.45.0-1\"" inner_lonejson_index)
 if(inner_lonejson_index EQUAL -1)
     message(FATAL_ERROR
         "Lua source rock embedded rockspec is missing the pinned lonejson dependency\n"
@@ -252,7 +290,7 @@ foreach(required_snippet
     "version = \"${LOCKDC_VERSION}-1\""
     "url = \"git+https://github.com/sa6mwa/liblockdc.git\""
     "tag = \"v${LOCKDC_VERSION}\""
-    "\"lonejson == 0.44.0-1\""
+    "\"lonejson == 0.45.0-1\""
     "scripts/build_lua_rock.sh"
 )
     string(FIND "${lockdc_lua_rockspec_text}" "${required_snippet}" snippet_index)

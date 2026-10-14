@@ -68,32 +68,75 @@ if(NOT lockdc_generated_rockspec_name STREQUAL lockdc_lua_rockspec_name)
 endif()
 file(COPY "${LOCKDC_ROOT}/lua/lockdc/init.lua" DESTINATION "${lockdc_lua_source_root}/lua/lockdc")
 file(COPY "${LOCKDC_ROOT}/src/lua/lockdc_lua.c" DESTINATION "${lockdc_lua_source_root}/src/lua")
-file(COPY "${LOCKDC_ROOT}/src/lc_api_internal.h" DESTINATION "${lockdc_lua_source_root}/src")
-file(COPY "${LOCKDC_ROOT}/src/lc_engine_api.h" DESTINATION "${lockdc_lua_source_root}/src")
-file(COPY "${LOCKDC_ROOT}/src/lc_intcompat.h" DESTINATION "${lockdc_lua_source_root}/src")
-file(COPY "${LOCKDC_ROOT}/src/lc_pouch.h" DESTINATION "${lockdc_lua_source_root}/src")
+file(COPY
+    "${LOCKDC_ROOT}/src/lua/lockdc_xa_lua.c"
+    "${LOCKDC_ROOT}/src/lua/lockdc_xa_resource_lua.c"
+    "${LOCKDC_ROOT}/src/lua/lockdc_xa_provider_lua.c"
+    "${LOCKDC_ROOT}/src/lua/lockdc_lua.h"
+    "${LOCKDC_ROOT}/src/lua/lockdc_lua_internal.h"
+    "${LOCKDC_ROOT}/src/lua/lockdc_postgres_lua.c"
+    "${LOCKDC_ROOT}/src/lua/lockdc_postgres_lua.h"
+    DESTINATION "${lockdc_lua_source_root}/src/lua")
 file(COPY "${LOCKDC_ROOT}/scripts/build_lua_rock.sh" DESTINATION "${lockdc_lua_source_root}/scripts")
+file(COPY "${LOCKDC_ROOT}/scripts/build_postgres_lua_rock.sh" DESTINATION "${lockdc_lua_source_root}/scripts")
 file(COPY "${LOCKDC_ROOT}/scripts/assert_generated_path.sh" DESTINATION "${lockdc_lua_source_root}/scripts")
 file(COPY "${LOCKDC_ROOT}/include/lc/lc.h" DESTINATION "${lockdc_lua_source_root}/include/lc")
+file(COPY "${LOCKDC_ROOT}/include/lc/postgres.h" DESTINATION "${lockdc_lua_source_root}/include/lc")
 file(COPY "${LOCKDC_ROOT}/LICENSE" DESTINATION "${lockdc_lua_source_root}")
 file(COPY "${LOCKDC_ROOT}/README.md" DESTINATION "${lockdc_lua_source_root}")
+file(COPY "${LOCKDC_ROOT}/CHANGELOG.md" DESTINATION "${lockdc_lua_source_root}")
 file(COPY "${LOCKDC_ROOT}/lockdc.rockspec.in" DESTINATION "${lockdc_lua_source_root}")
+file(COPY "${LOCKDC_ROOT}/lockdc-postgres.rockspec.in" DESTINATION "${lockdc_lua_source_root}")
+# Ship the facade's durable API guides and runnable examples, using an explicit
+# guide list so investigations and temporary release notes cannot enter a rock.
+set(lockdc_lua_documentation_sources
+    docs/lua.md
+    docs/pouch-terminal-retention.md
+    docs/pouch-dead-letter-retention.md
+    docs/outbox-dispatch-architecture.md
+    docs/outbox-vectis-handover.md
+    docs/inbox-outbox.md
+    docs/xa.md
+    docs/postgres.md
+    docs/pouch-open-settings-api.md
+    docs/pouch-storage.md
+    docs/worst-case-scenario.md
+    examples/lua/README.md
+    examples/outbox_producer.c)
+file(GLOB lockdc_lua_example_sources RELATIVE "${LOCKDC_ROOT}"
+    "${LOCKDC_ROOT}/examples/lua/*.lua")
+list(APPEND lockdc_lua_documentation_sources ${lockdc_lua_example_sources})
+foreach(lockdc_lua_doc IN LISTS lockdc_lua_documentation_sources)
+    get_filename_component(lockdc_lua_doc_dir "${lockdc_lua_doc}" DIRECTORY)
+    file(COPY "${LOCKDC_ROOT}/${lockdc_lua_doc}"
+        DESTINATION "${lockdc_lua_source_root}/${lockdc_lua_doc_dir}")
+endforeach()
 file(WRITE "${lockdc_lua_source_root}/VERSION" "${LOCKDC_VERSION}\n")
 file(WRITE "${lockdc_lua_source_root}/RELEASE_MANIFEST"
     "LICENSE\n"
     "README.md\n"
+    "CHANGELOG.md\n"
     "RELEASE_MANIFEST\n"
     "VERSION\n"
     "include/lc/lc.h\n"
+    "include/lc/postgres.h\n"
     "lockdc.rockspec.in\n"
+    "lockdc-postgres.rockspec.in\n"
     "lua/lockdc/init.lua\n"
     "scripts/assert_generated_path.sh\n"
     "scripts/build_lua_rock.sh\n"
-    "src/lc_api_internal.h\n"
-    "src/lc_engine_api.h\n"
-    "src/lc_intcompat.h\n"
-    "src/lc_pouch.h\n"
-    "src/lua/lockdc_lua.c\n")
+    "scripts/build_postgres_lua_rock.sh\n"
+    "src/lua/lockdc_lua.c\n"
+    "src/lua/lockdc_xa_lua.c\n"
+    "src/lua/lockdc_xa_resource_lua.c\n"
+    "src/lua/lockdc_xa_provider_lua.c\n"
+    "src/lua/lockdc_lua.h\n"
+    "src/lua/lockdc_lua_internal.h\n"
+    "src/lua/lockdc_postgres_lua.c\n"
+    "src/lua/lockdc_postgres_lua.h\n")
+foreach(lockdc_lua_doc IN LISTS lockdc_lua_documentation_sources)
+    file(APPEND "${lockdc_lua_source_root}/RELEASE_MANIFEST" "${lockdc_lua_doc}\n")
+endforeach()
 
 file(REMOVE "${lockdc_lua_source_archive_base}" "${lockdc_lua_source_archive_path}")
 execute_process(
@@ -124,6 +167,10 @@ endif()
 
 file(COPY "${lockdc_lua_source_archive_path}" DESTINATION "${lockdc_lua_stage_workdir}")
 
+function(pack_lua_rockspec rockspec_path)
+get_filename_component(lockdc_lua_rockspec_name "${rockspec_path}" NAME)
+string(REGEX REPLACE "[.]rockspec$" ".src.rock" lockdc_lua_src_rock_name "${lockdc_lua_rockspec_name}")
+file(COPY "${rockspec_path}" DESTINATION "${lockdc_lua_stage_workdir}")
 file(READ "${lockdc_lua_stage_workdir}/${lockdc_lua_rockspec_name}" lockdc_lua_pack_rockspec_text)
 string(REGEX REPLACE "source = \\{[^\\}]*\\}" "source = {\n  url = \"${lockdc_lua_source_archive_path}\",\n  dir = \"${lockdc_lua_source_root_name}\",\n}" lockdc_lua_pack_rockspec_text "${lockdc_lua_pack_rockspec_text}")
 file(WRITE "${lockdc_lua_stage_workdir}/${lockdc_lua_rockspec_name}" "${lockdc_lua_pack_rockspec_text}")
@@ -188,6 +235,11 @@ if(NOT lockdc_lua_repack_result EQUAL 0)
         "stderr:\n${lockdc_lua_repack_stderr}")
 endif()
 
-file(COPY "${lockdc_generated_rockspec_path}" DESTINATION "${LOCKDC_DIST_DIR}")
+file(COPY "${rockspec_path}" DESTINATION "${LOCKDC_DIST_DIR}")
 file(COPY "${lockdc_lua_source_archive_path}" DESTINATION "${LOCKDC_DIST_DIR}")
 file(COPY "${lockdc_lua_stage_workdir}/${lockdc_lua_src_rock_name}" DESTINATION "${LOCKDC_DIST_DIR}")
+endfunction()
+pack_lua_rockspec("${lockdc_generated_rockspec_path}")
+if(LOCKDC_BUILD_POSTGRES)
+    pack_lua_rockspec("${LOCKDC_BINARY_DIR}/lua-postgres/lockdc-postgres-${LOCKDC_VERSION}-1.rockspec")
+endif()

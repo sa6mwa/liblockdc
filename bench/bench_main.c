@@ -374,7 +374,7 @@ static int bench_outbox_fixture_client_open(const bench_outbox_fixture *fixture,
   }
   bundle_path = getenv("LOCKDC_OUTBOX_BENCH_CLIENT_BUNDLE");
   if (bundle_path == NULL || bundle_path[0] == '\0') {
-    bundle_path = "./devenv/volumes/lockd-disk-a-config/client.pem";
+    bundle_path = "./build/devenv/credentials/disk/client.pem";
   }
   return bench_outbox_remote_client_open(endpoint, failover_endpoint,
                                          bundle_path, fixture->ns, out, error);
@@ -479,7 +479,7 @@ static int bench_outbox_fixture_open(bench_outbox_fixture *fixture,
     }
     bundle_path = getenv("LOCKDC_OUTBOX_BENCH_CLIENT_BUNDLE");
     if (bundle_path == NULL || bundle_path[0] == '\0') {
-      bundle_path = "./devenv/volumes/lockd-disk-a-config/client.pem";
+      bundle_path = "./build/devenv/credentials/disk/client.pem";
     }
     selected_endpoint = NULL;
     selected_failover_endpoint = NULL;

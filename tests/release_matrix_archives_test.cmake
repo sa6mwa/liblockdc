@@ -29,6 +29,7 @@ file(MAKE_DIRECTORY "${lockdc_verify_work_dir}")
 set(lockdc_expected_artifacts "")
 set(lockdc_expected_checksum_artifacts "")
 set(lockdc_release_version "")
+set(lockdc_postgres_lua_selected OFF)
 set(LOCKDC_BOOTLIN_TOOLCHAIN_ROOTS "")
 
 foreach(lockdc_preset IN LISTS lockdc_release_presets)
@@ -60,6 +61,7 @@ foreach(lockdc_preset IN LISTS lockdc_release_presets)
     unset(LOCKDC_SHARED_SONAME)
     unset(LOCKDC_SHARED_LINK_NAME)
     unset(LOCKDC_SANITIZER_INSTRUMENTED)
+    unset(LOCKDC_BUILD_POSTGRES)
     include("${lockdc_metadata}")
 
     if(DEFINED LOCKDC_SANITIZER_INSTRUMENTED
@@ -88,6 +90,15 @@ foreach(lockdc_preset IN LISTS lockdc_release_presets)
     list(APPEND lockdc_expected_checksum_artifacts
         "liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}.tar.gz"
     )
+    if(LOCKDC_BUILD_POSTGRES)
+        set(lockdc_postgres_lua_selected ON)
+        set(provider_artifact "liblockdc-postgres-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}.tar.gz")
+        if(NOT EXISTS "${lockdc_dist_dir}/${provider_artifact}")
+            message(FATAL_ERROR "missing selected PostgreSQL provider archive: ${provider_artifact}")
+        endif()
+        list(APPEND lockdc_expected_artifacts "${provider_artifact}")
+        list(APPEND lockdc_expected_checksum_artifacts "${provider_artifact}")
+    endif()
 endforeach()
 list(REMOVE_DUPLICATES LOCKDC_BOOTLIN_TOOLCHAIN_ROOTS)
 
@@ -107,6 +118,12 @@ list(APPEND lockdc_expected_checksum_artifacts
     "lockdc-${lockdc_release_version}-1.rockspec"
     "lockdc-${lockdc_release_version}-1.src.rock"
 )
+if(lockdc_postgres_lua_selected)
+    foreach(suffix rockspec src.rock)
+        list(APPEND lockdc_expected_artifacts "lockdc-postgres-${lockdc_release_version}-1.${suffix}")
+        list(APPEND lockdc_expected_checksum_artifacts "lockdc-postgres-${lockdc_release_version}-1.${suffix}")
+    endforeach()
+endif()
 list(SORT lockdc_expected_artifacts)
 list(SORT lockdc_expected_checksum_artifacts)
 list(LENGTH lockdc_expected_checksum_artifacts lockdc_expected_checksum_artifact_count)
@@ -205,6 +222,7 @@ foreach(lockdc_required_source_entry
     "VERSION"
     "RELEASE_MANIFEST"
     "CMakeLists.txt"
+    "CHANGELOG.md"
     "include/lc/lc.h"
     "cmake/LcVersion.cmake"
     "scripts/stage_release_sources.sh"
@@ -220,6 +238,11 @@ foreach(lockdc_forbidden_source_entry
     ".cache"
     "build"
     "dist"
+    "stash"
+    "docs/pouch-replay-investigation.md"
+    "docs/lockd-implicit-xa-handover.md"
+    "docs/lockd-memory-queue-watch-race.md"
+    "docs/lockd-durable-crypto-index-freshness.md"
 )
     foreach(lockdc_source_actual_entry IN LISTS lockdc_source_actual_manifest)
         if(lockdc_source_actual_entry MATCHES "^${lockdc_forbidden_source_entry}(/|$)")
@@ -229,8 +252,7 @@ foreach(lockdc_forbidden_source_entry
     endforeach()
 endforeach()
 foreach(lockdc_source_actual_entry IN LISTS lockdc_source_actual_manifest)
-    if(lockdc_source_actual_entry MATCHES "^devenv/volumes/"
-       AND NOT lockdc_source_actual_entry MATCHES "/\\.gitkeep$")
+    if(lockdc_source_actual_entry MATCHES "^devenv/volumes/")
         message(FATAL_ERROR
             "source archive contains forbidden generated devenv entry ${lockdc_source_actual_entry}: ${lockdc_source_archive_path}")
     endif()

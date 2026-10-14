@@ -2,6 +2,10 @@ if(NOT DEFINED LOCKDC_ROOT)
     message(FATAL_ERROR "LOCKDC_ROOT is required")
 endif()
 
+# Version fixtures own their inputs, including when a candidate exercise sets
+# an override for the enclosing checkout.
+unset(ENV{LOCKDC_VERSION_OVERRIDE})
+
 find_program(LOCKDC_GIT_BIN NAMES git)
 if(NOT LOCKDC_GIT_BIN)
     message(FATAL_ERROR "git is required for version resolution tests")
@@ -181,6 +185,39 @@ string(STRIP "${override_probe_contents}" override_probe_contents)
 if(NOT override_probe_contents STREQUAL "3.4.5|3|4|5")
     message(FATAL_ERROR
         "expected untagged override to resolve to 3.4.5, got '${override_probe_contents}'")
+endif()
+
+# Exercise actual fresh configurations and cache reuse, rather than only the
+# script-mode probe. The Make candidate selection must reach project metadata.
+file(WRITE "${repo_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.21)\n"
+    "include(\"${LOCKDC_ROOT}/cmake/LcVersion.cmake\")\n"
+    "lc_detect_version(resolved)\n"
+    "project(version_fixture VERSION \${resolved} LANGUAGES NONE)\n")
+function(configure_version name environment expected)
+    set(build "${test_root}/configure-${name}")
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E env
+        "LOCKDC_VERSION_OVERRIDE=${environment}"
+        "${CMAKE_COMMAND}" -S "${repo_dir}" -B "${build}" ${ARGN}
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    if(NOT result EQUAL 0)
+        message(FATAL_ERROR "Version configure ${name} failed\n${output}\n${error}")
+    endif()
+    file(STRINGS "${build}/CMakeCache.txt" version
+        REGEX "^CMAKE_PROJECT_VERSION:STATIC=")
+    if(NOT version STREQUAL "CMAKE_PROJECT_VERSION:STATIC=${expected}")
+        message(FATAL_ERROR "Version configure ${name}: expected ${expected}, got ${version}")
+    endif()
+endfunction()
+configure_version(environment 3.4.5 3.4.5)
+configure_version(environment 8.9.10 3.4.5)
+configure_version(explicit 8.9.10 4.5.6 -DLOCKDC_VERSION_OVERRIDE=4.5.6)
+configure_version(disabled invalid 0.0.0 -DLOCKDC_VERSION_OVERRIDE:STRING=)
+execute_process(COMMAND "${CMAKE_COMMAND}" -E env LOCKDC_VERSION_OVERRIDE=invalid
+    "${CMAKE_COMMAND}" -S "${repo_dir}" -B "${test_root}/configure-invalid"
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(result EQUAL 0 OR NOT "${output}${error}" MATCHES "must be a semantic version")
+    message(FATAL_ERROR "Invalid candidate version was not rejected\n${output}\n${error}")
 endif()
 
 execute_process(

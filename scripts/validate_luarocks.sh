@@ -15,13 +15,13 @@ lua_script="$4"
 lua_bin="${LOCKDC_LUA_BIN:?LOCKDC_LUA_BIN must name the project-built Bootlin Lua runner}"
 luarocks_bin="${LOCKDC_LUAROCKS_BIN:-luarocks}"
 lua_version="${LOCKDC_LUA_VERSION:-5.5}"
-lonejson_src_rock="${LOCKDC_LONEJSON_SRC_ROCK:-https://github.com/sa6mwa/lonejson/releases/download/v0.44.0/lonejson-0.44.0-1.src.rock}"
+lonejson_src_rock="${LOCKDC_LONEJSON_SRC_ROCK:-https://github.com/sa6mwa/lonejson/releases/download/v0.45.0/lonejson-0.45.0-1.src.rock}"
 luarocks_build_root="${LOCKDC_LUAROCKS_BUILD_ROOT:-${tree_dir}/.luarocks-build}"
 luarocks_workdir="${LOCKDC_LUAROCKS_WORKDIR:-$PWD}"
 run_lua_smoke="${LOCKDC_RUN_LUA_SMOKE:-1}"
 luarocks_cc="${LOCKDC_LUAROCKS_CC:?LOCKDC_LUAROCKS_CC must name the selected Bootlin C compiler}"
 luarocks_cflags="${LOCKDC_LUAROCKS_CFLAGS:?LOCKDC_LUAROCKS_CFLAGS must contain the selected Bootlin C flags}"
-luarocks_lua_incdir="${LOCKDC_LUAROCKS_LUA_INCDIR:?LOCKDC_LUAROCKS_LUA_INCDIR must name the c.pkt.systems Lua headers}"
+luarocks_lua_incdir="${LOCKDC_LUAROCKS_LUA_INCDIR:?LOCKDC_LUAROCKS_LUA_INCDIR must name the cpkt Lua headers}"
 
 # shellcheck source=assert_generated_path.sh
 source "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/assert_generated_path.sh"
@@ -130,6 +130,12 @@ case "$lua_package_path" in
     exit 1
     ;;
 esac
+
+if [ -n "${LOCKDC_POSTGRES_ROCK:-}" ]; then
+  require_path "$LOCKDC_POSTGRES_ROCK"
+  "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" \
+    install "$LOCKDC_POSTGRES_ROCK" "${luarocks_target_variables[@]}"
+fi
 
 eval "$("$luarocks_bin" --tree "$tree_dir" path --lua-version "$lua_version")"
 

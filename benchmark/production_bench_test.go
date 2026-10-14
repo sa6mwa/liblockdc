@@ -647,7 +647,8 @@ func runLockdDiskProductionWithHAMode(b *testing.B, rows, updatesPerKey, payload
 			addMetricDuration(&metrics.updateNS, phaseStart)
 			metrics.writes++
 			metrics.bytes += int64(len(body))
-			if metrics.writes%128 == 0 {
+			// Include a mid-workload publication even in the bounded profile.
+			if metrics.writes%128 == 0 || metrics.writes == rows*updatesPerKey/2 {
 				phaseStart = time.Now()
 				ctx, cancel = context.WithTimeout(context.Background(), 60*time.Second)
 				_, err = h.client.FlushIndex(ctx, lockdDiskBenchNamespace, lockdclient.WithFlushModeWait())
@@ -913,6 +914,9 @@ func runLockdDiskProductionWithHAMode(b *testing.B, rows, updatesPerKey, payload
 	}
 	metrics.segments = countLockdDiskLogstoreSegments(b, h)
 	metrics.segmentBytes = h.segmentTargetBytes
+	if rows*updatesPerKey >= 2 && metrics.flushIntermediateNS <= 0 {
+		b.Fatal("lockd disk production workload did not measure intermediate publication")
+	}
 	if metrics.segments <= 1 {
 		b.Fatalf(
 			"lockd disk production benchmark produced %d logstore segment(s), want >1 with %d-byte segment target",

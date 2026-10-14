@@ -1,3 +1,21 @@
+if(LOCKDC_BUILD_POSTGRES AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(lc_unit_cpkt_postgres_checked test_cpkt_postgres_checked.c)
+  target_link_libraries(lc_unit_cpkt_postgres_checked PRIVATE cpkt::postgres)
+  target_link_options(lc_unit_cpkt_postgres_checked PRIVATE
+    "LINKER:--wrap=malloc" "LINKER:--wrap=PQgetResult" "LINKER:--wrap=PQclear"
+    "LINKER:--wrap=PQstatus" "LINKER:--wrap=PQresultErrorField"
+    "LINKER:--wrap=PQresultErrorMessage")
+  lc_configure_c_test_target(lc_unit_cpkt_postgres_checked)
+  set_target_properties(lc_unit_cpkt_postgres_checked PROPERTIES
+    C_STANDARD 90 C_EXTENSIONS OFF)
+  target_compile_options(lc_unit_cpkt_postgres_checked PRIVATE -pedantic-errors)
+  add_test(NAME lc_unit_cpkt_postgres_checked COMMAND lc_unit_cpkt_postgres_checked)
+  set_tests_properties(lc_unit_cpkt_postgres_checked PROPERTIES
+    LABELS "unit;cross-runtime" TIMEOUT 30)
+  set_property(GLOBAL APPEND PROPERTY LOCKDC_CROSS_RUNTIME_TEST_TARGETS
+    lc_unit_cpkt_postgres_checked)
+endif()
+
 function(lc_add_unit_test target_name)
   add_executable(${target_name} ${ARGN})
   target_link_libraries(${target_name} PRIVATE ${lc_test_link_target} lc::cmocka)
@@ -195,6 +213,10 @@ target_sources(lc_unit_mutate_stream PRIVATE
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
 )
 lc_add_unit_test(lc_unit_pouch test_lc_pouch.c)
+lc_add_unit_test(lc_unit_pouch_xa test_lc_pouch_xa.c)
+target_compile_definitions(lc_unit_pouch_xa PRIVATE LOCKDC_TEST_BUILD=1)
+lc_add_unit_test(lc_unit_xa_borrow test_lc_xa_borrow.c)
+target_link_options(lc_unit_pouch PRIVATE -Wl,--wrap=time)
 if(CMAKE_CROSSCOMPILING AND CMAKE_CROSSCOMPILING_EMULATOR)
   set(lc_pouch_cross_emulator ${CMAKE_CROSSCOMPILING_EMULATOR})
   list(GET lc_pouch_cross_emulator 0 lc_pouch_cross_emulator_program)
@@ -504,6 +526,10 @@ lc_add_cross_runtime_https_unit_test_case(
 lc_add_https_unit_test_case(
   lc_unit_transport_https_public_query_keys_captures_body_metadata
   LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_CAPTURES_BODY_METADATA
+)
+lc_add_cross_runtime_https_unit_test_case(
+  lc_unit_transport_https_public_query_keys_accepts_empty_results
+  LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_ACCEPTS_EMPTY_RESULTS
 )
 lc_add_https_unit_test_case(
   lc_unit_transport_https_public_query_keys_streams_large_response_without_client_alloc

@@ -21,12 +21,6 @@ else
   e2e_build_target=lockdc_e2e_tests
 fi
 
-export LOCKDC_E2E_DISK_ENDPOINT=${LOCKDC_E2E_DISK_ENDPOINT:-https://localhost:${LOCKDC_DISK_A_PORT:-19441}}
-export LOCKDC_E2E_DISK_BUNDLE=${LOCKDC_E2E_DISK_BUNDLE:-$repo_root/devenv/volumes/lockd-disk-a-config/client.pem}
-export LOCKDC_E2E_S3_ENDPOINT=${LOCKDC_E2E_S3_ENDPOINT:-https://localhost:${LOCKDC_S3_PORT:-19443}}
-export LOCKDC_E2E_S3_BUNDLE=${LOCKDC_E2E_S3_BUNDLE:-$repo_root/devenv/volumes/lockd-s3-config/client.pem}
-export LOCKDC_E2E_MEM_SOCKET=${LOCKDC_E2E_MEM_SOCKET:-$repo_root/devenv/volumes/lockd-mem-run/lockd.sock}
-
 ctest_timeout=${LOCKDC_CTEST_TIMEOUT:-300}
 ctest_parallel_level=${LOCKDC_CTEST_PARALLEL_LEVEL:-4}
 
@@ -136,22 +130,62 @@ select_active_disk_endpoint() {
 }
 
 cd "$repo_root"
+# One checkout has one service graph. A second E2E runner must not stop the
+# first runner's services or rewrite its configuration or logs.
+command -v flock >/dev/null || { echo 'flock is required to serialize local E2E runs' >&2; exit 1; }
+source "$script_dir/assert_generated_path.sh"
+lockdc_assert_generated_path "$repo_root" "$repo_root/build/devenv"
+[ ! -L "$repo_root/build/devenv" ] || { echo 'build/devenv must not be a symlink' >&2; exit 1; }
+mkdir -p -m 700 "$repo_root/build/devenv"
+exec 9> "$repo_root/build/devenv/e2e.lock"
+flock -n 9 || { echo 'E2E is already running in this checkout' >&2; exit 1; }
+"$script_dir/devenv.sh" render
+source "$repo_root/build/devenv/env.sh"
+export TMPDIR="$repo_root/build/devenv/tmp"
+failed_command=
+trap 'failed_command=$BASH_COMMAND' ERR
+cleanup() {
+  rc=$?
+  trap - EXIT
+  if [ "$rc" -ne 0 ]; then
+    printf 'E2E failed (%s): %s\nDisk: %s\nS3: %s\n' "$rc" "${failed_command:-$BASH_COMMAND}" "$LOCKDC_E2E_DISK_ENDPOINT" "$LOCKDC_E2E_S3_ENDPOINT" >&2
+    "$script_dir/devenv.sh" ps >&2 || true
+    "$script_dir/devenv.sh" logs > "$repo_root/build/devenv/logs/e2e-services.log" 2>&1 || true
+    tail -200 "$repo_root/build/devenv/logs/e2e-services.log" >&2
+    echo "Full service logs: $repo_root/build/devenv/logs/e2e-services.log" >&2
+  fi
+  if [ "${LOCKDC_E2E_KEEP_DEVSERVICES:-0}" = 1 ]; then
+    echo 'Keeping E2E services: LOCKDC_E2E_KEEP_DEVSERVICES=1' >&2
+  elif ! "$script_dir/devenv.sh" down; then
+    echo 'E2E service teardown failed; inspect make dev-ps and make dev-logs' >&2
+    # Preserve a test failure or interruption; cleanup failure alone fails
+    # an otherwise successful run.
+    if [ "$rc" = 0 ]; then rc=1; fi
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 "$timed_bin" "e2e build" "$script_dir/build.sh" e2e "$e2e_build_target"
-"$timed_bin" "e2e reset" "$script_dir/dev-reset.sh"
-"$timed_bin" "e2e start" "$script_dir/dev-up.sh"
+if ! "$script_dir/devenv.sh" running; then
+  "$timed_bin" "e2e start" "$script_dir/devenv.sh" up
+fi
+export TMPDIR="$repo_root/build/devenv/tmp"
 
 wait_for_file "$LOCKDC_E2E_DISK_BUNDLE" "disk client bundle"
 wait_for_file "$LOCKDC_E2E_S3_BUNDLE" "s3 client bundle"
 wait_for_socket "$LOCKDC_E2E_MEM_SOCKET" "mem uds socket"
-wait_for_tcp "127.0.0.1" "${LOCKDC_DISK_A_PORT:-19441}" "disk lockd tcp listener"
-wait_for_tcp "127.0.0.1" "${LOCKDC_DISK_B_PORT:-19442}" "disk-b lockd tcp listener"
-wait_for_tcp "127.0.0.1" "${LOCKDC_S3_PORT:-19443}" "s3 lockd tcp listener"
+wait_for_tcp "127.0.0.1" "$LOCKDC_DISK_A_PORT" "disk lockd tcp listener"
+wait_for_tcp "127.0.0.1" "$LOCKDC_DISK_B_PORT" "disk-b lockd tcp listener"
+wait_for_tcp "127.0.0.1" "$LOCKDC_S3_PORT" "s3 lockd tcp listener"
 
-export LOCKDC_E2E_DISK_ENDPOINT="$(select_active_disk_endpoint \
+LOCKDC_E2E_DISK_ENDPOINT="$(select_active_disk_endpoint \
   "$LOCKDC_E2E_DISK_ENDPOINT" \
-  "${LOCKDC_E2E_DISK_B_ENDPOINT:-https://localhost:${LOCKDC_DISK_B_PORT:-19442}}" \
+  "${LOCKDC_E2E_DISK_B_ENDPOINT:-https://localhost:$LOCKDC_DISK_B_PORT}" \
   "$LOCKDC_E2E_DISK_BUNDLE" \
   "$repo_root/build/e2e/examples/lc_example_acquire_lease_lifecycle")"
+export LOCKDC_E2E_DISK_ENDPOINT
 export LOCKDC_E2E_DISK_A_ENDPOINT="$LOCKDC_E2E_DISK_ENDPOINT"
 export LOCKDC_E2E_DISK_A_BUNDLE="$LOCKDC_E2E_DISK_BUNDLE"
 export LOCKDC_URL="$LOCKDC_E2E_DISK_ENDPOINT"
@@ -170,8 +204,10 @@ wait_for_lockd_probe \
 
 if [ "$mode" = "examples" ]; then
   "$timed_bin" "e2e examples" ctest --preset e2e --output-on-failure --progress --stop-on-failure \
+    --output-log "$repo_root/build/devenv/logs/ctest.log" \
     --timeout "$ctest_timeout" --parallel "$ctest_parallel_level" -L examples
 else
   "$timed_bin" "e2e ctest" ctest --preset e2e --output-on-failure --progress --stop-on-failure \
+    --output-log "$repo_root/build/devenv/logs/ctest.log" \
     --timeout "$ctest_timeout" --parallel "$ctest_parallel_level"
 fi

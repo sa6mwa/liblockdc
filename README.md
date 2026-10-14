@@ -18,6 +18,7 @@ Release archives are produced for:
 - `aarch64-linux-musl`
 - `armhf-linux-gnu`
 - `armhf-linux-musl`
+- `arm64-apple-darwin` (built locally with osxcross)
 
 The library itself is delivered as:
 
@@ -38,12 +39,20 @@ The library itself is delivered as:
 - durable command-receipt, inbox, outbox, dispatcher, retry, reconciliation,
   and dead-letter outbox receivers
 - integrated SDK logging through `libpslog`
+- managed XA coordination across local Pouch and PostgreSQL participants,
+  with native two-phase completion and recovery
 
 The durable transactional messaging model and endpoint constraints are
 specified in [the outbox design](docs/inbox-outbox.md). The threadless
 producer, explicit dispatcher, and Vectis integration contract are specified
 in [the outbox dispatch architecture](docs/outbox-dispatch-architecture.md).
 The Lua outbox facade is documented in [the Lua SDK guide](docs/lua.md).
+The optional PostgreSQL participant provider joins ordinary Pouch state and
+attachment transactions, with optional inbox/outbox composition. See the
+[XA contract](docs/xa.md), [C participant guide](docs/postgres.md), and
+[Lua transaction facade](docs/lua.md#optional-postgresql-participation). The coordinator
+uses a local Pouch journal; remote lockd participation is unsupported.
+See [release notes](CHANGELOG.md) for changes and ABI requirements.
 The executable direct deployment pair is
 [`examples/outbox_producer.c`](examples/outbox_producer.c) and
 [`examples/lua/outbox_dispatcher.lua`](examples/lua/outbox_dispatcher.lua):
@@ -120,6 +129,21 @@ The repository (<https://github.com/sa6mwa/liblockdc>) uses a Makefile-first lif
 
 Normal host and release Make targets provision the required dependency trees automatically. The low-level `scripts/build.sh` helper assumes that the matching dependency root already exists.
 
+PostgreSQL's client/facade SDK is optional. Core builds default to
+`-DLOCKDC_BUILD_POSTGRES=OFF` and require no cpktdb installation. To prepare the
+optional provider SDK, native participant and its validation targets, use
+`LOCKDC_BUILD_POSTGRES=ON make deps` or
+`scripts/deps.sh deps-x86_64-linux-gnu --with-postgres`, then configure with
+`-DLOCKDC_BUILD_POSTGRES=ON`. The [C participant guide](docs/postgres.md) describes
+its explicit static/shared linkage, registration, borrows and recovery. The
+core library binaries are identical with the optional provider present or
+absent. PostgreSQL 14 through 18 are covered by mixed-transaction integration
+tests using two PostgreSQL servers and one Pouch store.
+For a clean release that includes provider SDKs, set `LOCKDC_BUILD_POSTGRES=ON`;
+fresh library configurations use the same selection as dependency provisioning.
+An existing CMake cache or explicit `-DLOCKDC_BUILD_POSTGRES=OFF` takes precedence
+over the environment default.
+
 ## Build prerequisites
 
 Normal development expects:
@@ -131,23 +155,58 @@ Normal development expects:
 - host `clangd` for editor diagnostics of the public C API
 - host Valgrind for the native Memcheck gate
 - `qemu-aarch64` and `qemu-arm` for the non-host release test matrix
-- `nerdctl compose` preferred for the local development environment, with `docker compose` as a fallback
+- rootless Podman and Python 3.9 or newer for the local Podman Kube development environment
 
 Every Linux build uses its matching pinned Bootlin GCC collection, including
 the compiler, linker, binutils, sysroot, headers, and runtime. The Make and
 CMake configurations provision those collections automatically; do not substitute
 host or distro cross compilers. Toolchains are shared under
-`${CPKT_TOOLCHAIN_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/c.pkt.systems/toolchains}`
+`${CPKT_TOOLCHAIN_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cpkt/toolchains}`
 and verified dependency archives under
-`${CPKT_DEPENDENCY_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/c.pkt.systems/deps}`.
+`${CPKT_DEPENDENCY_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/cpkt/deps}`.
 Repository-local `.cache/` directories are disposable build and staging state.
 
-The pinned `c.pkt.systems` 0.10.0 GNU SDKs require glibc 2.43 or newer at
+Darwin cross builds use a developer-supplied osxcross SDK under `OSXCROSS_ROOT`.
+The lifecycle selects the newest complete `arm64-apple-darwin25.x` collection;
+set `CPKT_OSXCROSS_HOST` to pin an installed prefix. Prepare it with
+`scripts/cpkt-toolchains.sh ensure arm64-apple-darwin` before configuring.
+That command provisions the pinned Linux host MIG helper in the shared toolchain
+cache, without obtaining Apple content. Darwin configure requires both tools;
+MIG is build tooling and is excluded from SDK packages.
+
+The pinned `cpkt` 0.3.0 GNU SDKs require glibc 2.43 or newer at
 deployment. This does not change the `liblockdc` public ABI, but deployments
 using the shared GNU SDK must upgrade their runtime accordingly. Development
 executables, tests, examples, Lua module checks, and SDK consumer probes run
 directly with their selected Bootlin ELF interpreter and private runtime lookup
 paths; they do not use `LD_LIBRARY_PATH` or a host Lua interpreter.
+
+The separately pinned dependencies are:
+
+| Dependency | Version | Use |
+| --- | --- | --- |
+| [cpkt](https://github.com/c89systems/cpkt) | 0.3.0 | Core SDK dependencies and Lua runtime |
+| [cpktdb](https://github.com/c89systems/cpktdb) | 0.3.0 | Optional PostgreSQL C89 facade and database SDK |
+| lonejson | 0.45.0 (ABI 26) | JSON parsing, mapping, and streaming |
+| libpslog | 0.12.0 | SDK diagnostics |
+| liblql | 0.3.0 | Pouch query support |
+| cmocka | 2.0.2 | Unit tests only; target-specific static library from cpkt |
+
+OpenSSL, curl, zlib, nghttp2, libssh2, and Lua come from cpkt.
+cmocka comes from cpkt's target-specific SDK and remains a test-only dependency.
+
+Core and database SDKs remain in separate `cpkt/install` and `cpktdb/install`
+prefixes under each target's dependency root. cpktdb records its exact core build
+pin as provenance and requests a compatible minimum core through CMake. Core's
+declared compatibility floor governs independent upgrades; matching major/minor
+versions alone do not establish compatibility. cpkt 0.3.0 accepts baselines from
+0.2.0 through 0.3.0; cpktdb 0.3.0 requires at least 0.3.0. Target and payload
+integrity checks remain enforced. `scripts/deps.sh` pins each provider release and
+checksum independently; cpktdb is acquired/discovered only when PostgreSQL is
+enabled. Consumers use the official imported targets. pkg-config consumers must
+also run the provider's CMake compatibility preflight. cpktmisc is not required
+by liblockdc. PostgreSQL applications use cpktdb's checked result
+retrieval API to distinguish drainage from local retrieval failures.
 
 ## Common commands
 
@@ -213,12 +272,28 @@ make pouch-integration-fuzz
 make benchmarks
 ```
 
+`make build-fuzz` and the fuzz runner prepare the pinned AFL++ toolchain before
+CMake configures instrumentation. Resolver discovery remains read-only and
+reports a preparation command when the collection is missing.
+
 `make pouch-integration-fuzz` runs the production-code Pouch LQL and lifecycle
 mutation runners without AFL++ instrumentation. Each corpus seed and mutation
 executes in a fresh process; failures retain the reproducing input artifact.
 
 `make benchmarks` uses tuned per-case defaults; set `BENCH_ITERS=<n>` to force
 the same iteration count across all benchmark cases.
+
+`make bench-gate` runs the complete native benchmark matrix and both production
+parity gates: default durability and strict durability. Each gate uses five
+same-run samples and requires a median Pouch speedup of at least 1.25x on every
+comparable core operation against the matching Go disk configuration. The
+comparisons use a bounded 12-record, two-update, 128 KiB-payload profile with
+16 KiB segments to exercise rollover and recovery. Each comparison has a
+90-second measurement limit; preparation is separate. Large production
+profiles remain available through `make benchmark-pouch-go-production`. The
+broader Go suite also includes compression, compaction, concurrency, and query
+scale benchmarks; see [the benchmark guide](benchmark/README.md) for its
+profiles and command options.
 
 All significant Make targets print total elapsed time on completion.
 
@@ -252,19 +327,45 @@ Stop the environment:
 make dev-down
 ```
 
-The e2e environment is self-contained. `make test-e2e` resets the generated environment state, starts the compose stack, waits for the generated bundles and listeners, probes the active disk endpoint, and then runs the e2e CTest preset.
+The e2e environment is self-contained. `make test-e2e` starts or reuses the rootless Podman Kube services, probes the active disk and S3 APIs, and runs the e2e CTest preset. Once the full run finishes, it stops the stack and verifies that the pod and all declared containers, including bootstrap containers, are removed. This also applies after failures or interruption and when the stack was already running before E2E began. `make example-smoke-local` uses the same lifecycle. Overlapping E2E runs in one checkout are rejected. Set `LOCKDC_E2E_KEEP_DEVSERVICES=1` explicitly to retain the stack for debugging. Use these Make runners for automatic lockd service management; direct lockd CTest or binary invocation requires manual `dev-up`/`dev-down`. PostgreSQL XA CTest checks manage their separate two-server Podman Kube stack automatically; see [the participant guide](docs/postgres.md#recovery-and-observation).
+
+All service data, credentials, and test temporary files live under `build/devenv/`; `make dev-reset` stops the pod before deleting that directory. Host ports are stable per checkout and can be overridden with the `LOCKDC_*_PORT` variables shown by `make help`. Run `source build/devenv/env.sh` after `make dev-up` to use the effective endpoints in examples.
 
 Additional development-environment notes are available in the repository at `devenv/README.md`.
 
 ## Packaging and release archives
 
-The project ships one combined archive for each supported target.
+The project ships a core SDK archive for each supported target. Selecting
+PostgreSQL adds a separate provider SDK archive for each target.
 
-Create the complete release set:
+Complete implementation, verification and review on one development branch.
+Before squashing, exercise the entire release build and test graph from clean
+generated state with the candidate version and intended optional capabilities:
+
+```bash
+make clean
+LOCKDC_VERSION_OVERRIDE=0.19.0 LOCKDC_BUILD_POSTGRES=ON \
+  make prerelease release-matrix
+```
+
+Use the intended candidate version; select PostgreSQL only when shipping its
+provider SDKs. Fresh CMake configurations take the candidate version from the
+environment; an explicit CMake selection or existing cache takes precedence.
+Require the whole exercise to pass before squashing. These
+candidate artifacts are preparation evidence. The signed, tagged commit still
+requires its final clean release gate.
+
+Then squash the verified tree onto local `trunk`. The engineer amends/signs that
+default-branch commit. Verify its signature and unchanged tree, then create the
+matching local lightweight version tag. Signing and tagging use `trunk`.
+
+Create the complete release set from that signed, tagged commit:
 
 ```bash
 make release
 ```
+
+Keep remote release refs unchanged until the clean local release gate passes.
 
 `make release` is the final clean-slate release pipeline. It verifies release
 tag semantics, removes generated state, then runs the same proof graph as
@@ -285,13 +386,24 @@ Package archive names follow this pattern:
 
 - release archive:
   - `liblockdc-<version>-<target>.tar.gz`
+- optional PostgreSQL provider SDK:
+  - `liblockdc-postgres-<version>-<target>.tar.gz`
 - checksum manifest:
   - `liblockdc-<version>-CHECKSUMS`
+- C source package:
+  - `liblockdc-<version>.tar.gz`
 - standalone Lua source package:
   - `liblockdc-lua-<version>.tar.gz`
 - rendered Lua release artifacts:
   - `lockdc-<version>-1.rockspec`
   - `lockdc-<version>-1.src.rock`
+- optional PostgreSQL Lua registration artifacts (when PostgreSQL is selected):
+  - `lockdc-postgres-<version>-1.rockspec`
+  - `lockdc-postgres-<version>-1.src.rock`
+
+The Lua source archive supplies the complete public XA facade for both rocks.
+The optional `lockdc.postgres` module registers the linked driver; static
+embeddings preload the same entry point. See the [Lua XA guide](docs/lua.md#optional-postgresql-participation).
 
 ### Release archive contents
 
@@ -371,7 +483,7 @@ This keeps lease identity, transaction identifiers, and related lifecycle state 
 
 ### JSON and lonejson
 
-`liblockdc` depends on `lonejson 0.44.0` with shared-library ABI `26`.
+`liblockdc` depends on `lonejson 0.45.0` with shared-library ABI `26`.
 `lonejson` is used for:
 
 - typed JSON response parsing for management, attachment, queue, namespace,

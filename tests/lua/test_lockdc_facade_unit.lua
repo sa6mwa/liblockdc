@@ -44,6 +44,7 @@ local core_stub = {
   ERR_PROTOCOL = 45,
   ERR_SERVER = 46,
   ERR_TIMEOUT = 47,
+  ERR_PENDING = 48,
   NACK_FAILURE = 48,
   NACK_DEFER = 49,
   version_string = function()
@@ -88,6 +89,8 @@ local function test_json_helpers()
       'public facade should expose C status constants without exposing core')
   assert_eq(lockdc.ERR_TIMEOUT, core_stub.ERR_TIMEOUT,
       'public facade should expose the timeout status constant')
+  assert_eq(lockdc.ERR_PENDING, core_stub.ERR_PENDING,
+      'public facade should expose pending transaction completion')
   assert_eq(lockdc.pouch_crypto_generate_key(), 'lc-pouch-key-v1:test-key',
       'Pouch key generation should delegate to the C helper')
   assert_eq(lockdc.pouch_crypto_default_key_file(), '/tmp/lockdc/pouch.key',
@@ -904,6 +907,12 @@ local function test_outbox_facade_lifecycle()
     recovery_interval_seconds = 7,
     shutdown_timeout_ms = 1234,
     replay_dead_letters_on_startup = true,
+    completed_retention_seconds = 86400,
+    completed_max_count = 10,
+    inbox_retention_seconds = -1,
+    inbox_max_count = false,
+    command_retention_seconds = 2592000,
+    command_max_count = 0,
   }))
   local txn, receipt = assert(outbox:append({
     operation_id = 'op-1',
@@ -920,6 +929,18 @@ local function test_outbox_facade_lifecycle()
       'outbox shutdown timeout should pass through')
   assert_eq(captured.outbox_config.replay_dead_letters_on_startup, true,
       'outbox startup replay option should pass through')
+  assert_eq(captured.outbox_config.completed_retention_seconds, 86400,
+      'completed retention should pass through')
+  assert_eq(captured.outbox_config.completed_max_count, 10,
+      'completed count cap should pass through')
+  assert_eq(captured.outbox_config.inbox_retention_seconds, -1,
+      'inbox retention opt-out should pass through')
+  assert_eq(captured.outbox_config.inbox_max_count, false,
+      'explicit unbounded count must preserve false')
+  assert_eq(captured.outbox_config.command_retention_seconds, 2592000,
+      'command retention should pass through independently')
+  assert_eq(captured.outbox_config.command_max_count, 0,
+      'unbounded command count should preserve zero')
   assert_eq(captured.first_entry.headers_json, 'header-json', 'outbox should preserve headers_json')
   assert_eq(captured.first_entry.payload_digest, 'sha256:payload',
       'outbox should preserve the immutable payload digest')

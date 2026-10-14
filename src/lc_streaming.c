@@ -59,8 +59,9 @@ static const lonejson_field lc_engine_query_body_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_query_body_json, return_mode,
                                 "return")};
 static const lonejson_field lc_engine_query_keys_response_fields[] = {
-    LONEJSON_FIELD_STRING_ARRAY_STREAM_REQ(lc_engine_query_keys_response_json,
-                                           keys, "keys"),
+    /* lockd omits keys when the result set is empty. */
+    LONEJSON_FIELD_STRING_ARRAY_STREAM(lc_engine_query_keys_response_json, keys,
+                                       "keys"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_query_keys_response_json, cursor,
                                 "cursor"),
     LONEJSON_FIELD_U64_PRESENT(lc_engine_query_keys_response_json, index_seq,
@@ -573,7 +574,7 @@ int lc_engine_client_query_into(lc_engine_client *client,
   lc_engine_json_reader_source fields_source;
   lonejson_curl_upload body_upload;
   lonejson_field body_fields[6];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lonejson_error lj_error;
   char *url;
   size_t endpoint_index;
@@ -751,7 +752,7 @@ int lc_engine_client_query_keys(lc_engine_client *client,
   lonejson_curl_parse key_parse;
   lonejson_array_stream_string_handler string_handler;
   lonejson_field body_fields[6];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lonejson_error lj_error;
   char *url;
   size_t endpoint_index;

@@ -1,0 +1,10 @@
+if(NOT DEFINED LOCKDC_ROOT OR LOCKDC_ROOT STREQUAL "")
+    message(FATAL_ERROR "LOCKDC_ROOT is required")
+endif()
+include("${LOCKDC_ROOT}/cmake/LcGeneratedPath.cmake")
+set(lockdc_e2e_workspace "${LOCKDC_ROOT}/build/devenv")
+set(lockdc_e2e_scratch "${lockdc_e2e_workspace}/tmp")
+lockdc_assert_generated_path("${LOCKDC_ROOT}" "${lockdc_e2e_scratch}")
+file(MAKE_DIRECTORY "${lockdc_e2e_scratch}")
+file(CHMOD "${lockdc_e2e_workspace}" "${lockdc_e2e_scratch}"
+    PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)

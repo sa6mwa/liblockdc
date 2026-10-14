@@ -180,6 +180,12 @@ int lc_outbox_test_dispatcher_delayed_recovery_deadline(
     lc_outbox_dispatcher *dispatcher, const char *key, lc_i64 *out_deadline);
 int lc_outbox_test_dispatcher_periodic_recovery_is_armed(
     lc_outbox_dispatcher *dispatcher);
+extern lc_outbox_test_failure_hook_fn
+    lc_outbox_test_before_terminal_remove_hook;
+extern void *lc_outbox_test_before_terminal_remove_context;
+int lc_outbox_test_reclaim_terminal(lc_outbox *outbox, int kind, lc_i64 now,
+                                    size_t *reclaimed, lc_i64 *next_due,
+                                    lc_error *error);
 int lc_outbox_test_reclaim_dead_letters(lc_outbox *outbox, lc_i64 now_unix,
                                         size_t *reclaimed_out,
                                         lc_i64 *next_due_out, lc_error *error);

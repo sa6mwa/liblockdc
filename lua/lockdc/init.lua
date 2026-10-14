@@ -30,6 +30,23 @@ OutboxJob.__index = OutboxJob
 local HistoryConsumer = {}
 HistoryConsumer.__index = HistoryConsumer
 
+local XACoordinator = {}
+XACoordinator.__index = XACoordinator
+local XATransaction = {}
+XATransaction.__index = XATransaction
+local XAOperation = {}
+XAOperation.__index = XAOperation
+local XABorrow = {}
+XABorrow.__index = XABorrow
+local XAStore = {}
+XAStore.__index = XAStore
+local XAResource = {}
+XAResource.__index = XAResource
+local XABranch = {}
+XABranch.__index = XABranch
+local XAResourceOperation = {}
+XAResourceOperation.__index = XAResourceOperation
+
 local Service = {}
 Service.__index = Service
 
@@ -97,6 +114,329 @@ end
 
 local function wrap_history_consumer(core_consumer)
   return setmetatable({ _core = core_consumer, _closed = false }, HistoryConsumer)
+end
+
+local function wrap_xa_operation(operation, coordinator, transaction)
+  return setmetatable({ _core = operation, _coordinator = coordinator,
+    _transaction = transaction }, XAOperation)
+end
+local function wrap_xa_transaction(transaction, coordinator)
+  return setmetatable({ _core = transaction, _coordinator = coordinator }, XATransaction)
+end
+
+-- Every start/advance/wait delegates to the same C coordinator. An application's
+-- event loop owns readiness and coroutine scheduling; the facade never polls.
+function Client:xa_coordinator(config)
+  local await = type(config) == "table" and rawget(config, "await") or nil
+  local receiver, err, code = self._core:xa_coordinator(config)
+  if receiver == nil then return nil, err, code end
+  return setmetatable({ _core = receiver, _await = await }, XACoordinator)
+end
+function XACoordinator:register_start(name, config, deadline_ms)
+  local op, err, code = self._core:register_start(name, config, deadline_ms)
+  if op == nil then return nil, err, code end
+  return wrap_xa_operation(op, self)
+end
+function XACoordinator:begin_start(deadline_ms)
+  local op, err, code = self._core:begin_start(deadline_ms)
+  if op == nil then return nil, err, code end
+  return wrap_xa_operation(op, self)
+end
+function XACoordinator:recover_start(id, deadline_ms)
+  local op, err, code = self._core:recover_start(id, deadline_ms)
+  if op == nil then return nil, err, code end
+  return wrap_xa_operation(op, self)
+end
+function XACoordinator:adopt_start(id, deadline_ms)
+  local op, err, code = self._core:adopt_start(id, deadline_ms)
+  if op == nil then return nil, err, code end
+  return wrap_xa_operation(op, self)
+end
+function XACoordinator:retire_start(deadline_ms)
+  local op, err, code = self._core:retire_start(deadline_ms)
+  if op == nil then return nil, err, code end
+  return wrap_xa_operation(op, self)
+end
+function XACoordinator:close_blocking() return self._core:close_blocking() end
+-- Manual resource receivers retain their coordinator. Their close releases
+-- that Lua view, never closes the coordinator-owned C resource independently.
+function XACoordinator:resource(resource_id)
+  local resource, err, code = self._core:resource(resource_id)
+  if not resource then return nil, err, code end
+  return setmetatable({ _core = resource, _owner = self }, XAResource)
+end
+function Client:xa_store()
+  local store, err, code = self._core:xa_store()
+  if not store then return nil, err, code end
+  return setmetatable({ _core = store, _owner = self }, XAStore)
+end
+function XAStore:resource(name, configuration)
+  local resource, err, code = self._core:resource(name, configuration)
+  if not resource then return nil, err, code end
+  return setmetatable({ _core = resource, _owner = self }, XAResource)
+end
+function XAStore:retain()
+  local store, err, code = self._core:retain()
+  if not store then return nil, err, code end
+  return setmetatable({ _core = store, _owner = self }, XAStore)
+end
+for _, name in ipairs({ "register_blocking", "enroll_blocking", "progress_blocking", "read_blocking", "close" }) do
+  XAStore[name] = function(self, ...) return self._core[name](self._core, ...) end
+end
+for _, name in ipairs({ "identity", "close_blocking" }) do
+  XAResource[name] = function(self, ...) return self._core[name](self._core, ...) end
+end
+local function resource_operation(operation, owner)
+  return setmetatable({ _core = operation, _owner = owner }, XAResourceOperation)
+end
+for _, name in ipairs({ "register_start", "branch_start", "recover_start", "status_start", "inventory_start" }) do
+  XAResource[name] = function(self, ...)
+    local operation, err, code = self._core[name](self._core, ...)
+    if not operation then return nil, err, code end
+    return resource_operation(operation, self)
+  end
+end
+for _, name in ipairs({ "record", "close" }) do
+  XABranch[name] = function(self, ...) return self._core[name](self._core, ...) end
+end
+for _, name in ipairs({ "prepare_start", "resolve_start" }) do
+  XABranch[name] = function(self, ...)
+    local operation, err, code = self._core[name](self._core, ...)
+    if not operation then return nil, err, code end
+    return resource_operation(operation, self)
+  end
+end
+function XABranch:borrow()
+  local borrow, err, code = self._core:borrow()
+  if not borrow then return nil, err, code end
+  return setmetatable({ _core = borrow }, XABorrow)
+end
+function XAResourceOperation:take_branch()
+  local branch, err, code = self._core:take_branch()
+  if not branch then return nil, err, code end
+  return setmetatable({ _core = branch, _owner = self }, XABranch)
+end
+for _, name in ipairs({ "advance", "wait", "result", "cancel", "close_blocking" }) do
+  XAResourceOperation[name] = function(self, ...) return self._core[name](self._core, ...) end
+end
+function XATransaction:id() return self._core:id() end
+function XATransaction:enroll_start(resource_id, deadline_ms)
+  local op, err, code = self._core:enroll_start(resource_id, deadline_ms)
+  if op == nil then return nil, err, code end
+  return wrap_xa_operation(op, self._coordinator)
+end
+function XATransaction:acquire_start(request, deadline_ms)
+  local op, err, code = self._core:acquire_start(request, deadline_ms)
+  if op == nil then return nil, err, code end
+  return wrap_xa_operation(op, self._coordinator, self)
+end
+function XATransaction:renew_start(deadline_ms)
+  local op, err, code = self._core:renew_start(deadline_ms)
+  if op == nil then return nil, err, code end
+  return wrap_xa_operation(op, self._coordinator)
+end
+function XATransaction:commit_start(deadline_ms)
+  if self._callback then error("XA callback owns the terminal decision", 2) end
+  local op, err, code = self._core:commit_start(deadline_ms)
+  if op == nil then return nil, err, code end
+  return wrap_xa_operation(op, self._coordinator)
+end
+function XATransaction:rollback_start(deadline_ms)
+  if self._callback then error("XA callback owns the terminal decision", 2) end
+  local op, err, code = self._core:rollback_start(deadline_ms)
+  if op == nil then return nil, err, code end
+  return wrap_xa_operation(op, self._coordinator)
+end
+function XATransaction:borrow(resource_id)
+  local borrow, err, code = self._core:borrow(resource_id)
+  if borrow == nil then return nil, err, code end
+  local wrapper = setmetatable({ _core = borrow }, XABorrow)
+  if self._callback then
+    self._borrows[#self._borrows + 1] = wrapper
+  end
+  return wrapper
+end
+function XATransaction:close_blocking()
+  if self._callback then error("cannot close XA inside its callback", 2) end
+  return self._core:close_blocking()
+end
+function XABorrow:view() return self._core:view() end
+function XABorrow:close() return self._core:close() end
+function XAOperation:advance() return self._core:advance() end
+function XAOperation:wait() return self._core:wait() end
+function XAOperation:result() return self._core:result() end
+function XAOperation:cancel() return self._core:cancel() end
+function XAOperation:close_blocking() return self._core:close_blocking() end
+function XAOperation:take_transaction()
+  local tx, err, code = self._core:take_transaction()
+  if tx == nil then return nil, err, code end
+  return wrap_xa_transaction(tx, self._coordinator)
+end
+local function xa_scope_lease(transaction, lease)
+  if not transaction or not transaction._callback then return lease end
+  local release = lease.release
+  lease.release = function(receiver, ...)
+    if transaction._callback then error("XA callback owns the lease terminal decision", 2) end
+    return release(receiver, ...)
+  end
+  for _, name in ipairs({ "update", "update_json", "mutate", "mutate_local",
+      "metadata", "remove", "attach", "delete_attachment", "delete_all_attachments" }) do
+    local method = lease[name]
+    lease[name] = function(receiver, ...)
+      local result = table.pack(pcall(method, receiver, ...))
+      if not result[1] or result[2] == nil then transaction._failed = true end
+      if not result[1] then error(result[2], 0) end
+      return table.unpack(result, 2, result.n)
+    end
+  end
+  transaction._leases[#transaction._leases + 1] = lease
+  return lease
+end
+function XAOperation:take_lease()
+  local lease, err, code = self._core:take_lease()
+  if lease == nil then return nil, err, code end
+  return xa_scope_lease(self._transaction, wrap_lease(lease))
+end
+
+local function xa_error(message, cause)
+  return { code = core.ERR_INVALID, message = message, cause = cause }
+end
+
+-- The supplied scheduler may yield. Observe the native terminal status again
+-- rather than trusting its return value; preserve evidence even if it throws.
+local function xa_drive(op, await, take)
+  local called = table.pack(pcall(await, op))
+  local state = op:result()
+  local value, err, code
+  if not called[1] then
+    err, code = xa_error("XA await callback failed", called[2]), core.ERR_INVALID
+  elseif called[2] == nil and called[3] ~= nil then
+    err, code = called[3], called[4] or core.ERR_INVALID
+  elseif not state or not state.done then
+    err, code = xa_error("XA await returned before operation completion"), core.ERR_INVALID
+  else
+    local done
+    done, err, code = op:advance()
+    if done then
+      if take == "transaction" then value, err, code = op:take_transaction()
+      elseif take == "lease" then value, err, code = op:take_lease()
+      else value = state end
+    end
+  end
+  if not value then op:cancel() end
+  local closed, close_error, close_code = op:close_blocking()
+  if not closed and not err then err, code = close_error, close_code end
+  if err then return nil, err, code, state end
+  return value, nil, nil, state
+end
+
+local function xa_application_operation(tx, start, take)
+  if not tx._callback then
+    return nil, xa_error("XA conveniences require a coordinator callback"), core.ERR_INVALID
+  end
+  local op, err, code = start()
+  if op == nil then tx._failed = true; return nil, err, code end
+  local value
+  value, err, code = xa_drive(op, tx._await, take)
+  if value == nil then tx._failed = true end
+  return value, err, code
+end
+
+function XATransaction:enroll(resource_id)
+  return xa_application_operation(self, function() return self:enroll_start(resource_id) end)
+end
+function XATransaction:renew()
+  return xa_application_operation(self, function() return self:renew_start() end)
+end
+function XATransaction:acquire(request)
+  local lease, err, code = xa_application_operation(self,
+    function() return self:acquire_start(request) end, "lease")
+  if not lease then return nil, err, code end
+  return lease
+end
+function XATransaction:outbox(producer)
+  if not self._callback then
+    return nil, xa_error("XA outbox convenience requires a coordinator callback"), core.ERR_INVALID
+  end
+  local box, err, code = producer:begin()
+  if not box then self._failed = true; return nil, err, code end
+  local bound
+  bound, err, code = box:bind_xa(self)
+  if not bound then box:close(); self._failed = true; return nil, err, code end
+  self._boxes[#self._boxes + 1] = box
+  return box
+end
+function XATransaction:with_connection(resource_id, adapter, callback)
+  local borrow, err, code = self:borrow(resource_id)
+  if not borrow then self._failed = true; return nil, err, code end
+  local created = table.pack(pcall(adapter, borrow))
+  local session = created[1] and created[2] or nil
+  local result
+  if session then
+    result = table.pack(pcall(callback, session))
+    local closed = table.pack(pcall(function() return session:close() end))
+    if result[1] and (not closed[1] or closed[2] == nil or closed[2] == false) then
+      result = { false, closed[1] and closed[3] or closed[2], n = 2 }
+    end
+  else result = { false, created[1] and created[3] or created[2], n = 2 } end
+  local released, release_error = borrow:close()
+  if result[1] and not released then result = { false, release_error, n = 2 } end
+  if not result[1] then self._failed = true; error(result[2], 0) end
+  return table.unpack(result, 2, result.n)
+end
+function XACoordinator:transaction(callback, await)
+  await = await or self._await
+  if type(callback) ~= "function" or type(await) ~= "function" then
+    return nil, xa_error("XA transaction requires callback and await functions"), core.ERR_INVALID
+  end
+  local begin_op, err, code = self:begin_start()
+  if not begin_op then return nil, err, code end
+  local tx, state
+  tx, err, code, state = xa_drive(begin_op, await, "transaction")
+  if not tx then return nil, err, code, state end
+  tx._callback, tx._await = true, await
+  tx._leases, tx._boxes, tx._borrows = {}, {}, {}
+  local invoked = table.pack(pcall(callback, tx))
+  tx._callback = false
+  if not invoked[1] then err, code = xa_error("XA callback failed", invoked[2]), core.ERR_INVALID end
+  if tx._failed and not err then err, code = xa_error("XA callback has failed application work"), core.ERR_INVALID end
+  for _, borrow in ipairs(tx._borrows) do
+    local closed = table.pack(pcall(borrow.close, borrow))
+    if not closed[1] or not closed[2] then
+      if not err then err, code = xa_error("XA borrow cleanup failed", closed[2]), core.ERR_INVALID end
+    end
+  end
+  local terminal_op, start_error, start_code
+  if err then terminal_op, start_error, start_code = tx:rollback_start()
+  else terminal_op, start_error, start_code = tx:commit_start() end
+  if not terminal_op and not err then
+    err, code = start_error, start_code
+    terminal_op, start_error, start_code = tx:rollback_start()
+  end
+  local applied, terminal_error, terminal_code
+  if terminal_op then applied, terminal_error, terminal_code, state = xa_drive(terminal_op, await)
+  else terminal_error, terminal_code = start_error, start_code end
+  if not err and terminal_error then err, code = terminal_error, terminal_code end
+  local receipts = {}
+  if applied and applied.applied and applied.decision == 1 then
+    for _, box in ipairs(tx._boxes) do
+      local receipt, receipt_error = box:commit()
+      if receipt then receipts[#receipts + 1] = receipt
+      elseif not err then err, code = receipt_error, receipt_error.code end
+    end
+  end
+  for _, objects in ipairs({ tx._boxes, tx._leases }) do
+    for _, object in ipairs(objects) do
+      local closed, close_error = pcall(object.close, object)
+      if not closed and not err then err, code = xa_error("XA application cleanup failed", close_error), core.ERR_INVALID end
+    end
+  end
+  local closed, close_error, close_code = tx:close_blocking()
+  if not closed and not err then err, code = close_error, close_code end
+  if err then return nil, err, code, state end
+  return { txn_id = applied.txn_id, decision = applied.decision,
+    applied = applied.applied, outboxes = receipts,
+    values = table.pack(table.unpack(invoked, 2, invoked.n)) }
 end
 
 local function normalize_result(a, b)
@@ -244,11 +584,15 @@ M.ERR_TRANSPORT = core.ERR_TRANSPORT
 M.ERR_PROTOCOL = core.ERR_PROTOCOL
 M.ERR_SERVER = core.ERR_SERVER
 M.ERR_TIMEOUT = core.ERR_TIMEOUT
+M.ERR_PENDING = core.ERR_PENDING
 M.NACK_FAILURE = core.NACK_FAILURE
 M.NACK_DEFER = core.NACK_DEFER
 M.COMMAND_PENDING = core.COMMAND_PENDING
 M.COMMAND_COMPLETED = core.COMMAND_COMPLETED
 M.COMMAND_FAILED = core.COMMAND_FAILED
+for name, value in pairs(core) do
+  if name:match("^XA_") then M[name] = value end
+end
 
 function M.open(config)
   local client, err = core.open(config)
@@ -270,6 +614,14 @@ function Client:close()
   end
 end
 
+-- Creates a threadless producer. Delivery and automatic Pouch retention require
+-- an explicit outbox:dispatcher(); options may attach a compatible dispatcher.
+-- Completed/inbox/command retention defaults independently to 30 days. Seconds
+-- 0 select defaults, -1 disables that type (including its count cap); positive
+-- seconds override. Their count fields are unbounded with nil, 0, or false.
+-- Dead letters separately default to 30 days, 1024 records, and 64 MiB; false
+-- disables an individual capacity bound. Reclamation ends deduplication and
+-- command-status availability. Keep the same config across namespace users.
 function Client:new_outbox(config, options)
   local core_options = options
 
@@ -782,6 +1134,8 @@ function Outbox:transaction(fn)
   end)
 end
 
+-- Gets or starts the one compatible local dispatcher, including maintenance.
+-- Closing a producer or dispatcher wrapper does not stop the shared worker.
 function Outbox:dispatcher()
   local dispatcher, err = self._core:dispatcher()
 
@@ -836,6 +1190,8 @@ function Outbox:accept_command(request)
   return wrap_outbox_transaction(transaction), receipt_or_err
 end
 
+-- Reads committed status only. A reclaimed terminal receipt is no longer
+-- available; it is not reconstructed or reopened by a status read.
 function Outbox:get_command_receipt(identity)
   return self._core:get_command_receipt(identity)
 end
@@ -846,7 +1202,9 @@ function Outbox:get_command_receipt_by_id(command_id)
 end
 
 -- Waits only for a durable terminal receipt; it never performs dispatch.
--- A positive timeout is a monotonic deadline, including each remote read.
+-- 0 reads once, -1 waits indefinitely, and positive milliseconds bound the wait
+-- and each remote read. Timeout returns pending_receipt, error; other failures
+-- return nil, error, code. A reclaimed receipt is a normal missing-record error.
 function Outbox:wait_command(command_id, timeout_ms)
   return self._core:wait_command(command_id, timeout_ms)
 end
@@ -876,6 +1234,8 @@ function Outbox:resume_command(identity)
 end
 
 -- Resumes a pending receipt by command id for a supervisor-owned finalizer.
+-- A terminal receipt returns nil, receipt; a missing/invalid id returns nil,
+-- error. Retention can remove terminal status; resume never recreates it.
 function Outbox:resume_command_by_id(command_id)
   local transaction, receipt_or_err = self._core:resume_command_by_id(command_id)
 
@@ -1033,6 +1393,9 @@ function OutboxDispatcher:notify_outbox_key(outbox_key)
   return self._core:notify_outbox_key(outbox_key)
 end
 
+-- Copies process-local counters. terminal_reclaims and dead_letter_reclaims
+-- count retired markers (including stale ones), not records deleted. Failure
+-- counters and last_error expose retryable maintenance errors without a query.
 function OutboxDispatcher:stats()
   return self._core:stats()
 end
@@ -1058,10 +1421,17 @@ function OutboxDispatcher:read_dead_letters(options)
   return self._core:export_dead_letters(options)
 end
 
+-- Requests stop and waits for private work and handed-out jobs: nil/-1 waits
+-- indefinitely, 0 polls, positive milliseconds bound the wait. Finish or close
+-- caller-owned jobs before waiting indefinitely. Timeout leaves it stopping;
+-- outstanding jobs remain usable for a terminal outcome or close.
+-- Stop/wait are rejected inside a dispatcher handler, including zero-time polls.
 function OutboxDispatcher:stop(deadline_ms)
   return self._core:stop(deadline_ms)
 end
 
+-- Observes an already requested stop using stop()'s deadline convention; it
+-- rejects a dispatcher that has not been stopped and never restarts it.
 function OutboxDispatcher:wait(deadline_ms)
   return self._core:wait(deadline_ms)
 end
@@ -1071,6 +1441,29 @@ function OutboxTransaction:close()
     self._core:close()
     self._closed = true
   end
+end
+
+function OutboxTransaction:id() return self._core:id() end
+function OutboxTransaction:bind_xa(transaction)
+  local bound, err, code = self._core:bind_xa(transaction._core)
+  if bound then self._xa_transaction = transaction end
+  return bound, err, code
+end
+function OutboxTransaction:commit_start(deadline_ms)
+  if self._xa_transaction and self._xa_transaction._callback then
+    error("XA callback owns the outbox terminal decision", 2)
+  end
+  local op, err, code = self._core:commit_start(deadline_ms)
+  if op == nil then return nil, err, code end
+  return wrap_xa_operation(op, nil)
+end
+function OutboxTransaction:rollback_start(deadline_ms)
+  if self._xa_transaction and self._xa_transaction._callback then
+    error("XA callback owns the outbox terminal decision", 2)
+  end
+  local op, err, code = self._core:rollback_start(deadline_ms)
+  if op == nil then return nil, err, code end
+  return wrap_xa_operation(op, nil)
 end
 
 function OutboxTransaction:acquire(req)

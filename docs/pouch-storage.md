@@ -111,8 +111,8 @@ Rejected Pouch layout:
 - `.lockd/leases`;
 - `.lockd/namespace-config`.
 
-The only reserved namespaces that remain acceptable are true control stores
-where Go disk also uses out-of-band control. Pouch transaction records use
+Reserved namespaces are true control stores, rather than relocated user data.
+Pouch transaction records use
 `.txns`, and decision marker support, when present, uses `.txn-decisions`.
 Pouch stores the C-native transaction record at key `<txn_id>` instead of a
 protobuf/JSON Go payload; a `txn/` prefix or `.lockd/txn` namespace is rejected.
@@ -130,6 +130,15 @@ use Pouch-only `.lockd/tc-cluster` namespaces. Pouch stores C-native binary
 control values at these keys; Go stores JSON/protobuf-supported values. Any
 additional Pouch-only reserved control store must be named here before
 implementation.
+
+PostgreSQL XA uses `.xa` for external branch descriptors and resource
+registration. A branch descriptor uses `branch/<txn_id>/<branch_id>` and a bounded
+`LPXB` binary record with native identity, phase and completion evidence. It
+contains no SQL or credentials. The existing `.txns` participant/vote record
+remains the sole global decision journal; an external prepare-intent vote seals
+enrollment without voting YES. The application gate checks durable external
+completion before publishing Pouch changes. `.xa` and its child namespaces are
+reserved from public state/lease access. See [the XA contract](xa.md).
 
 ### Logstore Records
 
@@ -980,11 +989,15 @@ the public API or durable format.
 
   Checkpoints retain the monotonic fencing high-water mark even after a lease
   terminal record is reclaimed, so no future acquire can reuse a fencing token.
-  Unresolved XA decisions are retained indefinitely. Resolved decisions,
-  queue terminal records, outbox receipts, and idempotency records retain
-  their existing compaction semantics; a history pin conservatively prevents
-  the selected namespace compaction while it is behind. Fine-grained consumer
-  boundaries for those individual record families remain future work.
+  Unresolved XA decisions are retained indefinitely. Fully applied managed XA
+  histories have separate [coordinator retirement](postgres.md#completed-coordinator-history)
+  with a 30-day default and optional count cap; native branch completion alone
+  does not make a global history eligible. Outbox envelopes and receipt families
+  use independent [terminal retention](pouch-terminal-retention.md) and
+  [dead-letter retention](pouch-dead-letter-retention.md). History pins
+  conservatively prevent the selected namespace compaction while behind; they
+  do not extend these explicit record-retirement policies. Fine-grained consumer
+  boundaries for individual record families remain future work.
 
   Pouch implements this through terminal-reclaim work markers and compaction,
   not a TTL sweeper. Once a terminal transition commits, its namespace is

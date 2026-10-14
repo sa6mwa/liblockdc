@@ -8,6 +8,7 @@
 #include <lauxlib.h>
 #include <lua.h>
 
+#include "lockdc_lua_internal.h"
 #include <lc/lc.h>
 
 #define LCDC_CLIENT_MT "lockdc.client"
@@ -82,12 +83,14 @@ typedef struct lcdc_outbox_dispatcher_ud {
 typedef struct lcdc_outbox_txn_ud {
   lc_outbox_transaction *transaction;
   int owner_ref;
+  int xa_owner_ref;
+  void *xa_control;
   /* A participant source/sink can re-enter Lua. Keep terminal transaction
    * operations out of that frame because they release the participant leases
    * still owned by the native operation. */
   size_t streaming_count;
   int callback_scoped;
-  int callback_staging_failed;
+  unsigned long callback_staging_failed;
   int callback_duplicate_seen;
   int callback_duplicate_after_domain_participant;
   int callback_has_fresh_participant;
@@ -365,6 +368,24 @@ static lcdc_client_ud *lcdc_check_client(lua_State *L, int index) {
       L, !ud->streaming, index,
       "lockdc client operation is not allowed while output is streaming");
   return ud;
+}
+
+int lc_lua_client_view(lua_State *L, int index, lc_client **out,
+                       lc_error *error) {
+  lcdc_client_ud *ud;
+  if (out != NULL)
+    *out = NULL;
+  if (L == NULL || out == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "client conversion requires Lua state and output", NULL,
+                        NULL, NULL);
+  ud = luaL_testudata(L, index, LCDC_CLIENT_MT);
+  if (out == NULL || ud == NULL || ud->client == NULL || ud->streaming)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "expected a live, idle lockdc client userdata", NULL,
+                        NULL, NULL);
+  *out = ud->client;
+  return LC_OK;
 }
 
 /* Request-table field access may invoke Lua metamethods. In particular, an
@@ -792,8 +813,8 @@ static int lcdc_opt_uint64_field(lua_State *L, int index, const char *name,
 /* Lua integers are signed, so use explicit false for the C API's unsigned
  * unbounded sentinels. Keeping the field numeric otherwise avoids a second
  * configuration spelling and makes accidental true values actionable. */
-static int lcdc_opt_dead_letter_count_field(lua_State *L, int index,
-                                            const char *name, size_t *out) {
+static int lcdc_opt_retention_count_field(lua_State *L, int index,
+                                          const char *name, size_t *out) {
   if (lua_istable(L, index)) {
     lua_getfield(L, index, name);
     if (lua_isboolean(L, -1)) {
@@ -1420,6 +1441,18 @@ static int lcdc_push_lease(lua_State *L, lc_lease *lease, int owner_index) {
   return 1;
 }
 
+lc_lease **lcdc_xa_lease_shell(lua_State *L, int owner_index) {
+  lcdc_lease_ud *ud;
+  owner_index = lua_absindex(L, owner_index);
+  ud = lua_newuserdatauv(L, sizeof(*ud), 1);
+  memset(ud, 0, sizeof(*ud));
+  ud->owner_ref = LUA_NOREF;
+  luaL_setmetatable(L, LCDC_LEASE_MT);
+  lua_pushvalue(L, owner_index);
+  lua_setiuservalue(L, -2, 1);
+  return &ud->lease;
+}
+
 static int lcdc_push_borrowed_lease_owned(lua_State *L, lc_lease *lease,
                                           int owner_index,
                                           lcdc_outbox_job_ud *borrowed_job) {
@@ -1662,6 +1695,8 @@ static int lcdc_push_outbox_txn(lua_State *L,
       (lcdc_outbox_txn_ud *)lua_newuserdata(L, sizeof(*ud));
   ud->transaction = transaction;
   ud->owner_ref = LUA_NOREF;
+  ud->xa_owner_ref = LUA_NOREF;
+  ud->xa_control = NULL;
   ud->streaming_count = 0U;
   ud->callback_scoped = 0;
   ud->callback_staging_failed = 0;
@@ -1927,6 +1962,11 @@ static int lcdc_outbox_txn_gc(lua_State *L) {
     luaL_unref(L, LUA_REGISTRYINDEX, ud->callback_duplicate_result_ref);
     ud->callback_duplicate_result_ref = LUA_NOREF;
   }
+  if (ud->xa_owner_ref != LUA_NOREF) {
+    luaL_unref(L, LUA_REGISTRYINDEX, ud->xa_owner_ref);
+    ud->xa_owner_ref = LUA_NOREF;
+  }
+  ud->xa_control = NULL;
   return 0;
 }
 
@@ -3858,9 +3898,10 @@ static void lcdc_parse_txn_participants(lua_State *L, int index,
   *count_out = count;
 }
 
-static void lcdc_parse_txn_decision_req(lua_State *L, int index,
-                                        lc_txn_decision_req *req,
-                                        lc_txn_participant **participants) {
+static int lcdc_parse_txn_decision_req(lua_State *L, int index,
+                                       lc_txn_decision_req *req,
+                                       lc_txn_participant **participants,
+                                       lc_error *error) {
   int root_index;
 
   index = lua_absindex(L, index);
@@ -3871,7 +3912,14 @@ static void lcdc_parse_txn_decision_req(lua_State *L, int index,
    * after the native decision call has finished. */
   lua_createtable(L, 0, 3);
   root_index = lua_absindex(L, -1);
-  lcdc_normalize_string_field(L, index, root_index, "txn_id", 1);
+  lua_getfield(L, index, "txn_id");
+  if (!lcdc_xa_text(L, -1, 0)) {
+    lua_pop(L, 1);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "txn_id must be a string without NUL bytes", NULL, NULL,
+                        NULL);
+  }
+  lua_setfield(L, root_index, "txn_id");
   lcdc_opt_int64_field(L, index, "expires_at_unix", &req->expires_at_unix);
   lcdc_opt_uint64_field(L, index, "tc_term", &req->tc_term);
   lcdc_normalize_string_field(L, index, root_index, "target_backend_hash", 0);
@@ -3885,6 +3933,7 @@ static void lcdc_parse_txn_decision_req(lua_State *L, int index,
   req->target_backend_hash = lua_tostring(L, -1);
   lua_pop(L, 1);
   req->participants = *participants;
+  return LC_OK;
 }
 
 static int lcdc_push_txn_decision_res(lua_State *L,
@@ -3898,70 +3947,114 @@ static int lcdc_push_txn_decision_res(lua_State *L,
   return LC_OK;
 }
 
+typedef struct lcdc_txn_decision_scope {
+  lc_txn_decision_res result;
+  lc_txn_replay_res replay;
+  lc_error error;
+} lcdc_txn_decision_scope;
+static int lcdc_txn_decision_gc(lua_State *L) {
+  lcdc_txn_decision_scope *scope =
+      luaL_testudata(L, 1, "lockdc.txn_decision_scope");
+  if (scope != NULL) {
+    lc_txn_decision_res_cleanup(&scope->result);
+    lc_txn_replay_res_cleanup(&scope->replay);
+    lc_error_cleanup(&scope->error);
+  }
+  return 0;
+}
+static lcdc_txn_decision_scope *lcdc_new_txn_decision_scope(lua_State *L) {
+  lcdc_txn_decision_scope *scope = lua_newuserdatauv(L, sizeof(*scope), 0);
+  memset(scope, 0, sizeof(*scope));
+  lc_error_init(&scope->error);
+  luaL_newmetatable(L, "lockdc.txn_decision_scope");
+  lua_pushcfunction(L, lcdc_txn_decision_gc);
+  lua_setfield(L, -2, "__gc");
+  lua_setmetatable(L, -2);
+  return scope;
+}
+
 static int lcdc_client_txn_replay(lua_State *L) {
   lcdc_client_ud *ud;
   lc_client *client;
   lc_txn_replay_req req;
-  lc_txn_replay_res res;
-  lc_error error;
+  lcdc_txn_decision_scope *scope;
   int rc;
+  int count = 1;
 
   ud = lcdc_check_client(L, 1);
   lc_txn_replay_req_init(&req);
-  memset(&res, 0, sizeof(res));
-  lc_error_init(&error);
+  scope = lcdc_new_txn_decision_scope(L);
   luaL_checktype(L, 2, LUA_TTABLE);
-  lcdc_require_string_field(L, 2, "txn_id", &req.txn_id);
-  rc = lcdc_client_revalidate(ud, &client, &error);
-  if (rc == LC_OK)
-    rc = lc_txn_replay(client, &req, &res, &error);
-  if (rc != LC_OK) {
-    lcdc_push_status_error(L, rc, &error);
-    lc_error_cleanup(&error);
-    return 3;
+  /* Keep the exact Lua string rooted until the native replay returns. */
+  lua_getfield(L, 2, "txn_id");
+  if (!lcdc_xa_text(L, -1, 0))
+    rc = lc_error_set(&scope->error, LC_ERR_INVALID, 0L,
+                      "txn_id must be a string without NUL bytes", NULL, NULL,
+                      NULL);
+  else {
+    req.txn_id = lua_tostring(L, -1);
+    rc = lcdc_client_revalidate(ud, &client, &scope->error);
   }
-  lua_newtable(L);
-  lcdc_set_string_field(L, "txn_id", res.txn_id);
-  lcdc_set_string_field(L, "state", res.state);
-  lcdc_set_string_field(L, "correlation_id", res.correlation_id);
-  lc_txn_replay_res_cleanup(&res);
-  lc_error_cleanup(&error);
-  return 1;
+  if (rc == LC_OK)
+    rc = lc_txn_replay(client, &req, &scope->replay, &scope->error);
+  lua_pop(L, 1);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &scope->error);
+    count = scope->replay.txn_id != NULL ? 4 : 3;
+  }
+  if (rc == LC_OK || count == 4) {
+    lua_newtable(L);
+    lcdc_set_string_field(L, "txn_id", scope->replay.txn_id);
+    lcdc_set_string_field(L, "state", scope->replay.state);
+    lcdc_set_string_field(L, "correlation_id", scope->replay.correlation_id);
+  }
+  lc_txn_replay_res_cleanup(&scope->replay);
+  lc_error_cleanup(&scope->error);
+  return count;
 }
 
 static int lcdc_client_txn_decision(lua_State *L, int operation) {
   lcdc_client_ud *ud;
   lc_client *client;
   lc_txn_decision_req req;
-  lc_txn_decision_res res;
+  lcdc_txn_decision_scope *scope;
   lc_txn_participant *participants;
-  lc_error error;
   int rc;
+  int count;
 
   ud = lcdc_check_client(L, 1);
-  memset(&res, 0, sizeof(res));
+  scope = lcdc_new_txn_decision_scope(L);
   participants = NULL;
-  lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
-  lcdc_parse_txn_decision_req(L, 2, &req, &participants);
-  rc = lcdc_client_revalidate(ud, &client, &error);
+  rc = lcdc_parse_txn_decision_req(L, 2, &req, &participants, &scope->error);
+  if (rc == LC_OK)
+    rc = lcdc_client_revalidate(ud, &client, &scope->error);
   if (rc == LC_OK && operation == 0) {
-    rc = lc_txn_prepare(client, &req, &res, &error);
+    rc = lc_txn_prepare(client, &req, &scope->result, &scope->error);
   } else if (rc == LC_OK && operation == 1) {
-    rc = lc_txn_commit(client, &req, &res, &error);
+    rc = lc_txn_commit(client, &req, &scope->result, &scope->error);
   } else if (rc == LC_OK) {
-    rc = lc_txn_rollback(client, &req, &res, &error);
+    rc = lc_txn_rollback(client, &req, &scope->result, &scope->error);
   }
   lcdc_free_txn_participants(&participants);
   lua_pop(L, 1);
   if (rc != LC_OK) {
-    lcdc_push_status_error(L, rc, &error);
-    lc_error_cleanup(&error);
-    return 3;
+    lcdc_push_status_error(L, rc, &scope->error);
+    count = 3;
+    /* Preserve C's durable decision on pending application, without treating
+     * an uncompleted transaction as a Lua success. The fourth value is the
+     * actual result snapshot, not a reconstructed or replayed decision. */
+    if (scope->result.txn_id != NULL) {
+      lcdc_push_txn_decision_res(L, &scope->result, &scope->error);
+      count = 4;
+    }
+    lc_txn_decision_res_cleanup(&scope->result);
+    lc_error_cleanup(&scope->error);
+    return count;
   }
-  lcdc_push_txn_decision_res(L, &res, &error);
-  lc_txn_decision_res_cleanup(&res);
-  lc_error_cleanup(&error);
+  lcdc_push_txn_decision_res(L, &scope->result, &scope->error);
+  lc_txn_decision_res_cleanup(&scope->result);
+  lc_error_cleanup(&scope->error);
   return 1;
 }
 
@@ -5677,6 +5770,10 @@ static int lcdc_push_outbox_stats(lua_State *L, const lc_outbox_stats *stats,
                             stats->payload_open_failures, error) != LC_OK ||
       lcdc_set_uint64_field(L, "dead_letter_reclaims",
                             stats->dead_letter_reclaims, error) != LC_OK ||
+      lcdc_set_uint64_field(L, "terminal_reclaims", stats->terminal_reclaims,
+                            error) != LC_OK ||
+      lcdc_set_uint64_field(L, "terminal_reclaim_failures",
+                            stats->terminal_reclaim_failures, error) != LC_OK ||
       lcdc_set_uint64_field(L, "dead_letter_reclaim_failures",
                             stats->dead_letter_reclaim_failures,
                             error) != LC_OK) {
@@ -5728,8 +5825,20 @@ static int lcdc_client_new_outbox(lua_State *L) {
                          &config.replay_dead_letters_on_startup);
   lcdc_opt_integer_field(L, 2, "dead_letter_retention_seconds",
                          &config.dead_letter_retention_seconds);
-  (void)lcdc_opt_dead_letter_count_field(L, 2, "dead_letter_max_count",
-                                         &config.dead_letter_max_count);
+  (void)lcdc_opt_retention_count_field(L, 2, "dead_letter_max_count",
+                                       &config.dead_letter_max_count);
+  lcdc_opt_integer_field(L, 2, "completed_retention_seconds",
+                         &config.completed_retention_seconds);
+  (void)lcdc_opt_retention_count_field(L, 2, "completed_max_count",
+                                       &config.completed_max_count);
+  lcdc_opt_integer_field(L, 2, "inbox_retention_seconds",
+                         &config.inbox_retention_seconds);
+  (void)lcdc_opt_retention_count_field(L, 2, "inbox_max_count",
+                                       &config.inbox_max_count);
+  lcdc_opt_integer_field(L, 2, "command_retention_seconds",
+                         &config.command_retention_seconds);
+  (void)lcdc_opt_retention_count_field(L, 2, "command_max_count",
+                                       &config.command_max_count);
   (void)lcdc_opt_dead_letter_bytes_field(L, 2, "dead_letter_max_bytes",
                                          &config.dead_letter_max_bytes);
   (void)lcdc_opt_size_field(L, 2, "notification_capacity",
@@ -7119,27 +7228,110 @@ static int lcdc_outbox_txn_close(lua_State *L) {
 }
 
 static void lcdc_outbox_txn_note_staging_failure(lcdc_outbox_txn_ud *ud) {
-  if (ud != NULL && ud->callback_scoped)
-    ud->callback_staging_failed = 1;
+  if (ud != NULL && (ud->callback_scoped || ud->xa_control != NULL)) {
+    if (ud->callback_staging_failed != ULONG_MAX)
+      ++ud->callback_staging_failed;
+    lcdc_xa_staging_begin(ud->xa_control);
+  }
 }
 
 /* Lua argument failures longjmp and may be caught by the callback with pcall.
  * Arm the callback as rollback-only before parsing a state-changing operation;
- * only a fully successful operation restores the prior state. */
-static int lcdc_outbox_txn_begin_staging(lcdc_outbox_txn_ud *ud) {
-  int was_failed = 0;
-
-  if (ud != NULL && ud->callback_scoped) {
-    was_failed = ud->callback_staging_failed;
-    ud->callback_staging_failed = 1;
+ * only a fully successful operation removes its own guard. Nested failures
+ * leave an outstanding guard even when an outer operation succeeds. */
+static void lcdc_outbox_txn_begin_staging(lcdc_outbox_txn_ud *ud) {
+  if (ud != NULL && (ud->callback_scoped || ud->xa_control != NULL)) {
+    if (ud->callback_staging_failed != ULONG_MAX)
+      ++ud->callback_staging_failed;
+    lcdc_xa_staging_begin(ud->xa_control);
   }
-  return was_failed;
 }
 
-static void lcdc_outbox_txn_finish_staging(lcdc_outbox_txn_ud *ud,
-                                           int was_failed) {
-  if (ud != NULL && ud->callback_scoped)
-    ud->callback_staging_failed = was_failed;
+static void lcdc_outbox_txn_finish_staging(lcdc_outbox_txn_ud *ud) {
+  if (ud != NULL && (ud->callback_scoped || ud->xa_control != NULL)) {
+    if (ud->callback_staging_failed != 0UL &&
+        ud->callback_staging_failed != ULONG_MAX)
+      --ud->callback_staging_failed;
+    lcdc_xa_staging_succeeded(ud->xa_control);
+  }
+}
+
+static int lcdc_outbox_txn_id(lua_State *L) {
+  lcdc_outbox_txn_ud *ud = lcdc_check_outbox_txn(L, 1);
+  lua_pushstring(L, lc_outbox_transaction_id(ud->transaction));
+  return 1;
+}
+static int lcdc_outbox_txn_bind_xa(lua_State *L) {
+  lcdc_outbox_txn_ud *ud = lcdc_check_outbox_txn(L, 1);
+  lc_error *error = lcdc_xa_error_scope(L, 2);
+  lc_xa_transaction *tx = NULL;
+  int reference, rc;
+  rc = lcdc_xa_transaction_view(L, 2, &tx, error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, error);
+    lc_error_cleanup(error);
+    return 3;
+  }
+  lua_pushvalue(L, 2);
+  reference = luaL_ref(L, LUA_REGISTRYINDEX);
+  rc = lc_outbox_transaction_bind_xa(ud->transaction, tx, error);
+  if (rc != LC_OK) {
+    luaL_unref(L, LUA_REGISTRYINDEX, reference);
+    lcdc_push_status_error(L, rc, error);
+    lc_error_cleanup(error);
+    return 3;
+  }
+  if (ud->xa_owner_ref != LUA_NOREF)
+    luaL_unref(L, LUA_REGISTRYINDEX, ud->xa_owner_ref);
+  ud->xa_owner_ref = reference;
+  ud->xa_control = lcdc_xa_transaction_control(L, 2);
+  lc_error_cleanup(error);
+  lua_pushboolean(L, 1);
+  return 1;
+}
+static int lcdc_outbox_txn_xa_terminal(lua_State *L, int rollback) {
+  lcdc_outbox_txn_ud *ud = lcdc_check_outbox_txn(L, 1);
+  lc_error *error = lcdc_xa_error_scope(L, 2);
+  lc_xa_coordinator_operation **out;
+  lua_Integer deadline = 0;
+  int rc;
+  if (!lua_isnil(L, 2) && !lua_isinteger(L, 2)) {
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 "XA deadline must be an exact Lua integer", NULL, NULL, NULL);
+    lcdc_push_status_error(L, LC_ERR_INVALID, error);
+    lc_error_cleanup(error);
+    return 3;
+  }
+  if (!lua_isnil(L, 2))
+    deadline = lua_tointeger(L, 2);
+  if (!rollback && (ud->callback_staging_failed ||
+                    lcdc_xa_transaction_failed(ud->xa_control))) {
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 "XA outbox is rollback-only after a failed staged operation",
+                 NULL, NULL, NULL);
+    lcdc_push_status_error(L, LC_ERR_INVALID, error);
+    lc_error_cleanup(error);
+    return 3;
+  }
+  out = lcdc_xa_operation_shell(L, 1);
+  rc = rollback
+           ? lc_outbox_transaction_rollback_start(ud->transaction,
+                                                  (int64_t)deadline, out, error)
+           : lc_outbox_transaction_commit_start(ud->transaction,
+                                                (int64_t)deadline, out, error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, error);
+    lc_error_cleanup(error);
+    return 3;
+  }
+  lc_error_cleanup(error);
+  return 1;
+}
+static int lcdc_outbox_txn_commit_start(lua_State *L) {
+  return lcdc_outbox_txn_xa_terminal(L, 0);
+}
+static int lcdc_outbox_txn_rollback_start(lua_State *L) {
+  return lcdc_outbox_txn_xa_terminal(L, 1);
 }
 
 static void lcdc_outbox_txn_note_duplicate(lua_State *L, lcdc_outbox_txn_ud *ud,
@@ -7168,10 +7360,9 @@ static int lcdc_outbox_txn_acquire(lua_State *L) {
   lc_outbox_participant *participant = NULL;
   lc_error error;
   int root_index;
-  int was_failed;
   int rc;
 
-  was_failed = lcdc_outbox_txn_begin_staging(ud);
+  lcdc_outbox_txn_begin_staging(ud);
   root_index = lcdc_parse_outbox_participant_request(L, 2, &request);
   lc_error_init(&error);
   rc = lcdc_outbox_txn_revalidate(ud, &transaction, &error);
@@ -7190,7 +7381,7 @@ static int lcdc_outbox_txn_acquire(lua_State *L) {
   ud->callback_has_domain_participant = 1;
   lc_error_cleanup(&error);
   rc = lcdc_push_outbox_participant(L, participant, 1, ud);
-  lcdc_outbox_txn_finish_staging(ud, was_failed);
+  lcdc_outbox_txn_finish_staging(ud);
   return rc;
 }
 
@@ -7202,10 +7393,9 @@ static int lcdc_outbox_txn_append(lua_State *L) {
   lc_source *payload = NULL;
   lc_error error;
   int root_index;
-  int was_failed;
   int rc;
 
-  was_failed = lcdc_outbox_txn_begin_staging(ud);
+  lcdc_outbox_txn_begin_staging(ud);
   root_index = lcdc_parse_outbox_entry(L, 2, &entry);
   lc_outbox_receipt_init(&receipt);
   lc_error_init(&error);
@@ -7240,7 +7430,7 @@ static int lcdc_outbox_txn_append(lua_State *L) {
   }
   lc_outbox_receipt_cleanup(&receipt);
   lc_error_cleanup(&error);
-  lcdc_outbox_txn_finish_staging(ud, was_failed);
+  lcdc_outbox_txn_finish_staging(ud);
   return 1;
 }
 
@@ -7251,10 +7441,9 @@ static int lcdc_outbox_txn_accept_command(lua_State *L) {
   lc_command_receipt receipt;
   lc_error error;
   int root_index;
-  int was_failed;
   int rc;
 
-  was_failed = lcdc_outbox_txn_begin_staging(ud);
+  lcdc_outbox_txn_begin_staging(ud);
   root_index = lcdc_parse_command_request(L, 2, &request);
   lc_command_receipt_init(&receipt);
   lc_error_init(&error);
@@ -7280,7 +7469,7 @@ static int lcdc_outbox_txn_accept_command(lua_State *L) {
   }
   lc_command_receipt_cleanup(&receipt);
   lc_error_cleanup(&error);
-  lcdc_outbox_txn_finish_staging(ud, was_failed);
+  lcdc_outbox_txn_finish_staging(ud);
   return 1;
 }
 
@@ -7291,10 +7480,9 @@ static int lcdc_outbox_txn_accept_inbox(lua_State *L) {
   lc_inbox_accept_result result;
   lc_error error;
   int root_index;
-  int was_failed;
   int rc;
 
-  was_failed = lcdc_outbox_txn_begin_staging(ud);
+  lcdc_outbox_txn_begin_staging(ud);
   memset(&result, 0, sizeof(result));
   root_index = lcdc_parse_inbox_message(L, 2, &message);
   lc_error_init(&error);
@@ -7318,7 +7506,7 @@ static int lcdc_outbox_txn_accept_inbox(lua_State *L) {
     lcdc_push_inbox_result(L, &result);
   }
   lc_error_cleanup(&error);
-  lcdc_outbox_txn_finish_staging(ud, was_failed);
+  lcdc_outbox_txn_finish_staging(ud);
   return 1;
 }
 
@@ -7328,10 +7516,9 @@ static int lcdc_outbox_txn_terminal_command(lua_State *L, int failed) {
   lc_command_result result;
   lc_source *body = NULL;
   lc_error error;
-  int was_failed;
   int rc;
 
-  was_failed = lcdc_outbox_txn_begin_staging(ud);
+  lcdc_outbox_txn_begin_staging(ud);
   transaction = NULL;
   lc_command_result_init(&result);
   luaL_checktype(L, 2, LUA_TTABLE);
@@ -7378,7 +7565,7 @@ static int lcdc_outbox_txn_terminal_command(lua_State *L, int failed) {
   }
   lua_pushboolean(L, 1);
   lc_error_cleanup(&error);
-  lcdc_outbox_txn_finish_staging(ud, was_failed);
+  lcdc_outbox_txn_finish_staging(ud);
   return 1;
 }
 
@@ -8124,6 +8311,8 @@ static int lcdc_outbox_job_dead_letter(lua_State *L) {
 }
 
 static const luaL_Reg lcdc_client_methods[] = {
+    {"xa_store", lcdc_xa_store_open},
+    {"xa_coordinator", lcdc_xa_open},
     {"info", lcdc_client_info},
     {"close", lcdc_client_close},
     {"new_outbox", lcdc_client_new_outbox},
@@ -8239,6 +8428,10 @@ static const luaL_Reg lcdc_outbox_dispatcher_methods[] = {
     {NULL, NULL}};
 
 static const luaL_Reg lcdc_outbox_txn_methods[] = {
+    {"id", lcdc_outbox_txn_id},
+    {"bind_xa", lcdc_outbox_txn_bind_xa},
+    {"commit_start", lcdc_outbox_txn_commit_start},
+    {"rollback_start", lcdc_outbox_txn_rollback_start},
     {"close", lcdc_outbox_txn_close},
     {"accept_command", lcdc_outbox_txn_accept_command},
     {"accept_inbox", lcdc_outbox_txn_accept_inbox},
@@ -8307,6 +8500,7 @@ int luaopen_lockdc_core(lua_State *L) {
       {"pouch_crypto_generate_key_file", lcdc_pouch_crypto_generate_key_file},
       {NULL, NULL}};
 
+  lcdc_xa_install(L);
   lcdc_create_metatable(L, LCDC_CLIENT_MT, lcdc_client_methods, lcdc_client_gc);
   lcdc_create_metatable(L, LCDC_LEASE_MT, lcdc_lease_methods, lcdc_lease_gc);
   lcdc_create_metatable(L, LCDC_MESSAGE_MT, lcdc_message_methods,
@@ -8327,6 +8521,7 @@ int luaopen_lockdc_core(lua_State *L) {
                         lcdc_history_consumer_gc);
   lua_newtable(L);
   luaL_setfuncs(L, module_functions, 0);
+  lcdc_xa_constants(L);
   lua_pushinteger(L, LC_OK);
   lua_setfield(L, -2, "OK");
   lua_pushinteger(L, LC_ERR_INVALID);
@@ -8341,6 +8536,8 @@ int luaopen_lockdc_core(lua_State *L) {
   lua_setfield(L, -2, "ERR_SERVER");
   lua_pushinteger(L, LC_ERR_TIMEOUT);
   lua_setfield(L, -2, "ERR_TIMEOUT");
+  lua_pushinteger(L, LC_ERR_PENDING);
+  lua_setfield(L, -2, "ERR_PENDING");
   lua_pushinteger(L, LC_COMMAND_PENDING);
   lua_setfield(L, -2, "COMMAND_PENDING");
   lua_pushinteger(L, LC_COMMAND_COMPLETED);

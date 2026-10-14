@@ -5968,6 +5968,89 @@ static void test_public_query_keys_captures_body_metadata(void **state) {
   https_tls_material_cleanup(&material);
 }
 
+static void test_public_query_keys_accepts_empty_results(void **state) {
+  static const char *response_headers[] = {"Content-Type: application/json"};
+  static const char *response_bodies[] = {
+      "{\"namespace\":\"transport-ns\",\"index_seq\":77,"
+      "\"metadata\":{\"index_pending\":\"false\"}}",
+      "{\"keys\":[],\"index_seq\":77,"
+      "\"metadata\":{\"index_pending\":\"false\"}}",
+      "{\"keys\":null,\"index_seq\":77,"
+      "\"metadata\":{\"index_pending\":\"false\"}}",
+      "{\"keys\":1}",
+      "{\"keys\":{}}",
+      "{\"keys\":\"invalid\"}"};
+  https_expectation expectations[6];
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_query_req req;
+  lc_query_res res;
+  lc_query_key_handler handler;
+  query_key_capture capture;
+  lc_error error;
+  size_t index;
+  int rc;
+
+  (void)state;
+  memset(expectations, 0, sizeof(expectations));
+  for (index = 0U; index < 6U; ++index) {
+    expectations[index].method = "POST";
+    expectations[index].path = "/v1/query?engine=index&refresh=wait_for";
+    expectations[index].response_status = 200;
+    expectations[index].response_headers = response_headers;
+    expectations[index].response_header_count = 1U;
+    expectations[index].response_body = response_bodies[index];
+    expectations[index].expected_client_cn = "liblockdc test client";
+    expectations[index].response_body_chunk_size = 3U;
+  }
+  client = NULL;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(https_testserver_start(&server, &material, expectations, 6U));
+  /* Invalid key types can abort reception before all fragments are sent. */
+  server.allow_response_write_failure = 1;
+  memset(&config, 0, sizeof(config));
+  memset(&handler, 0, sizeof(handler));
+  lc_error_init(&error);
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+  handler.begin = capture_query_key_begin;
+  handler.chunk = capture_query_key_chunk;
+  handler.end = capture_query_key_end;
+  lc_query_req_init(&req);
+  req.ns = "transport-ns";
+  req.selector_json =
+      "{\"eq\":{\"field\":\"/dispatch_state\",\"value\":\"claimed\"}}";
+  req.limit = 16L;
+  req.engine = "index";
+  req.refresh = "wait_for";
+  for (index = 0U; index < 6U; ++index) {
+    memset(&res, 0, sizeof(res));
+    memset(&capture, 0, sizeof(capture));
+    rc = client->query_keys(client, &req, &handler, &capture, &res, &error);
+    assert_int_equal(rc, index < 2U ? LC_OK : LC_ERR_PROTOCOL);
+    assert_int_equal(capture.begin_calls, 0);
+    assert_int_equal(capture.chunk_calls, 0);
+    assert_int_equal(capture.end_calls, 0);
+    if (index < 2U) {
+      assert_null(res.cursor);
+      assert_int_equal(res.index_seq, 77UL);
+      assert_string_equal(res.metadata_json, "{\"index_pending\":\"false\"}");
+    }
+    lc_query_res_cleanup(&res);
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+  }
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
 static void test_public_query_keys_streams_large_response_without_client_alloc(
     void **state) {
   enum { key_count = 4096 };
@@ -8079,6 +8162,9 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
 #elif defined(LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_CAPTURES_BODY_METADATA)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_public_query_keys_captures_body_metadata)
+#elif defined(LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_ACCEPTS_EMPTY_RESULTS)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_public_query_keys_accepts_empty_results)
 #elif defined(                                                                 \
     LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_STREAMS_LARGE_RESPONSE_WITHOUT_CLIENT_ALLOC)
 #define LC_HTTPS_UNIT_TESTS                                                    \
@@ -8221,6 +8307,7 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
       cmocka_unit_test(test_public_query_stream_captures_headers_and_body),       \
       cmocka_unit_test(test_public_query_keys_streams_chunks_and_headers),        \
       cmocka_unit_test(test_public_query_keys_captures_body_metadata),            \
+      cmocka_unit_test(test_public_query_keys_accepts_empty_results),             \
       cmocka_unit_test(                                                           \
           test_public_query_keys_streams_large_response_without_client_alloc),    \
       cmocka_unit_test(                                                           \

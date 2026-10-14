@@ -374,7 +374,7 @@ int lc_engine_client_queue_stats(lc_engine_client *client,
   size_t header_count;
   lc_engine_queue_stats_request body_src;
   lonejson_field body_fields[2];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_queue_stats_response_json parsed;
   size_t body_field_count;
   int rc;
@@ -440,7 +440,7 @@ int lc_engine_client_queue_ack(lc_engine_client *client,
   size_t header_count;
   lc_engine_queue_ack_request body_src;
   lonejson_field body_fields[10];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_queue_ack_response_json parsed;
   size_t body_field_count;
   int rc;
@@ -527,7 +527,7 @@ int lc_engine_client_queue_nack(lc_engine_client *client,
   lc_engine_queue_nack_response_json parsed;
   lc_engine_queue_nack_body_json body_src;
   lonejson_field body_fields[13];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_json_reader_source last_error_source;
   lonejson_error lj_error;
   size_t body_field_count;
@@ -654,7 +654,7 @@ int lc_engine_client_queue_extend(lc_engine_client *client,
   size_t header_count;
   lc_engine_queue_extend_request body_src;
   lonejson_field body_fields[10];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_queue_extend_response_json parsed;
   size_t body_field_count;
   int rc;

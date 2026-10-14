@@ -58,21 +58,21 @@ if(NOT TARGET pslog::pslog)
   add_library(pslog::pslog INTERFACE IMPORTED)
 endif()
 set(pslog_FOUND TRUE)
-set(pslog_VERSION "0.10.0")
+set(pslog_VERSION "0.12.0")
 ]=])
-    lockdc_write_fake_package_version("${fake_pslog_dir}" "0.10.0" "pslogConfigVersion.cmake")
+    lockdc_write_fake_package_version("${fake_pslog_dir}" "0.12.0" "pslogConfigVersion.cmake")
 
     file(WRITE "${fake_lonejson_dir}/lonejsonConfig.cmake" [=[
 if(NOT TARGET lonejson::lonejson)
   add_library(lonejson::lonejson INTERFACE IMPORTED)
 endif()
 set(lonejson_FOUND TRUE)
-set(lonejson_VERSION "0.44.0")
+set(lonejson_VERSION "0.45.0")
 set(lonejson_curl_FOUND TRUE)
 set(lonejson_oidc_FOUND TRUE)
 set(lonejson_openssl_FOUND TRUE)
 ]=])
-    lockdc_write_fake_package_version("${fake_lonejson_dir}" "0.44.0" "lonejsonConfigVersion.cmake")
+    lockdc_write_fake_package_version("${fake_lonejson_dir}" "0.45.0" "lonejsonConfigVersion.cmake")
 
     file(WRITE "${fake_liblql_dir}/liblqlConfig.cmake" [=[
 if(NOT TARGET liblql::lql)
@@ -91,7 +91,7 @@ endfunction()
 function(lockdc_append_package_probe_args out_var package_prefix external_root fake_curl_dir consumer_src_dir consumer_bin_dir)
     set(lockdc_probe_prefix_path
         "${package_prefix}"
-        "${external_root}/c.pkt.systems/install"
+        "${external_root}/cpkt/install"
         "${external_root}/pslog/install"
         "${external_root}/lonejson/install"
         "${external_root}/liblql/install")
@@ -103,10 +103,10 @@ function(lockdc_append_package_probe_args out_var package_prefix external_root f
         "-DCMAKE_PREFIX_PATH=${lockdc_probe_prefix_path_arg}"
         "-Dlockdc_DIR=${package_prefix}/lib/cmake/lockdc"
         "-DCURL_DIR=${fake_curl_dir}"
-        "-DOpenSSL_DIR=${external_root}/c.pkt.systems/install/lib/cmake/OpenSSL"
-        "-DZLIB_DIR=${external_root}/c.pkt.systems/install/lib/cmake/zlib"
-        "-Dnghttp2_DIR=${external_root}/c.pkt.systems/install/lib/cmake/nghttp2"
-        "-DLibssh2_DIR=${external_root}/c.pkt.systems/install/lib/cmake/libssh2"
+        "-DOpenSSL_DIR=${external_root}/cpkt/install/lib/cmake/OpenSSL"
+        "-DZLIB_DIR=${external_root}/cpkt/install/lib/cmake/zlib"
+        "-Dnghttp2_DIR=${external_root}/cpkt/install/lib/cmake/nghttp2"
+        "-DLibssh2_DIR=${external_root}/cpkt/install/lib/cmake/libssh2"
         "-Dpslog_DIR=${external_root}/pslog/install/lib/cmake/pslog"
         "-Dlonejson_DIR=${external_root}/lonejson/install/lib/cmake/lonejson"
         "-Dliblql_DIR=${external_root}/liblql/install/lib/cmake/liblql"
@@ -118,6 +118,9 @@ function(lockdc_append_package_probe_args out_var package_prefix external_root f
     elseif(DEFINED CMAKE_C_COMPILER AND NOT CMAKE_C_COMPILER STREQUAL "")
         list(APPEND lockdc_probe_configure_args "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}")
     endif()
+    if(DEFINED CMAKE_TOOLCHAIN_FILE AND NOT CMAKE_TOOLCHAIN_FILE STREQUAL "")
+        list(APPEND lockdc_probe_configure_args "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}")
+    endif()
 
     set("${out_var}" "${lockdc_probe_configure_args}" PARENT_SCOPE)
 endfunction()
@@ -125,7 +128,7 @@ endfunction()
 function(lockdc_append_shared_only_package_probe_args out_var package_prefix external_root fake_curl_dir fake_pslog_dir fake_lonejson_dir fake_liblql_dir consumer_src_dir consumer_bin_dir)
     set(lockdc_probe_prefix_path
         "${package_prefix}"
-        "${external_root}/c.pkt.systems/install")
+        "${external_root}/cpkt/install")
     string(REPLACE ";" "\\;" lockdc_probe_prefix_path_arg "${lockdc_probe_prefix_path}")
 
     set(lockdc_probe_configure_args
@@ -134,10 +137,10 @@ function(lockdc_append_shared_only_package_probe_args out_var package_prefix ext
         "-DCMAKE_PREFIX_PATH=${lockdc_probe_prefix_path_arg}"
         "-Dlockdc_DIR=${package_prefix}/lib/cmake/lockdc"
         "-DCURL_DIR=${fake_curl_dir}"
-        "-DOpenSSL_DIR=${external_root}/c.pkt.systems/install/lib/cmake/OpenSSL"
-        "-DZLIB_DIR=${external_root}/c.pkt.systems/install/lib/cmake/zlib"
-        "-Dnghttp2_DIR=${external_root}/c.pkt.systems/install/lib/cmake/nghttp2"
-        "-DLibssh2_DIR=${external_root}/c.pkt.systems/install/lib/cmake/libssh2"
+        "-DOpenSSL_DIR=${external_root}/cpkt/install/lib/cmake/OpenSSL"
+        "-DZLIB_DIR=${external_root}/cpkt/install/lib/cmake/zlib"
+        "-Dnghttp2_DIR=${external_root}/cpkt/install/lib/cmake/nghttp2"
+        "-DLibssh2_DIR=${external_root}/cpkt/install/lib/cmake/libssh2"
         "-Dpslog_DIR=${fake_pslog_dir}"
         "-Dlonejson_DIR=${fake_lonejson_dir}"
         "-Dliblql_DIR=${fake_liblql_dir}"
@@ -148,6 +151,9 @@ function(lockdc_append_shared_only_package_probe_args out_var package_prefix ext
         list(APPEND lockdc_probe_configure_args "-DCMAKE_C_COMPILER=${LOCKDC_C_COMPILER}")
     elseif(DEFINED CMAKE_C_COMPILER AND NOT CMAKE_C_COMPILER STREQUAL "")
         list(APPEND lockdc_probe_configure_args "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}")
+    endif()
+    if(DEFINED CMAKE_TOOLCHAIN_FILE AND NOT CMAKE_TOOLCHAIN_FILE STREQUAL "")
+        list(APPEND lockdc_probe_configure_args "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}")
     endif()
 
     set("${out_var}" "${lockdc_probe_configure_args}" PARENT_SCOPE)
@@ -521,7 +527,7 @@ endif()
         lockdc_probe_configure_args
         "${test_prefix}"
         "${external_root}"
-        "${external_root}/c.pkt.systems/install/lib/cmake/CURL"
+        "${external_root}/cpkt/install/lib/cmake/CURL"
         "${consumer_src_dir}"
         "${consumer_bin_dir}")
     execute_process(

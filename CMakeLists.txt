@@ -54,6 +54,18 @@ option(LOCKDC_BUILD_DEPENDENCIES "Provision vendored dependency artifacts needed
 option(LOCKDC_BUILD_EXAMPLES "Build example programs." ON)
 option(LOCKDC_BUILD_TESTS "Build unit tests." ON)
 option(LOCKDC_BUILD_LUA_BINDINGS "Build the optional Lua extension when Lua headers are available." ON)
+set(LOCKDC_POSTGRES_DEFAULT OFF)
+if(NOT DEFINED LOCKDC_BUILD_POSTGRES AND DEFINED ENV{LOCKDC_BUILD_POSTGRES}
+   AND NOT "$ENV{LOCKDC_BUILD_POSTGRES}" STREQUAL "")
+    string(TOUPPER "$ENV{LOCKDC_BUILD_POSTGRES}" LOCKDC_POSTGRES_SELECTION)
+    if(LOCKDC_POSTGRES_SELECTION MATCHES "^(ON|TRUE|1)$")
+        set(LOCKDC_POSTGRES_DEFAULT ON)
+    elseif(NOT LOCKDC_POSTGRES_SELECTION MATCHES "^(OFF|FALSE|0)$")
+        message(FATAL_ERROR "LOCKDC_BUILD_POSTGRES must be ON or OFF")
+    endif()
+endif()
+option(LOCKDC_BUILD_POSTGRES
+    "Build the optional PostgreSQL participant provider and its tests." ${LOCKDC_POSTGRES_DEFAULT})
 cmake_dependent_option(LOCKDC_BUILD_E2E_TESTS
     "Build end-to-end tests that target a real lockd environment."
     OFF
@@ -67,19 +79,20 @@ option(LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS
 option(LOCKDC_ENABLE_COVERAGE "Build test targets with gcov coverage instrumentation." OFF)
 option(LOCKDC_INSTALL "Enable install rules." ON)
 
-set(LOCKDC_OPENSSL_VERSION "3.6.4" CACHE STRING "Pinned OpenSSL release supplied by c.pkt.systems.")
-set(LOCKDC_ZLIB_VERSION "1.3.2" CACHE STRING "Pinned zlib release supplied by c.pkt.systems.")
-set(LOCKDC_CURL_VERSION "8.22.0" CACHE STRING "Pinned curl release supplied by c.pkt.systems.")
-set(LOCKDC_NGHTTP2_VERSION "1.70.0" CACHE STRING "Pinned nghttp2 release supplied by c.pkt.systems.")
-set(LOCKDC_LIBSSH2_VERSION "1.11.1" CACHE STRING "Pinned libssh2 release supplied by c.pkt.systems.")
-set(LOCKDC_LONEJSON_VERSION "0.44.0" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
+set(LOCKDC_OPENSSL_VERSION "3.6.4" CACHE STRING "Pinned OpenSSL release supplied by cpkt.")
+set(LOCKDC_ZLIB_VERSION "1.3.2" CACHE STRING "Pinned zlib release supplied by cpkt.")
+set(LOCKDC_CURL_VERSION "8.22.0" CACHE STRING "Pinned curl release supplied by cpkt.")
+set(LOCKDC_NGHTTP2_VERSION "1.70.0" CACHE STRING "Pinned nghttp2 release supplied by cpkt.")
+set(LOCKDC_LIBSSH2_VERSION "1.11.1" CACHE STRING "Pinned libssh2 release supplied by cpkt.")
+set(LOCKDC_LONEJSON_VERSION "0.45.0" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
 set(LOCKDC_LONEJSON_ABI_VERSION "26" CACHE STRING "Pinned lonejson shared-library ABI/SOVERSION." FORCE)
 set(LOCKDC_LIBLQL_VERSION "0.3.0" CACHE STRING "Pinned liblql release used for pouch LQL query support." FORCE)
 set(LOCKDC_LIBLQL_ABI_VERSION "0" CACHE STRING "Pinned liblql shared-library ABI/SOVERSION." FORCE)
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
-set(LOCKDC_PSLOG_VERSION "0.10.0" CACHE STRING "Pinned libpslog release used for SDK logging." FORCE)
-set(LOCKDC_CPKT_VERSION "0.10.0" CACHE STRING "Pinned c.pkt.systems dependency bundle version." FORCE)
-set(LOCKDC_MIN_ABI_VERSION "4")
+set(LOCKDC_PSLOG_VERSION "0.12.0" CACHE STRING "Pinned libpslog release used for SDK logging." FORCE)
+set(LOCKDC_CPKT_VERSION "0.3.0" CACHE STRING "Pinned cpkt dependency bundle version." FORCE)
+set(LOCKDC_CPKTDB_VERSION "0.3.0" CACHE STRING "Pinned cpktdb database bundle version." FORCE)
+set(LOCKDC_MIN_ABI_VERSION "5")
 set(LOCKDC_ABI_VERSION "${LOCKDC_MIN_ABI_VERSION}" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc.")
 if(LOCKDC_ABI_VERSION MATCHES "^[0-9]+$" AND LOCKDC_ABI_VERSION LESS LOCKDC_MIN_ABI_VERSION)
     set(LOCKDC_ABI_VERSION "${LOCKDC_MIN_ABI_VERSION}" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc." FORCE)
@@ -89,19 +102,17 @@ if(DEFINED CPKT_DEPENDENCY_CACHE AND NOT "${CPKT_DEPENDENCY_CACHE}" STREQUAL "")
 elseif(DEFINED ENV{CPKT_DEPENDENCY_CACHE} AND NOT "$ENV{CPKT_DEPENDENCY_CACHE}" STREQUAL "")
     set(LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE "$ENV{CPKT_DEPENDENCY_CACHE}")
 elseif(DEFINED ENV{XDG_CACHE_HOME} AND NOT "$ENV{XDG_CACHE_HOME}" STREQUAL "")
-    set(LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE "$ENV{XDG_CACHE_HOME}/c.pkt.systems/deps")
+    set(LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE "$ENV{XDG_CACHE_HOME}/cpkt/deps")
 elseif(DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
-    set(LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE "$ENV{HOME}/.cache/c.pkt.systems/deps")
+    set(LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE "$ENV{HOME}/.cache/cpkt/deps")
 else()
     message(FATAL_ERROR
         "CPKT_DEPENDENCY_CACHE, XDG_CACHE_HOME, or HOME is required for the shared verified dependency archive cache. Set -DCPKT_DEPENDENCY_CACHE=<path> when running without a user cache environment.")
 endif()
-set(CPKT_DEPENDENCY_CACHE "${LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE}" CACHE PATH "Shared verified c.pkt.systems dependency archive cache.")
+set(CPKT_DEPENDENCY_CACHE "${LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE}" CACHE PATH "Shared verified cpkt dependency archive cache.")
 set(LOCKDC_DOWNLOAD_ROOT "${CMAKE_SOURCE_DIR}/.cache/downloads" CACHE PATH "Repository-local verified dependency archive staging root.")
-set(LOCKDC_CMOCKA_ARCHIVE_PATH "" CACHE FILEPATH "Verified local cmocka release archive path.")
 set(LOCKDC_PSLOG_ARCHIVE_PATH "" CACHE FILEPATH "Verified local libpslog release archive path.")
 set(LOCKDC_DIST_DIR "${CMAKE_BINARY_DIR}/dist" CACHE PATH "Output directory for generated package archives and checksum manifests.")
-set(LOCKDC_VERSION_OVERRIDE "" CACHE STRING "Override the detected liblockdc package version with an explicit semantic version.")
 set(LOCKDC_TARGET_ARCH "${CMAKE_SYSTEM_PROCESSOR}" CACHE STRING "Artifact architecture name")
 set(LOCKDC_TARGET_OS "${CMAKE_SYSTEM_NAME}" CACHE STRING "Artifact operating system name")
 set(LOCKDC_TARGET_LIBC "" CACHE STRING "Artifact libc suffix for Linux targets (gnu, musl, or empty)")
@@ -218,7 +229,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSROOT)
             "${CMAKE_SYSROOT}/usr/lib"
             "${CMAKE_SYSROOT}/lib64"
             "${CMAKE_SYSROOT}/usr/lib64"
-            "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib"
+            "${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib"
             "${LOCKDC_EXTERNAL_ROOT}/curl/install/lib"
             "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib"
             "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
@@ -363,6 +374,11 @@ function(lc_configure_c_target target)
     if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         target_compile_definitions(${target} PRIVATE _DARWIN_C_SOURCE=1)
     endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # Directory inode numbers and Pouch offsets need 64-bit interfaces on
+        # 32-bit glibc as well as on the native 64-bit targets.
+        target_compile_definitions(${target} PRIVATE _FILE_OFFSET_BITS=64)
+    endif()
     set_target_properties(${target} PROPERTIES
         C_EXTENSIONS OFF
         POSITION_INDEPENDENT_CODE ON
@@ -383,6 +399,9 @@ function(lc_configure_c_target target)
 endfunction()
 
 function(lc_configure_c_test_target target)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_definitions(${target} PRIVATE _FILE_OFFSET_BITS=64)
+    endif()
     set_target_properties(${target} PROPERTIES
         C_STANDARD 99
         C_STANDARD_REQUIRED ON
@@ -494,6 +513,11 @@ set(lc_sources
     src/lc_mutate_stream.c
     src/lc_pouch_control_migration.c
     src/lc_pouch_client.c
+    src/lc_pouch_xa.c
+    src/lc_xa_store.c
+    src/lc_xa_borrow.c
+    src/lc_xa_resource.c
+    src/lc_xa_coordinator.c
     src/lc_pouch_history.c
     src/lc_pouch.c
     src/lc_pouch_crypto.c
@@ -708,14 +732,93 @@ if(LOCKDC_BUILD_SHARED)
     lc_add_release_privacy_scan(lc_shared)
 endif()
 
+if(LOCKDC_BUILD_POSTGRES)
+    configure_package_config_file(cmake/lockdc_postgresConfig.cmake.in
+        "${CMAKE_CURRENT_BINARY_DIR}/lockdc_postgresConfig.cmake"
+        INSTALL_DESTINATION lib/cmake/lockdc_postgres)
+    write_basic_package_version_file(
+        "${CMAKE_CURRENT_BINARY_DIR}/lockdc_postgresConfigVersion.cmake"
+        VERSION ${PROJECT_VERSION} COMPATIBILITY SameMajorVersion)
+    configure_file(cmake/lockdc_postgres.pc.in
+        "${CMAKE_CURRENT_BINARY_DIR}/lockdc-postgres.pc" @ONLY)
+    configure_file(cmake/postgres-notices.txt.in
+        "${CMAKE_CURRENT_BINARY_DIR}/lockdc-postgres-notices.txt" @ONLY)
+    if(LOCKDC_INSTALL)
+        install(FILES "${CMAKE_CURRENT_BINARY_DIR}/lockdc-postgres.pc"
+            DESTINATION lib/pkgconfig COMPONENT postgres-dev)
+        install(FILES "${CMAKE_CURRENT_BINARY_DIR}/lockdc_postgresConfig.cmake"
+            "${CMAKE_CURRENT_BINARY_DIR}/lockdc_postgresConfigVersion.cmake"
+            DESTINATION lib/cmake/lockdc_postgres COMPONENT postgres-dev)
+        foreach(component postgres-runtime postgres-dev)
+            install(FILES LICENSE CHANGELOG.md docs/postgres.md docs/xa.md docs/lua.md
+                "${CMAKE_CURRENT_BINARY_DIR}/lockdc-postgres-notices.txt"
+                DESTINATION share/doc/liblockdc_postgres COMPONENT ${component})
+            foreach(provider core db)
+                if(provider STREQUAL "core")
+                    set(sdk_provider cpkt)
+                else()
+                    set(sdk_provider cpktdb)
+                endif()
+                install(FILES "${LOCKDC_EXTERNAL_ROOT}/${sdk_provider}/install/share/cpkt/packages/${provider}.json"
+                    DESTINATION share/doc/liblockdc_postgres/sdk-provenance COMPONENT ${component})
+                install(FILES "${LOCKDC_EXTERNAL_ROOT}/${sdk_provider}/install/share/doc/cpkt/${provider}/LICENSE"
+                    DESTINATION share/doc/liblockdc_postgres/licenses/${sdk_provider} COMPONENT ${component})
+            endforeach()
+            install(FILES "${LOCKDC_EXTERNAL_ROOT}/cpktdb/install/share/doc/cpkt/db/third_party/postgresql/LICENSE"
+                DESTINATION share/doc/liblockdc_postgres/licenses/postgresql COMPONENT ${component})
+            foreach(dependency openldap cyrus-sasl krb5 curl openssl zlib nghttp2 libssh2)
+                install(FILES "${LOCKDC_EXTERNAL_ROOT}/cpkt/install/share/doc/cpkt/core/third_party/${dependency}/LICENSE"
+                    DESTINATION share/doc/liblockdc_postgres/licenses/${dependency} COMPONENT ${component})
+            endforeach()
+        endforeach()
+    endif()
+    foreach(variant static shared)
+        if(NOT TARGET lc_${variant})
+            continue()
+        endif()
+        string(TOUPPER ${variant} library_type)
+        add_library(lc_postgres_${variant} ${library_type} src/lc_postgres.c)
+        add_library(lockdc::postgres_${variant} ALIAS lc_postgres_${variant})
+        target_include_directories(lc_postgres_${variant} PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>)
+        lc_configure_c_target(lc_postgres_${variant})
+        if(variant STREQUAL "static")
+            target_link_libraries(lc_postgres_${variant} PUBLIC lc_static cpkt::postgres)
+        else()
+            target_link_libraries(lc_postgres_${variant} PRIVATE lc_shared cpkt::postgres_shared)
+            target_link_libraries(lc_postgres_${variant} INTERFACE lc_shared cpkt::postgres_shared)
+            set_target_properties(lc_postgres_${variant} PROPERTIES
+                C_VISIBILITY_PRESET hidden VERSION ${PROJECT_VERSION} SOVERSION 0
+                BUILD_WITH_INSTALL_RPATH ON INSTALL_RPATH "${lockdc_shared_install_rpath}")
+        endif()
+        set_target_properties(lc_postgres_${variant} PROPERTIES OUTPUT_NAME lockdc_postgres)
+        lc_add_release_privacy_scan(lc_postgres_${variant})
+        if(LOCKDC_INSTALL)
+            install(TARGETS lc_postgres_${variant}
+                ARCHIVE DESTINATION lib COMPONENT postgres-dev
+                LIBRARY DESTINATION lib COMPONENT postgres-runtime NAMELINK_COMPONENT postgres-dev)
+        endif()
+    endforeach()
+endif()
+
 # Release packaging needs only the public library artifacts.  Keep this
 # separate from the default `all` target, which intentionally includes the
 # complete local test fleet for developer builds.
 if(TARGET lc_static AND TARGET lc_shared)
     add_custom_target(lockdc_release_artifacts DEPENDS lc_static lc_shared)
+    foreach(variant static shared)
+        if(TARGET lc_postgres_${variant})
+            add_dependencies(lockdc_release_artifacts lc_postgres_${variant})
+        endif()
+    endforeach()
 endif()
 
 if(LOCKDC_BUILD_TESTS)
+    add_test(NAME lua_xa_api_surface_test COMMAND ${CMAKE_COMMAND}
+        -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lua_xa_api_surface_test.cmake)
+    set_tests_properties(lua_xa_api_surface_test PROPERTIES LABELS "unit;lua;xa")
     add_library(lc_test_static STATIC)
     lc_configure_library_target(lc_test_static)
     target_compile_definitions(lc_test_static PRIVATE LOCKDC_TEST_BUILD=1)
@@ -789,6 +892,8 @@ configure_file(
     "${LOCKDC_LUA_ROCKSPEC_PATH}"
     @ONLY
 )
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/lockdc-postgres.rockspec.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/lua-postgres/lockdc-postgres-${PROJECT_VERSION}-1.rockspec" @ONLY)
 
 if(LOCKDC_BUILD_LUA_BINDINGS)
     find_package(Lua 5.5.1 CONFIG REQUIRED)
@@ -803,7 +908,9 @@ if(LOCKDC_BUILD_LUA_BINDINGS)
     lc_configure_c_target(lockdc_lua_runner)
 
     if(LOCKDC_BUILD_SHARED)
-        add_library(lockdc_lua_core MODULE src/lua/lockdc_lua.c)
+        add_library(lockdc_lua_core MODULE
+            src/lua/lockdc_lua.c src/lua/lockdc_xa_lua.c
+            src/lua/lockdc_xa_resource_lua.c src/lua/lockdc_xa_provider_lua.c)
         target_include_directories(lockdc_lua_core SYSTEM PRIVATE "${LUA_INCLUDE_DIR}")
         target_include_directories(lockdc_lua_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
         target_link_libraries(lockdc_lua_core PRIVATE
@@ -837,6 +944,23 @@ if(LOCKDC_BUILD_LUA_BINDINGS)
             OUTPUT_NAME core
             LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lua/lockdc"
         )
+        if(TARGET lc_postgres_shared)
+            add_library(lockdc_lua_postgres MODULE
+                src/lua/lockdc_postgres_lua.c src/lua/lockdc_xa_provider_lua.c)
+            target_include_directories(lockdc_lua_postgres SYSTEM PRIVATE "${LUA_INCLUDE_DIR}")
+            target_link_libraries(lockdc_lua_postgres PRIVATE lc_postgres_shared)
+            if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+                target_link_options(lockdc_lua_postgres PRIVATE "LINKER:--allow-shlib-undefined")
+            elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+                target_link_options(lockdc_lua_postgres PRIVATE "LINKER:-undefined,dynamic_lookup")
+            else()
+                target_link_libraries(lockdc_lua_postgres PRIVATE Lua::Lua)
+            endif()
+            lc_configure_c_target(lockdc_lua_postgres)
+            lc_configure_development_module_runtime(lockdc_lua_postgres)
+            set_target_properties(lockdc_lua_postgres PROPERTIES PREFIX ""
+                OUTPUT_NAME postgres LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lua/lockdc")
+        endif()
     endif()
 endif()
 
@@ -867,6 +991,9 @@ if(LOCKDC_INSTALL)
         DESTINATION lib/pkgconfig
         COMPONENT dev
     )
+    if(LOCKDC_BUILD_POSTGRES)
+        install(FILES include/lc/postgres.h DESTINATION include/lc COMPONENT postgres-dev)
+    endif()
     install(FILES
         "${CMAKE_CURRENT_BINARY_DIR}/lockdcConfig.cmake"
         "${CMAKE_CURRENT_BINARY_DIR}/lockdcConfigVersion.cmake"
@@ -877,9 +1004,15 @@ if(LOCKDC_INSTALL)
     foreach(_lc_component runtime dev)
         install(FILES
             "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
+            "${CMAKE_CURRENT_SOURCE_DIR}/CHANGELOG.md"
             "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
             DESTINATION share/doc/liblockdc
             COMPONENT "${_lc_component}"
+        )
+        install(DIRECTORY docs/
+            DESTINATION share/doc/liblockdc/docs
+            COMPONENT "${_lc_component}"
+            FILES_MATCHING PATTERN "*.md"
         )
     endforeach()
 endif()
@@ -1028,6 +1161,42 @@ if(LOCKDC_BUILD_TESTS)
     )
     set_tests_properties(cpp_public_header_test PROPERTIES RUN_SERIAL TRUE)
 
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET lc_static AND TARGET lc_shared
+       AND CMAKE_SYSTEM_PROCESSOR STREQUAL CMAKE_HOST_SYSTEM_PROCESSOR)
+        add_test(NAME optional_postgres_dependency_test
+            COMMAND ${CMAKE_COMMAND}
+                -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+                -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+                -DLOCKDC_CORE_STATIC=$<TARGET_FILE:lc_static>
+                -DLOCKDC_CORE_SHARED=$<TARGET_FILE:lc_shared>
+                -DLOCKDC_NM=${CMAKE_NM}
+                -DLOCKDC_READELF=${CMAKE_READELF}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/optional_postgres_dependency_test.cmake)
+        set_tests_properties(optional_postgres_dependency_test PROPERTIES
+            RUN_SERIAL TRUE TIMEOUT 120 LABELS "unit;local;packaging")
+    endif()
+
+    if(LOCKDC_BUILD_POSTGRES AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
+       AND CMAKE_SYSTEM_PROCESSOR STREQUAL CMAKE_HOST_SYSTEM_PROCESSOR)
+        add_test(NAME postgres_sdk_test
+            COMMAND ${CMAKE_COMMAND}
+                -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+                -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+                -DCMAKE_NM=${CMAKE_NM}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/postgres_sdk_test.cmake)
+        set_tests_properties(postgres_sdk_test PROPERTIES
+            RUN_SERIAL TRUE TIMEOUT 120 LABELS "local;packaging;postgres")
+        add_test(NAME cpkt_split_sdk_test
+            COMMAND ${CMAKE_COMMAND}
+                -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+                -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpkt_split_sdk_test.cmake)
+        set_tests_properties(cpkt_split_sdk_test PROPERTIES RUN_SERIAL TRUE TIMEOUT 120)
+    endif()
+
     add_test(NAME deferred_vendored_install_manifest_test
         COMMAND ${CMAKE_COMMAND}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
@@ -1046,6 +1215,9 @@ if(LOCKDC_BUILD_TESTS)
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
             -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+            -DLOCKDC_TARGET_ARCH=${LOCKDC_TARGET_ARCH}
+            -DLOCKDC_TARGET_OS=${LOCKDC_TARGET_OS}
+            -DLOCKDC_TARGET_LIBC=${LOCKDC_TARGET_LIBC}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/arch_alias_configure_test.cmake
     )
     set_tests_properties(arch_alias_configure_test PROPERTIES RUN_SERIAL TRUE)
@@ -1081,12 +1253,10 @@ if(LOCKDC_BUILD_TESTS)
     )
     set_tests_properties(install_tree_sdk_test PROPERTIES RUN_SERIAL TRUE)
 
-    add_test(NAME devenv_compose_config_test
-        COMMAND ${CMAKE_COMMAND}
-            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/devenv_compose_config_test.cmake
+    add_test(NAME devenv_kube_lifecycle_test
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/devenv_kube_lifecycle_test.py
     )
-    set_tests_properties(devenv_compose_config_test PROPERTIES RUN_SERIAL TRUE)
+    set_tests_properties(devenv_kube_lifecycle_test PROPERTIES RUN_SERIAL TRUE)
 
     add_test(NAME pouch_boundary_test
         COMMAND ${CMAKE_COMMAND}
@@ -1108,7 +1278,9 @@ if(LOCKDC_BUILD_TESTS)
             -DLOCKDC_DEPENDENCY_BUILD_ROOT=${LOCKDC_DEPENDENCY_BUILD_ROOT}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/pslog_build_modes_test.cmake
     )
-    set_tests_properties(pslog_build_modes_test PROPERTIES RUN_SERIAL TRUE)
+    # Core-only fixtures must stay isolated when a parent enables PostgreSQL.
+    set_tests_properties(pslog_build_modes_test PROPERTIES
+        RUN_SERIAL TRUE ENVIRONMENT "LOCKDC_BUILD_POSTGRES=ON")
 
     add_test(NAME curl_dependency_interface_test
         COMMAND ${CMAKE_COMMAND}

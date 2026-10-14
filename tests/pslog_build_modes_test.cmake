@@ -144,6 +144,7 @@ append_toolchain_arg(shared_consumer_configure_args
     -B "${shared_consumer_build}"
     -DLOCKDC_BUILD_STATIC=OFF
     -DLOCKDC_BUILD_SHARED=ON
+    -DLOCKDC_BUILD_POSTGRES=OFF
     -DLOCKDC_BUILD_LUA_BINDINGS=ON
     -DLOCKDC_BUILD_TESTS=OFF
     -DLOCKDC_BUILD_E2E_TESTS=OFF
@@ -170,6 +171,7 @@ append_toolchain_arg(shared_configure_args
     -B "${shared_build}"
     -DLOCKDC_BUILD_STATIC=OFF
     -DLOCKDC_BUILD_SHARED=ON
+    -DLOCKDC_BUILD_POSTGRES=OFF
     -DLOCKDC_BUILD_TESTS=OFF
     -DLOCKDC_BUILD_E2E_TESTS=OFF
     -DLOCKDC_BUILD_EXAMPLES=ON
@@ -200,6 +202,7 @@ append_toolchain_arg(static_configure_args
     -B "${static_build}"
     -DLOCKDC_BUILD_STATIC=ON
     -DLOCKDC_BUILD_SHARED=OFF
+    -DLOCKDC_BUILD_POSTGRES=OFF
     -DLOCKDC_BUILD_TESTS=OFF
     -DLOCKDC_BUILD_E2E_TESTS=OFF
     -DLOCKDC_BUILD_EXAMPLES=ON

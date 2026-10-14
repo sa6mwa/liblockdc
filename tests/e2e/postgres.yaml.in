@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: @POD@
+spec:
+  restartPolicy: Never
+  containers:
+    - name: pg-first
+      image: docker.io/library/postgres@sha256:@IMAGE_DIGEST@
+      securityContext: {runAsUser: 70, runAsGroup: 70}
+      env:
+        - {name: POSTGRES_USER, value: xa}
+        - {name: POSTGRES_PASSWORD, value: '@PASSWORD@'}
+        - {name: POSTGRES_DB, value: xa}
+        - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+      args: [postgres, -c, port=5432, -c, max_prepared_transactions=16, -c, fsync=on, -c, synchronous_commit=on]
+      volumeMounts:
+        - {name: state-first, mountPath: /var/lib/postgresql/data}
+        - {name: socket-first, mountPath: /var/run/postgresql}
+    - name: pg-second
+      image: docker.io/library/postgres@sha256:@IMAGE_DIGEST@
+      securityContext: {runAsUser: 70, runAsGroup: 70}
+      env:
+        - {name: POSTGRES_USER, value: xa}
+        - {name: POSTGRES_PASSWORD, value: '@PASSWORD@'}
+        - {name: POSTGRES_DB, value: xa}
+        - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+      args: [postgres, -c, port=5433, -c, max_prepared_transactions=16, -c, fsync=on, -c, synchronous_commit=on]
+      volumeMounts:
+        - {name: state-second, mountPath: /var/lib/postgresql/data}
+        - {name: socket-second, mountPath: /var/run/postgresql}
+  volumes:
+    - name: state-first
+      hostPath: {path: '@WORKSPACE@/state/first', type: Directory}
+    - name: socket-first
+      hostPath: {path: '@WORKSPACE@/socket/first', type: Directory}
+    - name: state-second
+      hostPath: {path: '@WORKSPACE@/state/second', type: Directory}
+    - name: socket-second
+      hostPath: {path: '@WORKSPACE@/socket/second', type: Directory}

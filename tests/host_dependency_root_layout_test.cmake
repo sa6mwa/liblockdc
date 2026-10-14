@@ -31,7 +31,7 @@ assert_contains(root_cmake "set(LOCKDC_DEPENDENCY_BUILD_ROOT \"\${CMAKE_SOURCE_D
 assert_contains(root_cmake "set(CPKT_DEPENDENCY_CACHE \"\${LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE}\" CACHE PATH" "shared dependency archive cache variable")
 assert_contains(root_cmake "if(DEFINED CPKT_DEPENDENCY_CACHE AND NOT \"\${CPKT_DEPENDENCY_CACHE}\" STREQUAL \"\")" "CMake cache dependency cache override precedence")
 assert_contains(root_cmake "CPKT_DEPENDENCY_CACHE, XDG_CACHE_HOME, or HOME is required for the shared verified dependency archive cache" "actionable missing dependency cache environment error")
-assert_not_contains(root_cmake [=[${CMAKE_SOURCE_DIR}/.cache/c.pkt.systems/deps]=] "cleanable repository-local dependency cache fallback")
+assert_not_contains(root_cmake [=[${CMAKE_SOURCE_DIR}/.cache/cpkt/deps]=] "cleanable repository-local dependency cache fallback")
 assert_contains(root_cmake "set(LOCKDC_DOWNLOAD_ROOT \"\${CMAKE_SOURCE_DIR}/.cache/downloads\"" "repo-local download staging root")
 assert_contains(root_cmake "set(LOCKDC_DEPENDENCY_BUILD_TYPE \"Release\")" "release-only dependency build type")
 assert_contains(root_makefile "__deps-debug:\n\tbash ./scripts/deps.sh deps-x86_64-linux-gnu" "debug dependency target uses pinned Bootlin target")

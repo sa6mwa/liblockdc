@@ -573,6 +573,8 @@ static int outbox_duration_overflows_wait_range(long duration) {
 }
 
 static void outbox_reset_allocation_failures(void) {
+  lc_outbox_test_before_terminal_remove_hook = NULL;
+  lc_outbox_test_before_terminal_remove_context = NULL;
   lc_outbox_test_after_close_requested_hook = NULL;
   lc_outbox_test_after_close_requested_context = NULL;
   lc_outbox_test_dead_letter_replay_client_hook = NULL;
@@ -4577,9 +4579,11 @@ static void test_pouch_generated_command_key_waits_by_id(void **state) {
       LC_ERR_INVALID);
   lc_error_cleanup(&error);
   lc_error_init(&error);
+  transaction = (lc_outbox_transaction *)1;
   assert_int_equal(lc_outbox_resume_command_by_id(
                        outbox, "cmd_invalid", &transaction, &receipt, &error),
                    LC_ERR_INVALID);
+  assert_null(transaction);
   lc_error_cleanup(&error);
   lc_error_init(&error);
   memcpy(unknown_command_id, "cmd_", 4U);
@@ -4595,10 +4599,12 @@ static void test_pouch_generated_command_key_waits_by_id(void **state) {
       LC_ERR_INVALID);
   lc_error_cleanup(&error);
   lc_error_init(&error);
+  transaction = (lc_outbox_transaction *)1;
   assert_int_equal(lc_outbox_resume_command_by_id(outbox, unknown_command_id,
                                                   &transaction, &receipt,
                                                   &error),
                    LC_ERR_INVALID);
+  assert_null(transaction);
   lc_command_receipt_cleanup(&receipt);
   lc_outbox_close(outbox);
   lc_client_close(client);
@@ -6266,7 +6272,7 @@ static void test_pouch_dead_letter_operations(void **state) {
   lc_acquire_req acquire;
   lc_lease *lease;
   lc_attachment_list attachments;
-  lc_pouch_outbox_dead_letter_marker retained_marker;
+  lc_pouch_outbox_retention_marker retained_marker;
   lc_pouch_unix_seconds next_due;
   char deadline_key[128];
   const void *bytes;
@@ -6408,15 +6414,15 @@ static void test_pouch_dead_letter_operations(void **state) {
   lc_error_cleanup(&error);
   lc_error_init(&error);
   next_due = 0;
-  assert_int_equal(lc_pouch_outbox_dead_letter_marker_take(
+  assert_int_equal(lc_pouch_outbox_retention_marker_take(
                        ((lc_client_handle *)client)->pouch, outbox_config.ns,
-                       NULL, 1, 0U, UINT64_MAX, &retained_marker, &next_due,
-                       &error),
+                       LC_POUCH_RETENTION_DEAD_LETTER, NULL, 1, 0U, UINT64_MAX,
+                       &retained_marker, &next_due, &error),
                    LC_OK);
   assert_non_null(retained_marker.marker_id);
   assert_string_equal(retained_marker.outbox_key, receipt.outbox_key);
-  lc_pouch_outbox_dead_letter_marker_cleanup(
-      ((lc_client_handle *)client)->pouch, &retained_marker);
+  lc_pouch_outbox_retention_marker_cleanup(((lc_client_handle *)client)->pouch,
+                                           &retained_marker);
   assert_int_equal(
       lc_outbox_replay_dead_letter(outbox, receipt.outbox_key, &error), LC_OK);
   assert_int_equal(lc_outbox_next(outbox, 3000L, &job, &error), LC_OK);
@@ -6601,9 +6607,10 @@ static void test_pouch_startup_replay_precedes_due_retention(void **state) {
   assert_int_equal(lc_xid_new(marker_id, &error), LC_OK);
   seed_retained_dead_letter_outbox(client, outbox_config.ns, outbox_key,
                                    marker_id, &error);
-  assert_int_equal(lc_pouch_outbox_dead_letter_marker_write(
+  assert_int_equal(lc_pouch_outbox_retention_marker_write(
                        ((lc_client_handle *)client)->pouch, outbox_config.ns,
-                       marker_id, outbox_key, 1, 32U, &error),
+                       LC_POUCH_RETENTION_DEAD_LETTER, marker_id, outbox_key, 1,
+                       32U, &error),
                    LC_OK);
   assert_int_equal(
       lc_client_new_outbox(client, &outbox_config, &outbox, &error), LC_OK);
@@ -7051,6 +7058,9 @@ test_pouch_dispatcher_wakeup_isolated_from_next_waiters(void **state) {
    * unrelated Pouch retention maintenance so the private worker reaches its
    * untimed idle wait deterministically. */
   outbox_config.dead_letter_retention_seconds = -1L;
+  outbox_config.completed_retention_seconds = -1L;
+  outbox_config.inbox_retention_seconds = -1L;
+  outbox_config.command_retention_seconds = -1L;
   assert_int_equal(
       lc_client_new_outbox(client, &outbox_config, &outbox, &error), LC_OK);
   dispatcher = outbox_test_dispatcher(outbox, &error);
@@ -10285,6 +10295,889 @@ static void test_pouch_outbox_completion_evidence_is_bounded(void **state) {
   lc_test_tmp_cleanup_path(root, OUTBOX_TMP_PREFIX);
 }
 
+typedef struct terminal_retention_fixture {
+  char root[PATH_MAX];
+  char endpoint[PATH_MAX];
+  lc_client *client;
+  lc_outbox *outbox;
+  lc_outbox_config config;
+  lc_error error;
+} terminal_retention_fixture;
+
+static void terminal_retention_open(terminal_retention_fixture *f) {
+  char template_path[PATH_MAX];
+  const char *endpoints[1];
+  lc_client_config config;
+  memset(f, 0, sizeof(*f));
+  lc_error_init(&f->error);
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       OUTBOX_TMP_PREFIX "terminal-retention-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, f->root, sizeof(f->root),
+                                  OUTBOX_TMP_PREFIX));
+  assert_true(snprintf(f->endpoint, sizeof(f->endpoint),
+                       "pouch://%s?query_indexing=false&single_writer=false",
+                       f->root) > 0);
+  endpoints[0] = f->endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&config, &f->client, &f->error), LC_OK);
+  lc_outbox_config_init(&f->config);
+  f->config.ns = "terminal-retention";
+  assert_int_equal(
+      outbox_public_new(f->client, &f->config, &f->outbox, &f->error), LC_OK);
+}
+
+static void terminal_retention_reopen(terminal_retention_fixture *f) {
+  f->outbox->close(f->outbox);
+  f->outbox = NULL;
+  assert_int_equal(
+      outbox_public_new(f->client, &f->config, &f->outbox, &f->error), LC_OK);
+}
+
+static void terminal_retention_close(terminal_retention_fixture *f) {
+  lc_outbox_test_before_terminal_remove_hook = NULL;
+  lc_outbox_test_before_terminal_remove_context = NULL;
+  lc_outbox_close(f->outbox);
+  lc_client_close(f->client);
+  lc_error_cleanup(&f->error);
+  lc_test_tmp_cleanup_path(f->root, OUTBOX_TMP_PREFIX);
+}
+
+static void terminal_retention_seed(terminal_retention_fixture *f, int kind,
+                                    const char *key, const char *id,
+                                    lc_i64 due) {
+  char body[1024];
+  int length;
+  lc_acquire_req acquire;
+  lc_attach_req attach;
+  lc_attach_res attached;
+  lc_lease *lease;
+  lc_source *source;
+  if (kind == LC_POUCH_RETENTION_COMPLETED) {
+    length = snprintf(
+        body, sizeof(body),
+        "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"op\","
+        "\"effect_id\":\"effect\",\"effect_key\":\"key\",\"payload_digest\":"
+        "\"digest\","
+        "\"message_id\":\"msg\",\"kind\":\"test\",\"destination\":\"test://"
+        "target\","
+        "\"content_type\":\"text/plain\",\"dispatch_state\":\"completed\","
+        "\"completed_at_unix\":100,\"completed_retention_id\":\"%s\"}",
+        id);
+  } else if (kind == LC_POUCH_RETENTION_INBOX) {
+    length = snprintf(
+        body, sizeof(body),
+        "{\"record_type\":\"lockdc.inbox.v1\",\"consumer_id\":\"consumer\","
+        "\"source_kind\":\"queue\",\"source_id\":\"source\",\"message_id\":"
+        "\"msg\","
+        "\"processing_state\":\"accepted\",\"accepted_at_unix\":100,"
+        "\"retention_id\":\"%s\"}",
+        id);
+  } else {
+    length = snprintf(
+        body, sizeof(body),
+        "{\"record_type\":\"lockdc.command.v1\",\"command_id\":\"cmd_test\","
+        "\"scope\":\"tenant\",\"command_type\":\"test\",\"idempotency_key\":"
+        "\"key\","
+        "\"request_digest\":\"digest\",\"accepted_at_unix\":50,\"state\":"
+        "\"completed\","
+        "\"result_code\":\"ok\",\"completed_at_unix\":100,\"retention_id\":\"%"
+        "s\"}",
+        id);
+  }
+  assert_true(length > 0 && (size_t)length < sizeof(body));
+  lc_acquire_req_init(&acquire);
+  acquire.ns = f->config.ns;
+  acquire.owner = "terminal-retention-test";
+  acquire.ttl_seconds = 30L;
+  acquire.key = key;
+  lease = NULL;
+  assert_int_equal(lc_acquire(f->client, &acquire, &lease, &f->error), LC_OK);
+  source = NULL;
+  assert_int_equal(
+      lc_source_from_memory(body, (size_t)length, &source, &f->error), LC_OK);
+  assert_int_equal(lc_lease_update(lease, source, NULL, &f->error), LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_attach_req_init(&attach);
+  attach.name = "retained-data";
+  memset(&attached, 0, sizeof(attached));
+  assert_int_equal(lc_source_from_memory("data", 4U, &source, &f->error),
+                   LC_OK);
+  assert_int_equal(
+      lc_lease_attach(lease, &attach, source, &attached, &f->error), LC_OK);
+  lc_source_close(source);
+  lc_attach_res_cleanup(&attached);
+  assert_int_equal(lc_lease_release(lease, NULL, &f->error), LC_OK);
+  assert_int_equal(lc_pouch_outbox_retention_marker_write(
+                       ((lc_client_handle *)f->client)->pouch, f->config.ns,
+                       kind, id, key, due, 0U, &f->error),
+                   LC_OK);
+}
+
+static void terminal_retention_assert_attachments(terminal_retention_fixture *f,
+                                                  const char *key,
+                                                  size_t count) {
+  lc_acquire_req acquire;
+  lc_attachment_list list;
+  lc_lease *lease;
+  lc_acquire_req_init(&acquire);
+  acquire.ns = f->config.ns;
+  acquire.owner = "terminal-retention-test";
+  acquire.ttl_seconds = 30L;
+  acquire.key = key;
+  lease = NULL;
+  memset(&list, 0, sizeof(list));
+  assert_int_equal(lc_acquire(f->client, &acquire, &lease, &f->error), LC_OK);
+  assert_int_equal(lc_lease_list_attachments(lease, &list, &f->error), LC_OK);
+  assert_int_equal(list.count, count);
+  lc_attachment_list_cleanup(&list);
+  assert_int_equal(lc_lease_release(lease, NULL, &f->error), LC_OK);
+}
+
+static void test_pouch_terminal_retention_count_optout_and_time(void **state) {
+  terminal_retention_fixture f;
+  char ids[3][LC_XID_STRING_SIZE];
+  char keys[3][128];
+  size_t reclaimed;
+  lc_i64 next_due;
+  int kind;
+  unsigned int index;
+  (void)state;
+  terminal_retention_open(&f);
+  for (kind = LC_POUCH_RETENTION_COMPLETED;
+       kind < LC_POUCH_RETENTION_KIND_COUNT; ++kind) {
+    for (index = 0U; index < 3U; ++index) {
+      assert_int_equal(lc_xid_new(ids[index], &f.error), LC_OK);
+      assert_true(snprintf(keys[index], sizeof(keys[index]),
+                           "__lockdc_io/v1/%s/count-%d-%u",
+                           kind == LC_POUCH_RETENTION_COMPLETED ? "outbox"
+                           : kind == LC_POUCH_RETENTION_INBOX   ? "inbox"
+                                                                : "command",
+                           kind, index) > 0);
+      terminal_retention_seed(&f, kind, keys[index], ids[index], 5000);
+    }
+    /* Zero count uses no capacity cap, including a backlog larger than one. */
+    assert_int_equal(lc_outbox_test_reclaim_terminal(
+                         f.outbox, kind, 1000, &reclaimed, &next_due, &f.error),
+                     LC_OK);
+    assert_int_equal(reclaimed, 0U);
+    assert_int_equal(next_due, 5000);
+    if (kind == LC_POUCH_RETENTION_COMPLETED)
+      f.config.completed_max_count = 1U;
+    else if (kind == LC_POUCH_RETENTION_INBOX)
+      f.config.inbox_max_count = 1U;
+    else
+      f.config.command_max_count = 1U;
+    terminal_retention_reopen(&f);
+    for (index = 0U; index < 2U; ++index) {
+      assert_int_equal(lc_outbox_test_reclaim_terminal(f.outbox, kind, 1000,
+                                                       &reclaimed, &next_due,
+                                                       &f.error),
+                       LC_OK);
+      assert_int_equal(reclaimed, 1U);
+    }
+    assert_int_equal(lc_outbox_test_reclaim_terminal(
+                         f.outbox, kind, 1000, &reclaimed, &next_due, &f.error),
+                     LC_OK);
+    assert_int_equal(reclaimed, 0U);
+    /* The final receipt remains protected until the time boundary. */
+    if (kind == LC_POUCH_RETENTION_COMPLETED)
+      f.config.completed_retention_seconds = -1L;
+    else if (kind == LC_POUCH_RETENTION_INBOX)
+      f.config.inbox_retention_seconds = -1L;
+    else
+      f.config.command_retention_seconds = -1L;
+    terminal_retention_reopen(&f);
+    assert_int_equal(lc_outbox_test_reclaim_terminal(
+                         f.outbox, kind, 5000, &reclaimed, &next_due, &f.error),
+                     LC_OK);
+    assert_int_equal(reclaimed, 0U);
+    if (kind == LC_POUCH_RETENTION_COMPLETED)
+      f.config.completed_retention_seconds = 0L;
+    else if (kind == LC_POUCH_RETENTION_INBOX)
+      f.config.inbox_retention_seconds = 0L;
+    else
+      f.config.command_retention_seconds = 0L;
+    terminal_retention_reopen(&f);
+    assert_int_equal(lc_outbox_test_reclaim_terminal(
+                         f.outbox, kind, 5000, &reclaimed, &next_due, &f.error),
+                     LC_OK);
+    assert_int_equal(reclaimed, 1U);
+    for (index = 0U; index < 3U; ++index) {
+      outbox_assert_state_presence(f.client, f.config.ns, keys[index], 0,
+                                   &f.error);
+      terminal_retention_assert_attachments(&f, keys[index], 0U);
+    }
+  }
+  terminal_retention_close(&f);
+}
+
+static void
+test_pouch_terminal_retention_generation_busy_and_failure(void **state) {
+  terminal_retention_fixture f;
+  char id[LC_XID_STRING_SIZE];
+  char stale_id[LC_XID_STRING_SIZE];
+  char key[128];
+  lc_acquire_req acquire;
+  lc_lease *held;
+  size_t reclaimed;
+  lc_i64 next_due;
+  int kind;
+  (void)state;
+  terminal_retention_open(&f);
+  for (kind = LC_POUCH_RETENTION_COMPLETED;
+       kind < LC_POUCH_RETENTION_KIND_COUNT; ++kind) {
+    assert_int_equal(lc_xid_new(id, &f.error), LC_OK);
+    assert_int_equal(lc_xid_new(stale_id, &f.error), LC_OK);
+    assert_true(snprintf(key, sizeof(key), "__lockdc_io/v1/%s/generation-%d",
+                         kind == LC_POUCH_RETENTION_COMPLETED ? "outbox"
+                         : kind == LC_POUCH_RETENTION_INBOX   ? "inbox"
+                                                              : "command",
+                         kind) > 0);
+    terminal_retention_seed(&f, kind, key, id, 5000);
+    assert_int_equal(lc_pouch_outbox_retention_marker_write(
+                         ((lc_client_handle *)f.client)->pouch, f.config.ns,
+                         kind, stale_id, key, 1, 0U, &f.error),
+                     LC_OK);
+    assert_int_equal(lc_outbox_test_reclaim_terminal(
+                         f.outbox, kind, 1000, &reclaimed, &next_due, &f.error),
+                     LC_OK);
+    assert_int_equal(reclaimed, 1U); /* Only stale control data was removed. */
+    outbox_assert_state_presence(f.client, f.config.ns, key, 1, &f.error);
+    terminal_retention_assert_attachments(&f, key, 1U);
+    lc_acquire_req_init(&acquire);
+    acquire.ns = f.config.ns;
+    acquire.owner = "terminal-retention-held";
+    acquire.ttl_seconds = 30L;
+    acquire.key = key;
+    held = NULL;
+    assert_int_equal(lc_acquire(f.client, &acquire, &held, &f.error), LC_OK);
+    assert_int_not_equal(lc_outbox_test_reclaim_terminal(f.outbox, kind, 5000,
+                                                         &reclaimed, &next_due,
+                                                         &f.error),
+                         LC_OK);
+    assert_int_equal(reclaimed, 0U);
+    lc_error_cleanup(&f.error);
+    lc_error_init(&f.error);
+    assert_int_equal(lc_lease_release(held, NULL, &f.error), LC_OK);
+    lc_outbox_test_before_terminal_remove_hook = outbox_fail_allocation;
+    assert_int_equal(lc_outbox_test_reclaim_terminal(
+                         f.outbox, kind, 5000, &reclaimed, &next_due, &f.error),
+                     LC_ERR_NOMEM);
+    assert_int_equal(reclaimed, 0U);
+    lc_outbox_test_before_terminal_remove_hook = NULL;
+    lc_error_cleanup(&f.error);
+    lc_error_init(&f.error);
+    outbox_assert_state_presence(f.client, f.config.ns, key, 1, &f.error);
+    terminal_retention_assert_attachments(&f, key, 1U);
+    /* A fresh receiver resumes the durable marker after an interrupted cleanup.
+     */
+    terminal_retention_reopen(&f);
+    assert_int_equal(lc_outbox_test_reclaim_terminal(
+                         f.outbox, kind, 5000, &reclaimed, &next_due, &f.error),
+                     LC_OK);
+    assert_int_equal(reclaimed, 1U);
+    outbox_assert_state_presence(f.client, f.config.ns, key, 0, &f.error);
+    terminal_retention_assert_attachments(&f, key, 0U);
+  }
+  terminal_retention_close(&f);
+}
+
+static void test_pouch_terminal_retention_public_transitions(void **state) {
+  terminal_retention_fixture f;
+  lc_command_request command;
+  lc_command_result result;
+  lc_command_receipt receipt;
+  lc_inbox_message inbox;
+  lc_inbox_accept_result accepted;
+  lc_outbox_transaction *transaction;
+  lc_outbox_entry entry;
+  lc_outbox_receipt effect;
+  lc_outbox_dispatcher *dispatcher;
+  lc_outbox_job *job;
+  lc_source *source;
+  lc_pouch_outbox_retention_marker marker;
+  lc_i64 next_due;
+  lc_i64 now;
+  size_t reclaimed;
+  char pending_key[128];
+  int kind;
+  int index;
+  (void)state;
+  terminal_retention_open(&f);
+  lc_command_receipt_init(&receipt);
+  lc_outbox_receipt_init(&effect);
+  lc_command_request_init(&command);
+  command.identity.scope = "tenant";
+  command.identity.command_type = "test";
+  command.request_digest = "digest";
+  lc_command_result_init(&result);
+  now = (lc_i64)time(NULL);
+  for (index = 0; index < 3; ++index) {
+    command.identity.idempotency_key = index == 0   ? "completed"
+                                       : index == 1 ? "failed"
+                                                    : "pending";
+    transaction = NULL;
+    assert_int_equal(lc_outbox_accept_command(f.outbox, &command, &transaction,
+                                              &receipt, &f.error),
+                     LC_OK);
+    lc_command_result_init(&result);
+    source = NULL;
+    if (index == 0) {
+      result.result_code = "ok";
+      result.content_type = "text/plain";
+      assert_int_equal(lc_source_from_memory("result", 6U, &source, &f.error),
+                       LC_OK);
+      result.body = source;
+      assert_int_equal(
+          transaction->complete_command(transaction, &result, &f.error), LC_OK);
+    } else if (index == 1) {
+      result.failure_code = "rejected";
+      assert_int_equal(
+          transaction->fail_command(transaction, &result, &f.error), LC_OK);
+    } else {
+      assert_true(snprintf(pending_key, sizeof(pending_key),
+                           "__lockdc_io/v1/command/%s",
+                           receipt.command_id + 4U) > 0);
+    }
+    assert_int_equal(lc_outbox_transaction_commit(transaction, &f.error),
+                     LC_OK);
+    lc_outbox_transaction_close(transaction);
+    lc_source_close(source);
+    lc_command_receipt_cleanup(&receipt);
+  }
+  lc_inbox_message_init(&inbox);
+  inbox.consumer_id = "consumer";
+  inbox.source_kind = "queue";
+  inbox.source_id = "source";
+  inbox.message_id = "message";
+  transaction = NULL;
+  assert_int_equal(lc_outbox_accept_inbox(f.outbox, &inbox, &transaction,
+                                          &accepted, &f.error),
+                   LC_OK);
+  assert_int_equal(lc_outbox_transaction_commit(transaction, &f.error), LC_OK);
+  lc_outbox_transaction_close(transaction);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "op";
+  entry.effect_id = "effect";
+  entry.effect_key = "key";
+  entry.payload_digest = "digest";
+  entry.kind = "test";
+  entry.destination = "test://target";
+  source = NULL;
+  assert_int_equal(lc_source_from_memory("payload", 7U, &source, &f.error),
+                   LC_OK);
+  assert_int_equal(lc_outbox_append(f.outbox, &entry, source, &transaction,
+                                    &effect, &f.error),
+                   LC_OK);
+  assert_int_equal(lc_outbox_transaction_commit(transaction, &f.error), LC_OK);
+  lc_outbox_transaction_close(transaction);
+  lc_source_close(source);
+  dispatcher = outbox_test_dispatcher(f.outbox, &f.error);
+  assert_non_null(dispatcher);
+  job = NULL;
+  assert_int_equal(dispatcher->next(dispatcher, 3000L, &job, &f.error), LC_OK);
+  assert_non_null(job);
+  assert_int_equal(job->complete(job, NULL, &f.error), LC_OK);
+  assert_int_equal(lc_outbox_dispatcher_stop(dispatcher, -1L, &f.error), LC_OK);
+  dispatcher->close(dispatcher);
+  for (kind = LC_POUCH_RETENTION_COMPLETED;
+       kind < LC_POUCH_RETENTION_KIND_COUNT; ++kind) {
+    memset(&marker, 0, sizeof(marker));
+    assert_int_equal(lc_pouch_outbox_retention_marker_take(
+                         ((lc_client_handle *)f.client)->pouch, f.config.ns,
+                         kind, NULL, now + 31L * 86400L, SIZE_MAX, UINT64_MAX,
+                         &marker, &next_due, &f.error),
+                     LC_OK);
+    assert_non_null(marker.marker_id);
+    assert_true(marker.due_at_unix >= now + 30L * 86400L);
+    assert_true(marker.due_at_unix <= (lc_i64)time(NULL) + 30L * 86400L);
+    assert_int_equal(
+        lc_outbox_test_reclaim_terminal(f.outbox, kind, marker.due_at_unix - 1,
+                                        &reclaimed, &next_due, &f.error),
+        LC_OK);
+    assert_int_equal(reclaimed, 0U);
+    assert_int_equal(
+        lc_outbox_test_reclaim_terminal(f.outbox, kind, marker.due_at_unix,
+                                        &reclaimed, &next_due, &f.error),
+        LC_OK);
+    assert_int_equal(reclaimed, 1U);
+    outbox_assert_state_presence(f.client, f.config.ns, marker.outbox_key, 0,
+                                 &f.error);
+    terminal_retention_assert_attachments(&f, marker.outbox_key, 0U);
+    lc_pouch_outbox_retention_marker_cleanup(
+        ((lc_client_handle *)f.client)->pouch, &marker);
+    /* Both successful and failed commands expire; pending commands do not. */
+    if (kind == LC_POUCH_RETENTION_COMMAND) {
+      assert_int_equal(
+          lc_outbox_test_reclaim_terminal(f.outbox, kind, now + 31L * 86400L,
+                                          &reclaimed, &next_due, &f.error),
+          LC_OK);
+      assert_int_equal(reclaimed, 1U);
+    }
+  }
+  outbox_assert_state_presence(f.client, f.config.ns, pending_key, 1, &f.error);
+  /* Expiry deliberately reopens the identity's duplicate barrier. */
+  transaction = NULL;
+  assert_int_equal(lc_outbox_accept_inbox(f.outbox, &inbox, &transaction,
+                                          &accepted, &f.error),
+                   LC_OK);
+  assert_true(accepted.accepted);
+  assert_false(accepted.duplicate);
+  assert_int_equal(lc_outbox_transaction_rollback(transaction, &f.error),
+                   LC_OK);
+  lc_outbox_transaction_close(transaction);
+  lc_outbox_receipt_cleanup(&effect);
+  terminal_retention_close(&f);
+}
+
+static void
+test_pouch_terminal_retention_live_dispatcher_restart(void **state) {
+  terminal_retention_fixture f;
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_outbox_dispatcher *dispatcher;
+  lc_outbox_stats stats;
+  char ids[3][LC_XID_STRING_SIZE];
+  const char *keys[3] = {"__lockdc_io/v1/outbox/restart",
+                         "__lockdc_io/v1/inbox/restart",
+                         "__lockdc_io/v1/command/restart"};
+  struct timespec delay;
+  unsigned int attempt;
+  int kind;
+  (void)state;
+  terminal_retention_open(&f);
+  for (kind = LC_POUCH_RETENTION_COMPLETED;
+       kind < LC_POUCH_RETENTION_KIND_COUNT; ++kind) {
+    assert_int_equal(lc_xid_new(ids[kind - 1], &f.error), LC_OK);
+    terminal_retention_seed(&f, kind, keys[kind - 1], ids[kind - 1], 1);
+  }
+  /* A completely new Pouch session discovers another session's markers.
+   * Merely starting the explicit dispatcher performs maintenance; there is
+   * no consumer demand, query index, or receipt read to trigger it. */
+  lc_outbox_close(f.outbox);
+  lc_client_close(f.client);
+  f.outbox = NULL;
+  f.client = NULL;
+  endpoints[0] = f.endpoint;
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&client_config, &f.client, &f.error), LC_OK);
+  f.config.dead_letter_retention_seconds = -1L;
+  assert_int_equal(outbox_public_new(f.client, &f.config, &f.outbox, &f.error),
+                   LC_OK);
+  dispatcher = outbox_test_dispatcher(f.outbox, &f.error);
+  assert_non_null(dispatcher);
+  delay.tv_sec = 0;
+  delay.tv_nsec = 10000000L;
+  memset(&stats, 0, sizeof(stats));
+  for (attempt = 0U; attempt < 500U; ++attempt) {
+    assert_int_equal(dispatcher->get_stats(dispatcher, &stats, &f.error),
+                     LC_OK);
+    if (stats.terminal_reclaims == 3U)
+      break;
+    lc_outbox_stats_cleanup(&stats);
+    (void)nanosleep(&delay, NULL);
+  }
+  assert_int_equal(stats.terminal_reclaims, 3U);
+  assert_int_equal(stats.terminal_reclaim_failures, 0U);
+  assert_int_equal(stats.dead_letter_reclaims, 0U);
+  assert_int_equal(stats.recovery_queries, 0U);
+  lc_outbox_stats_cleanup(&stats);
+  assert_int_equal(lc_outbox_dispatcher_stop(dispatcher, -1L, &f.error), LC_OK);
+  dispatcher->close(dispatcher);
+  for (kind = LC_POUCH_RETENTION_COMPLETED;
+       kind < LC_POUCH_RETENTION_KIND_COUNT; ++kind) {
+    outbox_assert_state_presence(f.client, f.config.ns, keys[kind - 1], 0,
+                                 &f.error);
+    terminal_retention_assert_attachments(&f, keys[kind - 1], 0U);
+  }
+  terminal_retention_close(&f);
+}
+
+static void test_pouch_terminal_retention_provisional_inbox(void **state) {
+  terminal_retention_fixture f;
+  lc_inbox_message message;
+  lc_inbox_accept_result accepted;
+  lc_outbox_transaction *transaction;
+  lc_pouch_outbox_retention_marker marker;
+  lc_i64 next_due;
+  size_t reclaimed;
+  (void)state;
+  terminal_retention_open(&f);
+  f.config.inbox_retention_seconds = 123L;
+  terminal_retention_reopen(&f);
+  lc_inbox_message_init(&message);
+  message.consumer_id = "consumer";
+  message.source_kind = "queue";
+  message.source_id = "source";
+  message.message_id = "provisional";
+  transaction = NULL;
+  assert_int_equal(lc_outbox_accept_inbox(f.outbox, &message, &transaction,
+                                          &accepted, &f.error),
+                   LC_OK);
+  memset(&marker, 0, sizeof(marker));
+  assert_int_equal(lc_pouch_outbox_retention_marker_take(
+                       ((lc_client_handle *)f.client)->pouch, f.config.ns,
+                       LC_POUCH_RETENTION_INBOX, NULL, (lc_i64)time(NULL) + 200,
+                       SIZE_MAX, UINT64_MAX, &marker, &next_due, &f.error),
+                   LC_OK);
+  assert_non_null(marker.marker_id);
+  assert_true(marker.due_at_unix <= (lc_i64)time(NULL) + 123);
+  assert_true(marker.due_at_unix >= (lc_i64)time(NULL) + 120);
+  assert_int_not_equal(lc_outbox_test_reclaim_terminal(
+                           f.outbox, LC_POUCH_RETENTION_INBOX,
+                           marker.due_at_unix, &reclaimed, &next_due, &f.error),
+                       LC_OK);
+  assert_int_equal(reclaimed, 0U);
+  lc_error_cleanup(&f.error);
+  lc_error_init(&f.error);
+  assert_int_equal(lc_outbox_transaction_rollback(transaction, &f.error),
+                   LC_OK);
+  lc_outbox_transaction_close(transaction);
+  assert_int_equal(lc_outbox_test_reclaim_terminal(
+                       f.outbox, LC_POUCH_RETENTION_INBOX, marker.due_at_unix,
+                       &reclaimed, &next_due, &f.error),
+                   LC_OK);
+  assert_int_equal(reclaimed, 1U); /* Rolled-back provisional marker only. */
+  transaction = NULL;
+  assert_int_equal(lc_outbox_accept_inbox(f.outbox, &message, &transaction,
+                                          &accepted, &f.error),
+                   LC_OK);
+  assert_true(accepted.accepted);
+  assert_false(accepted.duplicate);
+  assert_int_equal(lc_outbox_transaction_commit(transaction, &f.error), LC_OK);
+  lc_outbox_transaction_close(transaction);
+  lc_pouch_outbox_retention_marker_cleanup(
+      ((lc_client_handle *)f.client)->pouch, &marker);
+  terminal_retention_close(&f);
+}
+
+static void
+test_pouch_terminal_retention_selector_is_fair_and_lazy(void **state) {
+  terminal_retention_fixture f;
+  const char *directories[3] = {"outbox-completed-reclaim",
+                                "outbox-inbox-reclaim",
+                                "outbox-command-reclaim"};
+  const char *families[3] = {"outbox", "inbox", "command"};
+  char ids[3][LC_XID_STRING_SIZE];
+  char keys[3][128];
+  char path[PATH_MAX];
+  lc_acquire_req acquire;
+  lc_lease *held;
+  FILE *file;
+  lc_i64 next_due;
+  size_t reclaimed;
+  int kind;
+  unsigned int index;
+  (void)state;
+  terminal_retention_open(&f);
+  for (kind = LC_POUCH_RETENTION_COMPLETED;
+       kind < LC_POUCH_RETENTION_KIND_COUNT; ++kind) {
+    for (index = 0U; index < 3U; ++index) {
+      assert_int_equal(lc_xid_new(ids[index], &f.error), LC_OK);
+      assert_true(snprintf(keys[index], sizeof(keys[index]),
+                           "__lockdc_io/v1/%s/selector-%u", families[kind - 1],
+                           index) > 0);
+      terminal_retention_seed(&f, kind, keys[index], ids[index],
+                              index == 2U ? 5000 : 1);
+    }
+    assert_true(strcmp(ids[0], ids[1]) < 0);
+    assert_true(snprintf(path, sizeof(path),
+                         "%s/.lockd/%s/%s/0000000000001388-%s", f.root,
+                         directories[kind - 1], f.config.ns, ids[2]) > 0);
+    file = fopen(path, "wb");
+    assert_non_null(file);
+    assert_int_equal(fwrite("corrupt", 1U, 7U, file), 7U);
+    assert_int_equal(fclose(file), 0);
+    lc_acquire_req_init(&acquire);
+    acquire.ns = f.config.ns;
+    acquire.key = keys[0];
+    acquire.owner = "selector-held";
+    acquire.ttl_seconds = 30L;
+    held = NULL;
+    assert_int_equal(lc_acquire(f.client, &acquire, &held, &f.error), LC_OK);
+    assert_int_not_equal(lc_outbox_test_reclaim_terminal(f.outbox, kind, 1000,
+                                                         &reclaimed, &next_due,
+                                                         &f.error),
+                         LC_OK);
+    lc_error_cleanup(&f.error);
+    lc_error_init(&f.error);
+    /* Busy first marker advances the turn to the other eligible receipt.
+     * The future corrupt body must not be opened during either attempt. */
+    assert_int_equal(lc_outbox_test_reclaim_terminal(
+                         f.outbox, kind, 1000, &reclaimed, &next_due, &f.error),
+                     LC_OK);
+    assert_int_equal(reclaimed, 1U);
+    outbox_assert_state_presence(f.client, f.config.ns, keys[1], 0, &f.error);
+    assert_int_equal(lc_lease_release(held, NULL, &f.error), LC_OK);
+    assert_int_equal(lc_outbox_test_reclaim_terminal(
+                         f.outbox, kind, 1000, &reclaimed, &next_due, &f.error),
+                     LC_OK);
+    assert_int_equal(reclaimed, 1U);
+    assert_int_equal(lc_outbox_test_reclaim_terminal(
+                         f.outbox, kind, 1000, &reclaimed, &next_due, &f.error),
+                     LC_OK);
+    assert_int_equal(reclaimed, 0U);
+    assert_int_equal(next_due, 5000);
+    assert_int_equal(lc_outbox_test_reclaim_terminal(
+                         f.outbox, kind, 5000, &reclaimed, &next_due, &f.error),
+                     LC_ERR_PROTOCOL);
+    lc_error_cleanup(&f.error);
+    lc_error_init(&f.error);
+    outbox_assert_state_presence(f.client, f.config.ns, keys[2], 1, &f.error);
+    terminal_retention_assert_attachments(&f, keys[2], 1U);
+  }
+  terminal_retention_close(&f);
+}
+
+static void
+test_pouch_terminal_retention_corrupt_marker_does_not_starve(void **state) {
+  terminal_retention_fixture f;
+  const char *directories[3] = {"outbox-completed-reclaim",
+                                "outbox-inbox-reclaim",
+                                "outbox-command-reclaim"};
+  const char *families[3] = {"outbox", "inbox", "command"};
+  char ids[2][LC_XID_STRING_SIZE];
+  char keys[2][128];
+  char path[PATH_MAX];
+  char renamed[PATH_MAX];
+  FILE *file;
+  lc_i64 next_due;
+  size_t reclaimed;
+  int kind;
+  int mode;
+  unsigned int index;
+  (void)state;
+  terminal_retention_open(&f);
+  for (kind = LC_POUCH_RETENTION_COMPLETED;
+       kind < LC_POUCH_RETENTION_KIND_COUNT; ++kind) {
+    for (mode = 0; mode < 2; ++mode) {
+      for (index = 0U; index < 2U; ++index) {
+        assert_int_equal(lc_xid_new(ids[index], &f.error), LC_OK);
+        assert_true(snprintf(keys[index], sizeof(keys[index]),
+                             "__lockdc_io/v1/%s/corrupt-%d-%u",
+                             families[kind - 1], mode, index) > 0);
+        terminal_retention_seed(&f, kind, keys[index], ids[index], 1);
+      }
+      assert_true(strcmp(ids[0], ids[1]) < 0);
+      assert_true(snprintf(path, sizeof(path),
+                           "%s/.lockd/%s/%s/0000000000000001-%s", f.root,
+                           directories[kind - 1], f.config.ns, ids[0]) > 0);
+      if (mode == 0) {
+        file = fopen(path, "wb");
+        assert_non_null(file);
+        assert_int_equal(fwrite("corrupt", 1U, 7U, file), 7U);
+        assert_int_equal(fclose(file), 0);
+      } else {
+        assert_true(snprintf(renamed, sizeof(renamed),
+                             "%s/.lockd/%s/%s/0000000000000002-%s", f.root,
+                             directories[kind - 1], f.config.ns, ids[0]) > 0);
+        assert_int_equal(rename(path, renamed), 0);
+      }
+      assert_int_equal(lc_outbox_test_reclaim_terminal(f.outbox, kind, 1000,
+                                                       &reclaimed, &next_due,
+                                                       &f.error),
+                       LC_ERR_PROTOCOL);
+      assert_int_equal(reclaimed, 0U);
+      lc_error_cleanup(&f.error);
+      lc_error_init(&f.error);
+      /* Keep the bad marker for diagnosis, but advance past its filename
+       * identity so another eligible parent can still be reclaimed. */
+      assert_int_equal(lc_outbox_test_reclaim_terminal(f.outbox, kind, 1000,
+                                                       &reclaimed, &next_due,
+                                                       &f.error),
+                       LC_OK);
+      assert_int_equal(reclaimed, 1U);
+      outbox_assert_state_presence(f.client, f.config.ns, keys[1], 0, &f.error);
+      terminal_retention_assert_attachments(&f, keys[1], 0U);
+      outbox_assert_state_presence(f.client, f.config.ns, keys[0], 1, &f.error);
+      terminal_retention_assert_attachments(&f, keys[0], 1U);
+      /* Wrapping the turn retries the corruption; it is never silently lost. */
+      assert_int_equal(lc_outbox_test_reclaim_terminal(f.outbox, kind, 1000,
+                                                       &reclaimed, &next_due,
+                                                       &f.error),
+                       LC_ERR_PROTOCOL);
+      lc_error_cleanup(&f.error);
+      lc_error_init(&f.error);
+      if (mode == 1)
+        assert_int_equal(rename(renamed, path), 0);
+      assert_int_equal(lc_pouch_outbox_retention_marker_write(
+                           ((lc_client_handle *)f.client)->pouch, f.config.ns,
+                           kind, ids[0], keys[0], 1, 0U, &f.error),
+                       LC_OK);
+      assert_int_equal(lc_outbox_test_reclaim_terminal(f.outbox, kind, 1000,
+                                                       &reclaimed, &next_due,
+                                                       &f.error),
+                       LC_OK);
+      assert_int_equal(reclaimed, 1U);
+      outbox_assert_state_presence(f.client, f.config.ns, keys[0], 0, &f.error);
+      terminal_retention_assert_attachments(&f, keys[0], 0U);
+    }
+  }
+  terminal_retention_close(&f);
+}
+
+static void test_pouch_terminal_retention_filename_deadlines(void **state) {
+  terminal_retention_fixture f;
+  lc_pouch_outbox_retention_marker marker;
+  lc_i64 deadlines[3];
+  lc_i64 next_due;
+  char id[LC_XID_STRING_SIZE];
+  int kind;
+  unsigned int index;
+  (void)state;
+  deadlines[0] = 1000;
+  deadlines[1] = ((lc_i64)0x01234567UL << 32U) | (lc_i64)0x89abcdefUL;
+  deadlines[2] = LC_I64_MAX;
+  terminal_retention_open(&f);
+  for (kind = LC_POUCH_RETENTION_COMPLETED;
+       kind < LC_POUCH_RETENTION_KIND_COUNT; ++kind) {
+    for (index = 0U; index < 3U; ++index) {
+      assert_int_equal(lc_xid_new(id, &f.error), LC_OK);
+      assert_int_equal(lc_pouch_outbox_retention_marker_write(
+                           ((lc_client_handle *)f.client)->pouch, f.config.ns,
+                           kind, id, "__lockdc_io/v1/inbox/deadline",
+                           deadlines[index], 0U, &f.error),
+                       LC_OK);
+      memset(&marker, 0, sizeof(marker));
+      assert_int_equal(lc_pouch_outbox_retention_marker_take(
+                           ((lc_client_handle *)f.client)->pouch, f.config.ns,
+                           kind, NULL, deadlines[index] - 1, SIZE_MAX,
+                           UINT64_MAX, &marker, &next_due, &f.error),
+                       LC_OK);
+      assert_null(marker.marker_id);
+      assert_int_equal(next_due, deadlines[index]);
+      assert_int_equal(lc_pouch_outbox_retention_marker_take(
+                           ((lc_client_handle *)f.client)->pouch, f.config.ns,
+                           kind, NULL, deadlines[index], SIZE_MAX, UINT64_MAX,
+                           &marker, &next_due, &f.error),
+                       LC_OK);
+      assert_string_equal(marker.marker_id, id);
+      assert_int_equal(marker.due_at_unix, deadlines[index]);
+      lc_pouch_outbox_retention_marker_cleanup(
+          ((lc_client_handle *)f.client)->pouch, &marker);
+      assert_int_equal(lc_pouch_outbox_retention_marker_remove(
+                           ((lc_client_handle *)f.client)->pouch, f.config.ns,
+                           kind, id, deadlines[index], &f.error),
+                       LC_OK);
+    }
+  }
+  terminal_retention_close(&f);
+}
+
+static void test_pouch_terminal_retention_invalid_configuration(void **state) {
+  terminal_retention_fixture f;
+  lc_outbox_config config;
+  lc_outbox *invalid;
+  int kind;
+  int pass;
+  long seconds;
+  (void)state;
+  terminal_retention_open(&f);
+  for (kind = LC_POUCH_RETENTION_COMPLETED;
+       kind < LC_POUCH_RETENTION_KIND_COUNT; ++kind) {
+    for (pass = 0; pass < 2; ++pass) {
+      if (pass == 1 && !outbox_duration_overflows_unix_range(LONG_MAX))
+        continue;
+      seconds = pass == 0 ? -2L : LONG_MAX;
+      config = f.config;
+      if (kind == LC_POUCH_RETENTION_COMPLETED)
+        config.completed_retention_seconds = seconds;
+      else if (kind == LC_POUCH_RETENTION_INBOX)
+        config.inbox_retention_seconds = seconds;
+      else
+        config.command_retention_seconds = seconds;
+      invalid = NULL;
+      assert_int_equal(outbox_public_new(f.client, &config, &invalid, &f.error),
+                       LC_ERR_INVALID);
+      assert_null(invalid);
+      lc_error_cleanup(&f.error);
+      lc_error_init(&f.error);
+    }
+  }
+  terminal_retention_close(&f);
+}
+
+static void
+test_pouch_dead_letter_retention_corrupt_markers_do_not_starve(void **state) {
+  terminal_retention_fixture f;
+  char ids[4][LC_XID_STRING_SIZE];
+  char keys[4][128];
+  char path[PATH_MAX];
+  FILE *file;
+  lc_i64 due;
+  lc_i64 next_due;
+  size_t reclaimed;
+  unsigned int mode;
+  unsigned int index;
+  unsigned int pass;
+  int rc;
+  (void)state;
+  terminal_retention_open(&f);
+  /* Exercise expiry and both overload paths, including name-only successor
+   * discovery after the scanner has stopped reading capacity-prefix bodies. */
+  for (mode = 0U; mode < 3U; ++mode) {
+    f.config.dead_letter_max_count = mode == 1U ? 1U : SIZE_MAX;
+    f.config.dead_letter_max_bytes = mode == 2U ? 1U : UINT64_MAX;
+    terminal_retention_reopen(&f);
+    due = mode == 0U ? 1 : 5000;
+    for (index = 0U; index < 4U; ++index) {
+      assert_int_equal(lc_xid_new(ids[index], &f.error), LC_OK);
+      assert_true(snprintf(keys[index], sizeof(keys[index]),
+                           "__lockdc_io/v1/outbox/corrupt-dlq-%u-%u", mode,
+                           index) > 0);
+      seed_retained_dead_letter_outbox(f.client, f.config.ns, keys[index],
+                                       ids[index], &f.error);
+      assert_int_equal(lc_pouch_outbox_retention_marker_write(
+                           ((lc_client_handle *)f.client)->pouch, f.config.ns,
+                           LC_POUCH_RETENTION_DEAD_LETTER, ids[index],
+                           keys[index], due, 32U, &f.error),
+                       LC_OK);
+      if (index % 2U == 0U) {
+        assert_true(snprintf(path, sizeof(path),
+                             "%s/.lockd/outbox-dead-letter-reclaim/%s/%s",
+                             f.root, f.config.ns, ids[index]) > 0);
+        file = fopen(path, "wb");
+        assert_non_null(file);
+        assert_int_equal(fwrite("corrupt", 1U, 7U, file), 7U);
+        assert_int_equal(fclose(file), 0);
+      }
+    }
+    for (pass = 0U; pass < 12U; ++pass) {
+      rc = lc_outbox_test_reclaim_dead_letters(f.outbox, 1000, &reclaimed,
+                                               &next_due, &f.error);
+      assert_true(rc == LC_OK || rc == LC_ERR_PROTOCOL);
+      lc_error_cleanup(&f.error);
+      lc_error_init(&f.error);
+    }
+    for (index = 0U; index < 4U; ++index) {
+      outbox_assert_state_presence(f.client, f.config.ns, keys[index],
+                                   index % 2U == 0U, &f.error);
+      terminal_retention_assert_attachments(&f, keys[index],
+                                            index % 2U == 0U ? 1U : 0U);
+    }
+    /* Damaged work remains diagnosable and is reclaimed after repair. */
+    for (index = 0U; index < 4U; index += 2U)
+      assert_int_equal(lc_pouch_outbox_retention_marker_write(
+                           ((lc_client_handle *)f.client)->pouch, f.config.ns,
+                           LC_POUCH_RETENTION_DEAD_LETTER, ids[index],
+                           keys[index], 1, 32U, &f.error),
+                       LC_OK);
+    assert_int_equal(lc_outbox_test_reclaim_dead_letters(
+                         f.outbox, 1000, &reclaimed, &next_due, &f.error),
+                     LC_OK);
+    assert_int_equal(reclaimed, 2U);
+    for (index = 0U; index < 4U; ++index)
+      outbox_assert_state_presence(f.client, f.config.ns, keys[index], 0,
+                                   &f.error);
+  }
+  terminal_retention_close(&f);
+}
+
 static void
 test_pouch_dead_letter_retention_is_bounded_and_generation_safe(void **state) {
   char endpoint[PATH_MAX];
@@ -10302,7 +11195,7 @@ test_pouch_dead_letter_retention_is_bounded_and_generation_safe(void **state) {
   lc_client_handle *client_handle;
   lc_pouch_maintenance_options maintenance_options;
   lc_pouch_maintenance_result maintenance_result;
-  lc_pouch_outbox_dead_letter_marker selected_marker;
+  lc_pouch_outbox_retention_marker selected_marker;
   lc_outbox_config config;
   lc_client *client;
   lc_outbox *outbox;
@@ -10378,12 +11271,14 @@ test_pouch_dead_letter_retention_is_bounded_and_generation_safe(void **state) {
   seed_retained_dead_letter_outbox(client, config.ns, second_key, second_id,
                                    &error);
   client_handle = (lc_client_handle *)client;
-  assert_int_equal(lc_pouch_outbox_dead_letter_marker_write(
-                       client_handle->pouch, config.ns, first_id, first_key,
+  assert_int_equal(lc_pouch_outbox_retention_marker_write(
+                       client_handle->pouch, config.ns,
+                       LC_POUCH_RETENTION_DEAD_LETTER, first_id, first_key,
                        5000, 32U, &error),
                    LC_OK);
-  assert_int_equal(lc_pouch_outbox_dead_letter_marker_write(
-                       client_handle->pouch, config.ns, second_id, second_key,
+  assert_int_equal(lc_pouch_outbox_retention_marker_write(
+                       client_handle->pouch, config.ns,
+                       LC_POUCH_RETENTION_DEAD_LETTER, second_id, second_key,
                        6000, 32U, &error),
                    LC_OK);
   reclaimed = 0U;
@@ -10409,11 +11304,11 @@ test_pouch_dead_letter_retention_is_bounded_and_generation_safe(void **state) {
   seed_retained_dead_letter_outbox(client, config.ns,
                                    "__lockdc_io/v1/outbox/retention/replayed",
                                    second_id, &error);
-  assert_int_equal(lc_pouch_outbox_dead_letter_marker_write(
-                       client_handle->pouch, config.ns, stale_id,
-                       "__lockdc_io/v1/outbox/retention/replayed", 1, 32U,
-                       &error),
-                   LC_OK);
+  assert_int_equal(
+      lc_pouch_outbox_retention_marker_write(
+          client_handle->pouch, config.ns, LC_POUCH_RETENTION_DEAD_LETTER,
+          stale_id, "__lockdc_io/v1/outbox/retention/replayed", 1, 32U, &error),
+      LC_OK);
   reclaimed = 0U;
   next_due = 0;
   assert_int_equal(lc_outbox_test_reclaim_dead_letters(outbox, 7000, &reclaimed,
@@ -10434,8 +11329,9 @@ test_pouch_dead_letter_retention_is_bounded_and_generation_safe(void **state) {
   seed_retained_dead_letter_outbox(client, config.ns,
                                    "__lockdc_io/v1/outbox/retention/held",
                                    first_id, &error);
-  assert_int_equal(lc_pouch_outbox_dead_letter_marker_write(
-                       client_handle->pouch, config.ns, first_id,
+  assert_int_equal(lc_pouch_outbox_retention_marker_write(
+                       client_handle->pouch, config.ns,
+                       LC_POUCH_RETENTION_DEAD_LETTER, first_id,
                        "__lockdc_io/v1/outbox/retention/held", 1, 32U, &error),
                    LC_OK);
   assert_int_equal(lc_xid_new(second_id, &error), LC_OK);
@@ -10443,8 +11339,9 @@ test_pouch_dead_letter_retention_is_bounded_and_generation_safe(void **state) {
   seed_retained_dead_letter_outbox(client, config.ns,
                                    "__lockdc_io/v1/outbox/retention/held-next",
                                    second_id, &error);
-  assert_int_equal(lc_pouch_outbox_dead_letter_marker_write(
-                       client_handle->pouch, config.ns, second_id,
+  assert_int_equal(lc_pouch_outbox_retention_marker_write(
+                       client_handle->pouch, config.ns,
+                       LC_POUCH_RETENTION_DEAD_LETTER, second_id,
                        "__lockdc_io/v1/outbox/retention/held-next", 1, 32U,
                        &error),
                    LC_OK);
@@ -10453,8 +11350,9 @@ test_pouch_dead_letter_retention_is_bounded_and_generation_safe(void **state) {
   seed_retained_dead_letter_outbox(client, config.ns,
                                    "__lockdc_io/v1/outbox/retention/held-third",
                                    third_id, &error);
-  assert_int_equal(lc_pouch_outbox_dead_letter_marker_write(
-                       client_handle->pouch, config.ns, third_id,
+  assert_int_equal(lc_pouch_outbox_retention_marker_write(
+                       client_handle->pouch, config.ns,
+                       LC_POUCH_RETENTION_DEAD_LETTER, third_id,
                        "__lockdc_io/v1/outbox/retention/held-third", 1, 32U,
                        &error),
                    LC_OK);
@@ -10471,20 +11369,22 @@ test_pouch_dead_letter_retention_is_bounded_and_generation_safe(void **state) {
   /* The cursor follows lexical marker order, not readdir order. Otherwise a
    * blocked late marker can repeatedly leap over another busy parent and
    * prevent a healthy one from ever being selected. */
-  assert_int_equal(lc_pouch_outbox_dead_letter_marker_take(
-                       client_handle->pouch, config.ns, first_id, 7000, 1U,
+  assert_int_equal(lc_pouch_outbox_retention_marker_take(
+                       client_handle->pouch, config.ns,
+                       LC_POUCH_RETENTION_DEAD_LETTER, first_id, 7000, 1U,
                        UINT64_MAX, &selected_marker, &next_due, &error),
                    LC_OK);
   assert_string_equal(selected_marker.marker_id, second_id);
-  lc_pouch_outbox_dead_letter_marker_cleanup(client_handle->pouch,
-                                             &selected_marker);
-  assert_int_equal(lc_pouch_outbox_dead_letter_marker_take(
-                       client_handle->pouch, config.ns, second_id, 7000, 1U,
+  lc_pouch_outbox_retention_marker_cleanup(client_handle->pouch,
+                                           &selected_marker);
+  assert_int_equal(lc_pouch_outbox_retention_marker_take(
+                       client_handle->pouch, config.ns,
+                       LC_POUCH_RETENTION_DEAD_LETTER, second_id, 7000, 1U,
                        UINT64_MAX, &selected_marker, &next_due, &error),
                    LC_OK);
   assert_string_equal(selected_marker.marker_id, third_id);
-  lc_pouch_outbox_dead_letter_marker_cleanup(client_handle->pouch,
-                                             &selected_marker);
+  lc_pouch_outbox_retention_marker_cleanup(client_handle->pouch,
+                                           &selected_marker);
   /* The real reclaimer may encounter the third marker on its first turn or
    * after either lease collision. No fixed enumeration order is assumed. */
   for (pass = 0U; pass < 8U; ++pass) {
@@ -10530,11 +11430,11 @@ test_pouch_dead_letter_retention_is_bounded_and_generation_safe(void **state) {
   seed_retained_dead_letter_outbox(client, config.ns,
                                    "__lockdc_io/v1/outbox/retention/cleanup",
                                    first_id, &error);
-  assert_int_equal(lc_pouch_outbox_dead_letter_marker_write(
-                       client_handle->pouch, config.ns, first_id,
-                       "__lockdc_io/v1/outbox/retention/cleanup", 1, 32U,
-                       &error),
-                   LC_OK);
+  assert_int_equal(
+      lc_pouch_outbox_retention_marker_write(
+          client_handle->pouch, config.ns, LC_POUCH_RETENTION_DEAD_LETTER,
+          first_id, "__lockdc_io/v1/outbox/retention/cleanup", 1, 32U, &error),
+      LC_OK);
   lc_outbox_test_before_dead_letter_claim_cleanup_hook = outbox_fail_allocation;
   reclaimed = 0U;
   assert_int_equal(lc_outbox_test_reclaim_dead_letters(outbox, 7000, &reclaimed,
@@ -10562,11 +11462,11 @@ test_pouch_dead_letter_retention_is_bounded_and_generation_safe(void **state) {
   seed_retained_dead_letter_outbox(client, config.ns,
                                    "__lockdc_io/v1/outbox/retention/manual",
                                    first_id, &error);
-  assert_int_equal(lc_pouch_outbox_dead_letter_marker_write(
-                       client_handle->pouch, config.ns, first_id,
-                       "__lockdc_io/v1/outbox/retention/manual", 1, 32U,
-                       &error),
-                   LC_OK);
+  assert_int_equal(
+      lc_pouch_outbox_retention_marker_write(
+          client_handle->pouch, config.ns, LC_POUCH_RETENTION_DEAD_LETTER,
+          first_id, "__lockdc_io/v1/outbox/retention/manual", 1, 32U, &error),
+      LC_OK);
   assert_int_equal(
       lc_outbox_delete_dead_letter(
           outbox, "__lockdc_io/v1/outbox/retention/manual", &error),
@@ -10580,11 +11480,11 @@ test_pouch_dead_letter_retention_is_bounded_and_generation_safe(void **state) {
                    LC_OK);
   assert_int_equal(reclaimed, 0U);
   assert_int_equal(lc_xid_new(first_id, &error), LC_OK);
-  assert_int_equal(lc_pouch_outbox_dead_letter_marker_write(
-                       client_handle->pouch, config.ns, first_id,
-                       "__lockdc_io/v1/outbox/retention/absent", 1, 32U,
-                       &error),
-                   LC_OK);
+  assert_int_equal(
+      lc_pouch_outbox_retention_marker_write(
+          client_handle->pouch, config.ns, LC_POUCH_RETENTION_DEAD_LETTER,
+          first_id, "__lockdc_io/v1/outbox/retention/absent", 1, 32U, &error),
+      LC_OK);
   reclaimed = 0U;
   assert_int_equal(lc_outbox_test_reclaim_dead_letters(outbox, 7000, &reclaimed,
                                                        &next_due, &error),
@@ -10606,16 +11506,18 @@ test_pouch_dead_letter_retention_is_bounded_and_generation_safe(void **state) {
   seed_retained_dead_letter_outbox(
       client, config.ns, "__lockdc_io/v1/outbox/retention/bytes-first",
       first_id, &error);
-  assert_int_equal(lc_pouch_outbox_dead_letter_marker_write(
-                       client_handle->pouch, config.ns, first_id,
+  assert_int_equal(lc_pouch_outbox_retention_marker_write(
+                       client_handle->pouch, config.ns,
+                       LC_POUCH_RETENTION_DEAD_LETTER, first_id,
                        "__lockdc_io/v1/outbox/retention/bytes-first", 30000,
                        32U, &error),
                    LC_OK);
   seed_retained_dead_letter_outbox(client, config.ns,
                                    "__lockdc_io/v1/outbox/retention/bytes-next",
                                    second_id, &error);
-  assert_int_equal(lc_pouch_outbox_dead_letter_marker_write(
-                       client_handle->pouch, config.ns, second_id,
+  assert_int_equal(lc_pouch_outbox_retention_marker_write(
+                       client_handle->pouch, config.ns,
+                       LC_POUCH_RETENTION_DEAD_LETTER, second_id,
                        "__lockdc_io/v1/outbox/retention/bytes-next", 30000, 32U,
                        &error),
                    LC_OK);
@@ -10624,13 +11526,14 @@ test_pouch_dead_letter_retention_is_bounded_and_generation_safe(void **state) {
    * advances to the next marker without turning capacity control into an
    * inventory scan. */
   memset(&selected_marker, 0, sizeof(selected_marker));
-  assert_int_equal(lc_pouch_outbox_dead_letter_marker_take(
-                       client_handle->pouch, config.ns, first_id, 1000,
-                       SIZE_MAX, 1U, &selected_marker, &next_due, &error),
+  assert_int_equal(lc_pouch_outbox_retention_marker_take(
+                       client_handle->pouch, config.ns,
+                       LC_POUCH_RETENTION_DEAD_LETTER, first_id, 1000, SIZE_MAX,
+                       1U, &selected_marker, &next_due, &error),
                    LC_OK);
   assert_string_equal(selected_marker.marker_id, second_id);
-  lc_pouch_outbox_dead_letter_marker_cleanup(client_handle->pouch,
-                                             &selected_marker);
+  lc_pouch_outbox_retention_marker_cleanup(client_handle->pouch,
+                                           &selected_marker);
   reclaimed = 0U;
   next_due = 0;
   assert_int_equal(lc_outbox_test_reclaim_dead_letters(outbox, 1000, &reclaimed,
@@ -10657,11 +11560,11 @@ test_pouch_dead_letter_retention_is_bounded_and_generation_safe(void **state) {
   seed_retained_dead_letter_outbox(client, config.ns,
                                    "__lockdc_io/v1/outbox/retention/reopen",
                                    first_id, &error);
-  assert_int_equal(lc_pouch_outbox_dead_letter_marker_write(
-                       client_handle->pouch, config.ns, first_id,
-                       "__lockdc_io/v1/outbox/retention/reopen", 1, 32U,
-                       &error),
-                   LC_OK);
+  assert_int_equal(
+      lc_pouch_outbox_retention_marker_write(
+          client_handle->pouch, config.ns, LC_POUCH_RETENTION_DEAD_LETTER,
+          first_id, "__lockdc_io/v1/outbox/retention/reopen", 1, 32U, &error),
+      LC_OK);
   memset(&maintenance_options, 0, sizeof(maintenance_options));
   memset(&maintenance_result, 0, sizeof(maintenance_result));
   maintenance_options.ns = config.ns;
@@ -10792,8 +11695,21 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_command_attachment_failure_aborts_transaction),
       cmocka_unit_test(test_pouch_outbox_completion_evidence_is_bounded),
+      cmocka_unit_test(test_pouch_terminal_retention_public_transitions),
+      cmocka_unit_test(test_pouch_terminal_retention_count_optout_and_time),
+      cmocka_unit_test(test_pouch_terminal_retention_live_dispatcher_restart),
+      cmocka_unit_test(test_pouch_terminal_retention_provisional_inbox),
+      cmocka_unit_test(test_pouch_terminal_retention_selector_is_fair_and_lazy),
+      cmocka_unit_test(test_pouch_terminal_retention_invalid_configuration),
+      cmocka_unit_test(
+          test_pouch_terminal_retention_corrupt_marker_does_not_starve),
+      cmocka_unit_test(test_pouch_terminal_retention_filename_deadlines),
+      cmocka_unit_test(
+          test_pouch_terminal_retention_generation_busy_and_failure),
       cmocka_unit_test(
           test_pouch_dead_letter_retention_is_bounded_and_generation_safe),
+      cmocka_unit_test(
+          test_pouch_dead_letter_retention_corrupt_markers_do_not_starve),
       cmocka_unit_test(test_outbox_public_rejections_clear_handle_outputs),
       cmocka_unit_test(test_pouch_outbox_rejects_overflowing_deadlines),
       cmocka_unit_test(test_pouch_outbox_retry_uses_wide_timestamp_comparison),

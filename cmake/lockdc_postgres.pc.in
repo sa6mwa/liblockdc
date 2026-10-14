@@ -1,0 +1,10 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+Name: lockdc-postgres
+Description: Optional native PostgreSQL XA participant for liblockdc
+Version: @PROJECT_VERSION@
+Cflags: -I${includedir}
+Requires: lockdc cpkt-postgres
+Libs: -L${libdir} -llockdc_postgres

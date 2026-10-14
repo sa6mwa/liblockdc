@@ -738,7 +738,7 @@ int lc_engine_client_acquire(lc_engine_client *client,
   lc_engine_http_result result;
   lc_engine_acquire_request body_src;
   lonejson_field body_fields[7];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_header_pair headers[1];
   lc_engine_acquire_response_json response_json;
   size_t body_field_count;
@@ -930,7 +930,7 @@ int lc_engine_client_keepalive(lc_engine_client *client,
   lc_engine_buffer fence_value;
   lc_engine_keepalive_request body_src;
   lonejson_field body_fields[6];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_header_pair headers[2];
   lc_engine_http_result result;
   lc_engine_keepalive_response_json response_json;
@@ -1013,7 +1013,7 @@ int lc_engine_client_release(lc_engine_client *client,
   lc_engine_buffer fence_value;
   lc_engine_release_request body_src;
   lonejson_field body_fields[6];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_header_pair headers[2];
   lc_engine_http_result result;
   lc_engine_release_response_json response_json;
@@ -1324,7 +1324,7 @@ int lc_engine_client_mutate(lc_engine_client *client,
   lc_engine_buffer path;
   lc_engine_mutate_body_json body_src;
   lonejson_field body_fields[2];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_buffer fence_value;
   lc_engine_buffer version_value;
   lc_engine_header_pair headers[6];
@@ -1443,7 +1443,7 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
                                      lc_engine_error *error) {
   lc_engine_buffer path;
   lonejson_field body_fields[8];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_buffer fence_value;
   lc_engine_buffer version_value;
   lc_engine_header_pair headers[5];
@@ -1778,7 +1778,7 @@ int lc_engine_client_query(lc_engine_client *client,
   lc_engine_query_response_json parsed;
   lc_engine_query_body_json body_src;
   lonejson_field body_fields[6];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   lc_engine_json_reader_source selector_source;
   lc_engine_json_reader_source fields_source;
   lonejson_error lj_error;

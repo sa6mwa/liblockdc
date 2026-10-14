@@ -307,6 +307,11 @@ extern void *lc_pouch_test_after_queue_batch_message_build_context;
  * before its multi-key terminal decision exists. */
 extern lc_pouch_test_hook lc_pouch_test_before_txn_decision_hook;
 extern void *lc_pouch_test_before_txn_decision_context;
+/* Crash barrier between decision fencing and replacement owner publication. */
+extern lc_pouch_test_hook lc_pouch_test_before_xa_owner_write_hook;
+extern lc_pouch_test_hook lc_pouch_test_after_xa_retire_owner_hook;
+extern void *lc_pouch_test_after_xa_retire_owner_context;
+extern void *lc_pouch_test_before_xa_owner_write_context;
 /* Invoked immediately before Pouch reads a durable transaction replay record.
  * Tests use this to exercise indeterminate post-vote replay failures. */
 extern lc_pouch_test_hook lc_pouch_test_before_txn_replay_hook;
@@ -415,30 +420,45 @@ int lc_pouch_outbox_state_reclaim_marker_remove(lc_pouch *pouch, const char *ns,
 /* One durable Pouch-only outbox dead-letter retention work item. The marker
  * lives outside namespace log data, so dispatcher maintenance can reclaim an
  * exact terminal parent without querying or visiting the namespace. */
-typedef struct lc_pouch_outbox_dead_letter_marker {
+enum {
+  LC_POUCH_RETENTION_DEAD_LETTER = 0,
+  LC_POUCH_RETENTION_COMPLETED,
+  LC_POUCH_RETENTION_INBOX,
+  LC_POUCH_RETENTION_COMMAND,
+  LC_POUCH_RETENTION_KIND_COUNT
+};
+typedef struct lc_pouch_outbox_retention_marker {
   char *marker_id;
+  /* Advisory filename identity, even when a retention marker body is
+   * unreadable. Lets the maintenance turn advance without trusting or deleting
+   * that body.
+   */
+  char selected_id[LC_XID_STRING_SIZE];
   char *outbox_key;
   lc_pouch_unix_seconds due_at_unix;
   uint64_t retained_bytes;
   size_t queued_count;
   uint64_t queued_bytes;
-} lc_pouch_outbox_dead_letter_marker;
-int lc_pouch_outbox_dead_letter_marker_write(lc_pouch *pouch, const char *ns,
-                                             const char *marker_id,
-                                             const char *outbox_key,
-                                             lc_pouch_unix_seconds due_at_unix,
-                                             uint64_t retained_bytes,
-                                             lc_error *error);
-int lc_pouch_outbox_dead_letter_marker_take(
-    lc_pouch *pouch, const char *ns, const char *after_marker_id,
-    lc_pouch_unix_seconds now_unix, size_t max_count, uint64_t max_bytes,
-    lc_pouch_outbox_dead_letter_marker *out,
-    lc_pouch_unix_seconds *next_due_unix, lc_error *error);
-int lc_pouch_outbox_dead_letter_marker_remove(lc_pouch *pouch, const char *ns,
-                                              const char *marker_id,
-                                              lc_error *error);
-void lc_pouch_outbox_dead_letter_marker_cleanup(
-    lc_pouch *pouch, lc_pouch_outbox_dead_letter_marker *marker);
+} lc_pouch_outbox_retention_marker;
+int lc_pouch_outbox_retention_marker_write(lc_pouch *pouch, const char *ns,
+                                           int kind, const char *marker_id,
+                                           const char *outbox_key,
+                                           lc_pouch_unix_seconds due_at_unix,
+                                           uint64_t retained_bytes,
+                                           lc_error *error);
+int lc_pouch_outbox_retention_marker_take(lc_pouch *pouch, const char *ns,
+                                          int kind, const char *after_marker_id,
+                                          lc_pouch_unix_seconds now_unix,
+                                          size_t max_count, uint64_t max_bytes,
+                                          lc_pouch_outbox_retention_marker *out,
+                                          lc_pouch_unix_seconds *next_due_unix,
+                                          lc_error *error);
+int lc_pouch_outbox_retention_marker_remove(lc_pouch *pouch, const char *ns,
+                                            int kind, const char *marker_id,
+                                            lc_pouch_unix_seconds due_at_unix,
+                                            lc_error *error);
+void lc_pouch_outbox_retention_marker_cleanup(
+    lc_pouch *pouch, lc_pouch_outbox_retention_marker *marker);
 /* Measures current logical bytes for an outbox envelope and optional stateful
  * checkpoint, including their attachment records. */
 int lc_pouch_outbox_dead_letter_retained_bytes(lc_client_handle *client,

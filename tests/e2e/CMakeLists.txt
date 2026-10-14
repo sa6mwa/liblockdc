@@ -1,3 +1,14 @@
+add_test(NAME lc_e2e_scratch_setup
+  COMMAND ${CMAKE_COMMAND}
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -P ${CMAKE_SOURCE_DIR}/tests/e2e/prepare_scratch.cmake
+)
+set_tests_properties(lc_e2e_scratch_setup PROPERTIES
+  FIXTURES_SETUP lockdc_e2e_scratch
+  LABELS "e2e"
+  RUN_SERIAL TRUE
+)
+
 function(lc_add_e2e_shard target_name group_macro)
   add_executable(${target_name}
     test_lc_e2e.c
@@ -5,7 +16,9 @@ function(lc_add_e2e_shard target_name group_macro)
   )
   target_link_libraries(${target_name} PRIVATE ${lc_test_link_target} lc::cmocka)
   target_include_directories(${target_name} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
-  target_compile_definitions(${target_name} PRIVATE ${group_macro})
+  target_compile_definitions(${target_name} PRIVATE ${group_macro}
+    LC_E2E_TMP_ROOT="${CMAKE_SOURCE_DIR}/build/devenv/tmp"
+  )
   lc_configure_c_test_target(${target_name})
   if(LOCKDC_ENABLE_COVERAGE)
     target_compile_options(${target_name} PRIVATE
@@ -18,6 +31,7 @@ function(lc_add_e2e_shard target_name group_macro)
   add_test(NAME ${target_name} COMMAND ${target_name})
   set_tests_properties(${target_name} PROPERTIES
     LABELS "e2e"
+    FIXTURES_REQUIRED lockdc_e2e_scratch
     RUN_SERIAL TRUE
     TIMEOUT 300
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -242,6 +256,13 @@ lc_add_lua_e2e_test(
   "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_outbox.lua"
   PACKAGE_ONLY
   POUCH_ROOT "${CMAKE_BINARY_DIR}/lua-pouch-e2e/lc_e2e_lua_outbox"
+)
+
+lc_add_lua_e2e_test(
+  lc_e2e_lua_terminal_retention
+  "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_terminal_retention.lua"
+  PACKAGE_ONLY
+  POUCH_ROOT "${CMAKE_BINARY_DIR}/lua-pouch-e2e/lc_e2e_lua_terminal_retention"
 )
 
 if(TARGET lc_example_outbox_producer AND LOCKDC_LUA_RUNNABLE AND

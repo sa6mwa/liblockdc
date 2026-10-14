@@ -9,6 +9,7 @@ package.cpath = table.concat({
 local core = require("lockdc.core")
 
 assert(type(core.version_string()) == "string")
+assert(core.ERR_PENDING == 7)
 local xid = assert(core.xid_new())
 assert(type(xid) == "string" and #xid == 20)
 assert(xid:match("^[0-9a-v]+$") ~= nil)

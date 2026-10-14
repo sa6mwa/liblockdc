@@ -548,6 +548,43 @@ int lc_outbox_transaction_fail_command(lc_outbox_transaction *transaction,
                                        lc_error *error) {
   return transaction->fail_command(transaction, result, error);
 }
+const char *lc_outbox_transaction_id(lc_outbox_transaction *transaction) {
+  return transaction != NULL && transaction->id != NULL
+             ? transaction->id(transaction)
+             : NULL;
+}
+int lc_outbox_transaction_bind_xa(lc_outbox_transaction *transaction,
+                                  lc_xa_transaction *xa, lc_error *error) {
+  if (transaction == NULL || transaction->bind_xa == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "outbox XA binding receiver is missing", NULL, NULL,
+                        NULL);
+  return transaction->bind_xa(transaction, xa, error);
+}
+int lc_outbox_transaction_commit_start(lc_outbox_transaction *transaction,
+                                       int64_t deadline,
+                                       lc_xa_coordinator_operation **out,
+                                       lc_error *error) {
+  if (out != NULL)
+    *out = NULL;
+  if (transaction == NULL || transaction->commit_start == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "outbox XA commit receiver is missing", NULL, NULL,
+                        NULL);
+  return transaction->commit_start(transaction, deadline, out, error);
+}
+int lc_outbox_transaction_rollback_start(lc_outbox_transaction *transaction,
+                                         int64_t deadline,
+                                         lc_xa_coordinator_operation **out,
+                                         lc_error *error) {
+  if (out != NULL)
+    *out = NULL;
+  if (transaction == NULL || transaction->rollback_start == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "outbox XA rollback receiver is missing", NULL, NULL,
+                        NULL);
+  return transaction->rollback_start(transaction, deadline, out, error);
+}
 int lc_outbox_transaction_commit(lc_outbox_transaction *transaction,
                                  lc_outbox_commit_result *out,
                                  lc_error *error) {

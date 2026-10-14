@@ -39,6 +39,7 @@ if(LOCKDC_EXTERNAL_ROOT)
   add_test(NAME dependency_public_surface_test
     COMMAND "${CMAKE_COMMAND}"
       -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+      -DLOCKDC_BUILD_POSTGRES=${LOCKDC_BUILD_POSTGRES}
       -P "${CMAKE_SOURCE_DIR}/tests/dependency_public_surface_test.cmake"
   )
 endif()
@@ -266,6 +267,44 @@ if(LOCKDC_LUA_RUNNABLE)
   )
 endif()
 if(TARGET lockdc_lua_core AND LOCKDC_LUA_RUNNABLE)
+  add_test(NAME lua_core_package_test COMMAND ${CMAKE_COMMAND}
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR} -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+    -DLOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}
+    -P ${CMAKE_SOURCE_DIR}/tests/lua_core_package_test.cmake)
+  set_tests_properties(lua_core_package_test PROPERTIES
+    RUN_SERIAL TRUE TIMEOUT 180 LABELS "local;lua;packaging")
+  if(TARGET lockdc_lua_postgres)
+    add_test(NAME lua_postgres_package_test COMMAND ${CMAKE_COMMAND}
+      -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR} -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+      -DLOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}
+      -P ${CMAKE_SOURCE_DIR}/tests/lua_postgres_package_test.cmake)
+    set_tests_properties(lua_postgres_package_test PROPERTIES
+      RUN_SERIAL TRUE TIMEOUT 180 LABELS "local;lua;postgres;packaging")
+  endif()
+  add_executable(lc_lua_xa_test
+    integration/test_lua_xa.c
+    ${CMAKE_SOURCE_DIR}/src/lua/lockdc_lua.c
+    ${CMAKE_SOURCE_DIR}/src/lua/lockdc_xa_lua.c
+    ${CMAKE_SOURCE_DIR}/src/lua/lockdc_xa_resource_lua.c
+    ${CMAKE_SOURCE_DIR}/src/lua/lockdc_xa_provider_lua.c)
+  target_include_directories(lc_lua_xa_test PRIVATE ${CMAKE_SOURCE_DIR}/src/lua)
+  target_include_directories(lc_lua_xa_test SYSTEM PRIVATE ${LUA_INCLUDE_DIR})
+  target_link_libraries(lc_lua_xa_test PRIVATE lc_shared Lua::Lua
+    lc::curl_shared lc::openssl_ssl_shared lc::openssl_crypto_shared
+    lc::nghttp2_shared lc::pslog_shared lc::lonejson_shared
+    lc::liblql_shared lc::libssh2_shared lc::zlib_shared)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(lc_lua_xa_test PRIVATE "LINKER:--no-as-needed")
+  endif()
+  lc_configure_c_test_target(lc_lua_xa_test)
+  add_test(NAME lua_xa_test
+    COMMAND ${CMAKE_COMMAND}
+      -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+      -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+      -DLOCKDC_LUA_XA_BINARY=$<TARGET_FILE:lc_lua_xa_test>
+      -P ${CMAKE_SOURCE_DIR}/tests/lua_xa_test.cmake)
+  set_tests_properties(lua_xa_test PROPERTIES
+    RUN_SERIAL TRUE TIMEOUT 30 LABELS "unit;local;lua;xa")
   add_test(NAME lua_binding_core_smoke_test
     COMMAND "${LOCKDC_LUA_BIN}" "${CMAKE_SOURCE_DIR}/tests/lua/test_lockdc_core_smoke.lua"
   )

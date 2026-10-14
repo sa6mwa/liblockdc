@@ -16,6 +16,10 @@ case "$preset" in
     ;;
 esac
 
+if [ "$preset" = fuzz ]; then
+  "$script_dir/cpkt-aflpp.sh" ensure
+fi
+
 cmake --preset "$preset"
 if [ "$#" -gt 0 ]; then
   cmake --build --preset "$preset" --target "$@"

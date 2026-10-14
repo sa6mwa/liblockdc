@@ -16,8 +16,8 @@ function(lc_configure_example_target target)
   target_link_libraries(${target} PRIVATE ${lc_example_link_target} ${lc_example_pslog_target})
   lc_configure_c_target(${target})
   target_compile_definitions(${target} PRIVATE
-    LC_EXAMPLE_DEFAULT_CLIENT_PEM="${PROJECT_SOURCE_DIR}/devenv/volumes/lockd-disk-a-config/client.pem"
-    LC_EXAMPLE_DEFAULT_FETCH_CA="${PROJECT_SOURCE_DIR}/devenv/volumes/lockd-disk-a-config/ca.pem"
+    LC_EXAMPLE_DEFAULT_CLIENT_PEM="${PROJECT_SOURCE_DIR}/build/devenv/credentials/disk/client.pem"
+    LC_EXAMPLE_DEFAULT_FETCH_CA="${PROJECT_SOURCE_DIR}/build/devenv/credentials/disk/ca.pem"
     LC_EXAMPLE_DEFAULT_INPUT_JSON="${PROJECT_SOURCE_DIR}/examples/data/state_stream_input.json"
     LC_EXAMPLE_DEFAULT_FETCH_URL="file://${PROJECT_SOURCE_DIR}/examples/data/state_stream_input.json"
   )
@@ -27,7 +27,7 @@ function(lc_configure_minimal_example_target target)
   target_link_libraries(${target} PRIVATE ${lc_example_link_target})
   lc_configure_c_target(${target})
   target_compile_definitions(${target} PRIVATE
-    LC_EXAMPLE_DEFAULT_CLIENT_PEM="${PROJECT_SOURCE_DIR}/devenv/volumes/lockd-disk-a-config/client.pem"
+    LC_EXAMPLE_DEFAULT_CLIENT_PEM="${PROJECT_SOURCE_DIR}/build/devenv/credentials/disk/client.pem"
   )
 endfunction()
 

@@ -8,26 +8,11 @@ endif()
 
 include("${LOCKDC_ROOT}/tests/bootlin_runtime_test_support.cmake")
 
-function(lockdc_import_cache_value var_name)
-    if(DEFINED ${var_name} AND NOT "${${var_name}}" STREQUAL "")
-        return()
-    endif()
-
-    file(STRINGS "${LOCKDC_BINARY_DIR}/CMakeCache.txt" cache_line
-        REGEX "^${var_name}(:[^=]+)?="
-        LIMIT_COUNT 1)
-    if(cache_line)
-        string(REGEX REPLACE "^[^=]*=" "" cache_value "${cache_line}")
-        set(${var_name} "${cache_value}" PARENT_SCOPE)
-    endif()
-endfunction()
-
-lockdc_import_cache_value(CMAKE_C_COMPILER)
-lockdc_import_cache_value(CMAKE_TOOLCHAIN_FILE)
-lockdc_import_cache_value(CMAKE_LINKER)
-lockdc_import_cache_value(CMAKE_EXE_LINKER_FLAGS)
-lockdc_import_cache_value(CMAKE_BUILD_TYPE)
-lockdc_import_cache_value(CMAKE_SYSROOT)
+foreach(cache_key CMAKE_C_COMPILER CMAKE_TOOLCHAIN_FILE CMAKE_LINKER
+        CMAKE_EXE_LINKER_FLAGS CMAKE_OSX_SYSROOT CMAKE_OSX_DEPLOYMENT_TARGET
+        CMAKE_BUILD_TYPE CMAKE_SYSROOT)
+    lockdc_import_cmake_cache_value("${LOCKDC_BINARY_DIR}" ${cache_key})
+endforeach()
 
 if(NOT DEFINED CMAKE_C_COMPILER OR CMAKE_C_COMPILER STREQUAL "")
     message(FATAL_ERROR "CMAKE_C_COMPILER is required")
@@ -574,7 +559,7 @@ int lockdc_release_tarball_touch_lease_api(lc_lease *lease, lc_source *src,
 
 set(lockdc_consumer_prefix_path
     "${release_prefix}"
-    "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install"
+    "${LOCKDC_EXTERNAL_ROOT}/cpkt/install"
     "${LOCKDC_EXTERNAL_ROOT}/pslog/install"
     "${LOCKDC_EXTERNAL_ROOT}/lonejson/install"
     "${LOCKDC_EXTERNAL_ROOT}/liblql/install")
@@ -586,11 +571,11 @@ set(lockdc_consumer_configure_args
         "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"
         "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
         "-DCMAKE_PREFIX_PATH=${lockdc_consumer_prefix_path_arg}"
-        "-DCURL_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/CURL"
-        "-DOpenSSL_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/OpenSSL"
-        "-DZLIB_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/zlib"
-        "-Dnghttp2_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/nghttp2"
-        "-DLibssh2_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/libssh2"
+        "-DCURL_DIR=${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/CURL"
+        "-DOpenSSL_DIR=${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/OpenSSL"
+        "-DZLIB_DIR=${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/zlib"
+        "-Dnghttp2_DIR=${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/nghttp2"
+        "-DLibssh2_DIR=${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/libssh2"
         "-Dpslog_DIR=${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/cmake/pslog"
         "-Dlonejson_DIR=${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/cmake/lonejson"
         "-Dliblql_DIR=${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib/cmake/liblql"
@@ -602,8 +587,7 @@ set(lockdc_consumer_configure_args
         "-DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}"
         "-DLOCKDC_BOOTLIN_RUNTIME_LOADER=${lockdc_bootlin_runtime_loader}"
         "-DLOCKDC_BOOTLIN_RUNTIME_DIRS=${lockdc_bootlin_runtime_dirs_arg}")
-if(LOCKDC_TARGET_ID MATCHES "apple-darwin$"
-        AND DEFINED CMAKE_TOOLCHAIN_FILE
+if(DEFINED CMAKE_TOOLCHAIN_FILE
         AND NOT "${CMAKE_TOOLCHAIN_FILE}" STREQUAL "")
     list(APPEND lockdc_consumer_configure_args
         "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}")
@@ -660,7 +644,7 @@ endif()
 
 set(lockdc_pkgconfig_path_entries
     "${release_prefix}/lib/pkgconfig"
-    "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/pkgconfig"
+    "${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/pkgconfig"
     "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/pkgconfig"
     "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/pkgconfig"
     "${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib/pkgconfig")
@@ -707,7 +691,12 @@ endif()
 if(LOCKDC_TARGET_ID MATCHES "apple-darwin$"
         AND DEFINED CMAKE_LINKER
         AND NOT "${CMAKE_LINKER}" STREQUAL "")
+    # Supply one linker selection and the same SDK/minimum as the CMake
+    # consumer; a shell-quoted cached selection is not a second input file.
+    list(FILTER lockdc_direct_link_flags EXCLUDE REGEX "^--ld-path=")
     list(PREPEND lockdc_direct_link_flags "--ld-path=${CMAKE_LINKER}")
+    list(APPEND lockdc_direct_link_flags -isysroot "${CMAKE_OSX_SYSROOT}"
+        "-mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
 endif()
 
 set(lockdc_pkgconfig_static_consumer "${consumer_bin_dir}/release_tarball_pkgconfig_static")

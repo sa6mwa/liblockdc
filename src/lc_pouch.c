@@ -1491,7 +1491,7 @@ cleanup:
   return rc;
 }
 
-/* Dead-letter retention has its own small control directory.  It is
+/* Each outbox retention family has its own small control directory. It is
  * deliberately outside the namespace log so reclaim never needs the query
  * engine, a namespace visit, or a derived-index warmup. */
 #define LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MAGIC "LDR1"
@@ -1520,26 +1520,29 @@ lc_pouch_outbox_dead_letter_reclaim_u64_read(const unsigned char *bytes) {
   return value;
 }
 
-static int lc_pouch_outbox_dead_letter_reclaim_directory(lc_pouch *pouch,
-                                                         const char *ns,
-                                                         int create, char **out,
-                                                         lc_error *error) {
+static int lc_pouch_outbox_retention_directory(lc_pouch *pouch, const char *ns,
+                                               int kind, int create, char **out,
+                                               lc_error *error) {
+  static const char *const names[] = {
+      "outbox-dead-letter-reclaim", "outbox-completed-reclaim",
+      "outbox-inbox-reclaim", "outbox-command-reclaim"};
   char *control;
   char *root;
   char *leaf;
   char *directory;
   int rc;
 
-  if (pouch == NULL || ns == NULL || ns[0] == '\0' || out == NULL) {
+  if (kind < 0 || kind >= LC_POUCH_RETENTION_KIND_COUNT || pouch == NULL ||
+      ns == NULL || ns[0] == '\0' || out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch dead-letter retention requires namespace", NULL,
-                        NULL, "pouch");
+                        "pouch outbox retention requires namespace", NULL, NULL,
+                        "pouch");
   }
   *out = NULL;
   control = lc_pouch_path_join(&pouch->allocator, pouch->root_path, ".lockd");
-  root = control != NULL ? lc_pouch_path_join(&pouch->allocator, control,
-                                              "outbox-dead-letter-reclaim")
-                         : NULL;
+  root = control != NULL
+             ? lc_pouch_path_join(&pouch->allocator, control, names[kind])
+             : NULL;
   leaf = lc_pouch_path_escape_name(&pouch->allocator, ns);
   directory = root != NULL && leaf != NULL
                   ? lc_pouch_path_join(&pouch->allocator, root, leaf)
@@ -1550,8 +1553,8 @@ static int lc_pouch_outbox_dead_letter_reclaim_directory(lc_pouch *pouch,
     lc_free_with_allocator(&pouch->allocator, leaf);
     lc_free_with_allocator(&pouch->allocator, directory);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch dead-letter retention path",
-                        NULL, NULL, "pouch");
+                        "failed to allocate pouch outbox retention path", NULL,
+                        NULL, "pouch");
   }
   rc = LC_OK;
   if (create) {
@@ -1560,29 +1563,27 @@ static int lc_pouch_outbox_dead_letter_reclaim_directory(lc_pouch *pouch,
     if (rc == LC_OK) {
       rc = lc_pouch_path_fsync_directory(
           pouch->root_path,
-          "failed to sync pouch root dead-letter retention directory", error);
+          "failed to sync pouch root outbox retention directory", error);
     }
     if (rc == LC_OK) {
       rc = lc_pouch_path_ensure_directory(
-          root, "failed to create pouch dead-letter retention directory",
-          error);
+          root, "failed to create pouch outbox retention directory", error);
     }
     if (rc == LC_OK) {
       rc = lc_pouch_path_fsync_directory(
           control,
-          "failed to sync pouch dead-letter retention control "
+          "failed to sync pouch outbox retention control "
           "directory",
           error);
     }
     if (rc == LC_OK) {
       rc = lc_pouch_path_ensure_directory(
-          directory, "failed to create pouch dead-letter namespace directory",
-          error);
+          directory,
+          "failed to create pouch outbox retention namespace directory", error);
     }
     if (rc == LC_OK) {
       rc = lc_pouch_path_fsync_directory(
-          root, "failed to sync pouch dead-letter retention namespace root",
-          error);
+          root, "failed to sync pouch outbox retention namespace root", error);
     }
   }
   lc_free_with_allocator(&pouch->allocator, control);
@@ -1596,29 +1597,49 @@ static int lc_pouch_outbox_dead_letter_reclaim_directory(lc_pouch *pouch,
   return LC_OK;
 }
 
-static int lc_pouch_outbox_dead_letter_marker_path(
-    lc_pouch *pouch, const char *ns, const char *marker_id, int create,
-    char **directory_out, char **path_out, lc_error *error) {
+static int lc_pouch_outbox_retention_marker_path(
+    lc_pouch *pouch, const char *ns, int kind, const char *marker_id,
+    lc_pouch_unix_seconds due, int create, char **directory_out,
+    char **path_out, lc_error *error) {
+  char filename[17U + LC_XID_STRING_SIZE];
+  unsigned int index;
+  uint64_t deadline;
   char *directory;
   char *path;
   int rc;
 
   if (marker_id == NULL || !lc_xid_is_valid(marker_id)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "invalid pouch dead-letter retention marker", NULL,
-                        NULL, "pouch");
+                        "invalid pouch outbox retention marker", NULL, NULL,
+                        "pouch");
   }
   *directory_out = NULL;
   *path_out = NULL;
   directory = NULL;
   path = NULL;
-  rc = lc_pouch_outbox_dead_letter_reclaim_directory(pouch, ns, create,
-                                                     &directory, error);
+  rc = lc_pouch_outbox_retention_directory(pouch, ns, kind, create, &directory,
+                                           error);
   if (rc == LC_OK) {
+    if (kind != LC_POUCH_RETENTION_DEAD_LETTER) {
+      if (due <= 0) {
+        lc_free_with_allocator(&pouch->allocator, directory);
+        return lc_error_set(error, LC_ERR_INVALID, 0L,
+                            "terminal retention requires a positive deadline",
+                            NULL, NULL, "pouch");
+      }
+      deadline = (uint64_t)due;
+      for (index = 0U; index < 16U; ++index) {
+        filename[15U - index] = "0123456789abcdef"[deadline & 15U];
+        deadline >>= 4U;
+      }
+      filename[16] = '-';
+      strcpy(filename + 17U, marker_id);
+      marker_id = filename;
+    }
     path = lc_pouch_path_join(&pouch->allocator, directory, marker_id);
     if (path == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch dead-letter retention marker",
+                        "failed to allocate pouch outbox retention marker",
                         NULL, NULL, "pouch");
     }
   }
@@ -1632,8 +1653,8 @@ static int lc_pouch_outbox_dead_letter_marker_path(
   return LC_OK;
 }
 
-void lc_pouch_outbox_dead_letter_marker_cleanup(
-    lc_pouch *pouch, lc_pouch_outbox_dead_letter_marker *marker) {
+void lc_pouch_outbox_retention_marker_cleanup(
+    lc_pouch *pouch, lc_pouch_outbox_retention_marker *marker) {
   if (pouch == NULL || marker == NULL)
     return;
   lc_free_with_allocator(&pouch->allocator, marker->marker_id);
@@ -1641,14 +1662,14 @@ void lc_pouch_outbox_dead_letter_marker_cleanup(
   memset(marker, 0, sizeof(*marker));
 }
 
-static int lc_pouch_outbox_dead_letter_marker_clone(
-    lc_pouch *pouch, const lc_pouch_outbox_dead_letter_marker *source,
-    lc_pouch_outbox_dead_letter_marker *out, lc_error *error) {
+static int lc_pouch_outbox_retention_marker_clone(
+    lc_pouch *pouch, const lc_pouch_outbox_retention_marker *source,
+    lc_pouch_outbox_retention_marker *out, lc_error *error) {
   if (pouch == NULL || source == NULL || out == NULL ||
       source->marker_id == NULL || source->outbox_key == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "invalid pouch dead-letter retention marker", NULL,
-                        NULL, "pouch");
+                        "invalid pouch outbox retention marker", NULL, NULL,
+                        "pouch");
   }
   memset(out, 0, sizeof(*out));
   out->marker_id =
@@ -1656,34 +1677,36 @@ static int lc_pouch_outbox_dead_letter_marker_clone(
   out->outbox_key =
       lc_strdup_with_allocator(&pouch->allocator, source->outbox_key);
   if (out->marker_id == NULL || out->outbox_key == NULL) {
-    lc_pouch_outbox_dead_letter_marker_cleanup(pouch, out);
+    lc_pouch_outbox_retention_marker_cleanup(pouch, out);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to copy pouch dead-letter retention marker",
-                        NULL, NULL, "pouch");
+                        "failed to copy pouch outbox retention marker", NULL,
+                        NULL, "pouch");
   }
   out->due_at_unix = source->due_at_unix;
   out->retained_bytes = source->retained_bytes;
   return LC_OK;
 }
 
-static int lc_pouch_outbox_dead_letter_marker_keep_lexical_first(
-    lc_pouch *pouch, const lc_pouch_outbox_dead_letter_marker *candidate,
-    lc_pouch_outbox_dead_letter_marker *selected, lc_error *error) {
+static int lc_pouch_outbox_retention_marker_keep_lexical_first(
+    lc_pouch *pouch, const lc_pouch_outbox_retention_marker *candidate,
+    lc_pouch_outbox_retention_marker *selected, lc_error *error) {
   int rc;
 
   if (selected->marker_id != NULL &&
       strcmp(selected->marker_id, candidate->marker_id) <= 0) {
     return LC_OK;
   }
-  lc_pouch_outbox_dead_letter_marker_cleanup(pouch, selected);
-  rc = lc_pouch_outbox_dead_letter_marker_clone(pouch, candidate, selected,
-                                                error);
+  lc_pouch_outbox_retention_marker_cleanup(pouch, selected);
+  rc =
+      lc_pouch_outbox_retention_marker_clone(pouch, candidate, selected, error);
   return rc;
 }
 
-static int lc_pouch_outbox_dead_letter_marker_read(
-    lc_pouch *pouch, const char *directory, const char *marker_id,
-    lc_pouch_outbox_dead_letter_marker *out, lc_error *error) {
+static int lc_pouch_outbox_retention_marker_read(
+    lc_pouch *pouch, const char *directory, const char *filename,
+    lc_pouch_outbox_retention_marker *out, lc_error *error) {
+  const char *marker_id =
+      strlen(filename) == LC_XID_STRING_SIZE - 1U ? filename : filename + 17U;
   unsigned char *contents;
   char *path;
   struct stat st;
@@ -1696,23 +1719,23 @@ static int lc_pouch_outbox_dead_letter_marker_read(
   if (pouch == NULL || directory == NULL || marker_id == NULL || out == NULL ||
       !lc_xid_is_valid(marker_id)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "invalid pouch dead-letter retention marker", NULL,
-                        NULL, "pouch");
+                        "invalid pouch outbox retention marker", NULL, NULL,
+                        "pouch");
   }
   memset(out, 0, sizeof(*out));
   contents = NULL;
-  path = lc_pouch_path_join(&pouch->allocator, directory, marker_id);
+  path = lc_pouch_path_join(&pouch->allocator, directory, filename);
   fd = -1;
   rc = path == NULL
            ? lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to allocate pouch dead-letter retention path",
+                          "failed to allocate pouch outbox retention path",
                           NULL, NULL, "pouch")
            : LC_OK;
   if (rc == LC_OK && lstat(path, &st) != 0) {
     rc = errno == ENOENT
              ? LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MISSING
              : lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                            "failed to inspect pouch dead-letter retention "
+                            "failed to inspect pouch outbox retention "
                             "marker",
                             strerror(errno), path, "pouch");
   }
@@ -1721,7 +1744,7 @@ static int lc_pouch_outbox_dead_letter_marker_read(
        st.st_size < (off_t)LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_HEADER_BYTES ||
        st.st_size > (off_t)LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MAX_BYTES)) {
     rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                      "invalid pouch dead-letter retention marker", NULL, NULL,
+                      "invalid pouch outbox retention marker", NULL, NULL,
                       "pouch");
   }
   if (rc == LC_OK) {
@@ -1729,8 +1752,8 @@ static int lc_pouch_outbox_dead_letter_marker_read(
                                                         (size_t)st.st_size);
     if (contents == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to read pouch dead-letter retention marker",
-                        NULL, NULL, "pouch");
+                        "failed to read pouch outbox retention marker", NULL,
+                        NULL, "pouch");
     }
   }
   if (rc == LC_OK) {
@@ -1738,10 +1761,9 @@ static int lc_pouch_outbox_dead_letter_marker_read(
     if (fd < 0) {
       rc = errno == ENOENT
                ? LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MISSING
-               : lc_error_set(
-                     error, LC_ERR_TRANSPORT, 0L,
-                     "failed to open pouch dead-letter retention marker",
-                     strerror(errno), path, "pouch");
+               : lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                              "failed to open pouch outbox retention marker",
+                              strerror(errno), path, "pouch");
     }
   }
   if (rc == LC_OK) {
@@ -1750,14 +1772,14 @@ static int lc_pouch_outbox_dead_letter_marker_read(
   }
   if (fd >= 0 && close(fd) != 0 && rc == LC_OK) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                      "failed to close pouch dead-letter retention marker",
+                      "failed to close pouch outbox retention marker",
                       strerror(errno), path, "pouch");
   }
   fd = -1;
   if (rc == LC_OK &&
       memcmp(contents, LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MAGIC, 4U) != 0) {
     rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                      "invalid pouch dead-letter retention marker", NULL, NULL,
+                      "invalid pouch outbox retention marker", NULL, NULL,
                       "pouch");
   }
   due_bits = rc == LC_OK
@@ -1775,7 +1797,7 @@ static int lc_pouch_outbox_dead_letter_marker_read(
            (unsigned long)((size_t)st.st_size -
                            LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_HEADER_BYTES))) {
     rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                      "invalid pouch dead-letter retention marker", NULL, NULL,
+                      "invalid pouch outbox retention marker", NULL, NULL,
                       "pouch");
   }
   if (rc == LC_OK) {
@@ -1784,8 +1806,8 @@ static int lc_pouch_outbox_dead_letter_marker_read(
                                                       (size_t)key_length + 1U);
     if (out->marker_id == NULL || out->outbox_key == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to copy pouch dead-letter retention marker",
-                        NULL, NULL, "pouch");
+                        "failed to copy pouch outbox retention marker", NULL,
+                        NULL, "pouch");
     }
   }
   if (rc == LC_OK) {
@@ -1797,23 +1819,23 @@ static int lc_pouch_outbox_dead_letter_marker_read(
     out->retained_bytes = retained_bytes;
     if (out->due_at_unix <= 0 || out->outbox_key[0] == '\0') {
       rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                        "invalid pouch dead-letter retention marker", NULL,
-                        NULL, "pouch");
+                        "invalid pouch outbox retention marker", NULL, NULL,
+                        "pouch");
     }
   }
   if (rc != LC_OK)
-    lc_pouch_outbox_dead_letter_marker_cleanup(pouch, out);
+    lc_pouch_outbox_retention_marker_cleanup(pouch, out);
   lc_free_with_allocator(&pouch->allocator, contents);
   lc_free_with_allocator(&pouch->allocator, path);
   return rc;
 }
 
-int lc_pouch_outbox_dead_letter_marker_write(lc_pouch *pouch, const char *ns,
-                                             const char *marker_id,
-                                             const char *outbox_key,
-                                             lc_pouch_unix_seconds due_at_unix,
-                                             uint64_t retained_bytes,
-                                             lc_error *error) {
+int lc_pouch_outbox_retention_marker_write(lc_pouch *pouch, const char *ns,
+                                           int kind, const char *marker_id,
+                                           const char *outbox_key,
+                                           lc_pouch_unix_seconds due_at_unix,
+                                           uint64_t retained_bytes,
+                                           lc_error *error) {
   unsigned char *contents;
   char *directory;
   char *path;
@@ -1827,7 +1849,7 @@ int lc_pouch_outbox_dead_letter_marker_write(lc_pouch *pouch, const char *ns,
 
   if (outbox_key == NULL || outbox_key[0] == '\0' || due_at_unix <= 0) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch dead-letter retention marker requires key and "
+                        "pouch outbox retention marker requires key and "
                         "deadline",
                         NULL, NULL, "pouch");
   }
@@ -1836,7 +1858,7 @@ int lc_pouch_outbox_dead_letter_marker_write(lc_pouch *pouch, const char *ns,
       key_length > LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MAX_BYTES -
                        LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_HEADER_BYTES) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch dead-letter retention marker is too large", NULL,
+                        "pouch outbox retention marker is too large", NULL,
                         NULL, "pouch");
   }
   directory = NULL;
@@ -1844,8 +1866,8 @@ int lc_pouch_outbox_dead_letter_marker_write(lc_pouch *pouch, const char *ns,
   temporary = NULL;
   contents = NULL;
   fd = -1;
-  rc = lc_pouch_outbox_dead_letter_marker_path(pouch, ns, marker_id, 1,
-                                               &directory, &path, error);
+  rc = lc_pouch_outbox_retention_marker_path(
+      pouch, ns, kind, marker_id, due_at_unix, 1, &directory, &path, error);
   contents_length =
       LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_HEADER_BYTES + key_length;
   if (rc == LC_OK) {
@@ -1853,7 +1875,7 @@ int lc_pouch_outbox_dead_letter_marker_write(lc_pouch *pouch, const char *ns,
                                                         contents_length);
     if (contents == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch dead-letter retention marker",
+                        "failed to allocate pouch outbox retention marker",
                         NULL, NULL, "pouch");
     }
   }
@@ -1871,10 +1893,9 @@ int lc_pouch_outbox_dead_letter_marker_write(lc_pouch *pouch, const char *ns,
     temporary =
         (char *)lc_alloc_with_allocator(&pouch->allocator, temporary_length);
     if (temporary == NULL) {
-      rc = lc_error_set(
-          error, LC_ERR_NOMEM, 0L,
-          "failed to allocate pouch dead-letter retention temporary", NULL,
-          NULL, "pouch");
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch outbox retention temporary",
+                        NULL, NULL, "pouch");
     }
   }
   for (attempt = 0UL; rc == LC_OK && attempt < 32UL; ++attempt) {
@@ -1885,15 +1906,14 @@ int lc_pouch_outbox_dead_letter_marker_write(lc_pouch *pouch, const char *ns,
       break;
     if (errno != EEXIST) {
       rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to create pouch dead-letter retention marker",
+                        "failed to create pouch outbox retention marker",
                         strerror(errno), temporary, "pouch");
     }
   }
   if (rc == LC_OK && fd < 0) {
-    rc =
-        lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                     "failed to allocate pouch dead-letter retention temporary",
-                     NULL, NULL, "pouch");
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to allocate pouch outbox retention temporary",
+                      NULL, NULL, "pouch");
   }
   if (rc == LC_OK) {
     rc = lc_pouch_outbox_state_reclaim_write_all(fd, contents, contents_length,
@@ -1901,24 +1921,23 @@ int lc_pouch_outbox_dead_letter_marker_write(lc_pouch *pouch, const char *ns,
   }
   if (rc == LC_OK && fsync(fd) != 0) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                      "failed to sync pouch dead-letter retention marker",
+                      "failed to sync pouch outbox retention marker",
                       strerror(errno), temporary, "pouch");
   }
   if (fd >= 0 && close(fd) != 0 && rc == LC_OK) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                      "failed to close pouch dead-letter retention marker",
+                      "failed to close pouch outbox retention marker",
                       strerror(errno), temporary, "pouch");
   }
   fd = -1;
   if (rc == LC_OK && rename(temporary, path) != 0) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                      "failed to publish pouch dead-letter retention marker",
+                      "failed to publish pouch outbox retention marker",
                       strerror(errno), path, "pouch");
   }
   if (rc == LC_OK) {
     rc = lc_pouch_path_fsync_directory(
-        directory, "failed to sync pouch dead-letter retention directory",
-        error);
+        directory, "failed to sync pouch outbox retention directory", error);
   }
   if (rc != LC_OK && temporary != NULL)
     (void)unlink(temporary);
@@ -1929,22 +1948,183 @@ int lc_pouch_outbox_dead_letter_marker_write(lc_pouch *pouch, const char *ns,
   return rc;
 }
 
-int lc_pouch_outbox_dead_letter_marker_take(
-    lc_pouch *pouch, const char *ns, const char *after_marker_id,
-    lc_pouch_unix_seconds now_unix, size_t max_count, uint64_t max_bytes,
-    lc_pouch_outbox_dead_letter_marker *out,
-    lc_pouch_unix_seconds *next_due_unix, lc_error *error) {
+static int lc_pouch_terminal_retention_filename(const char *name,
+                                                lc_pouch_unix_seconds *due) {
+  static const char hex[] = "0123456789abcdef";
+  uint64_t value;
+  unsigned int index;
+  if (strlen(name) != 17U + LC_XID_STRING_SIZE - 1U || name[16] != '-' ||
+      !lc_xid_is_valid(name + 17U))
+    return 0;
+  value = 0U;
+  for (index = 0U; index < 16U; ++index) {
+    const char *digit = strchr(hex, name[index]);
+    if (digit == NULL)
+      return 0;
+    value = (value << 4U) | (uint64_t)(digit - hex);
+  }
+  if (value == 0U || value > (uint64_t)LC_I64_MAX)
+    return 0;
+  *due = (lc_pouch_unix_seconds)value;
+  return 1;
+}
+
+static void lc_pouch_terminal_retention_keep_name(char *selected,
+                                                  const char *candidate) {
+  if (selected[0] == '\0' || strcmp(candidate + 17U, selected + 17U) < 0)
+    strcpy(selected, candidate);
+}
+
+/* Directory names provide deadlines and counts without parsing retained
+ * envelopes or warming any index. Keep a constant number of candidate names,
+ * and read exactly one selected marker body. The turn cursor ensures that a
+ * busy parent cannot indefinitely starve another writer's expired receipt. */
+static int lc_pouch_terminal_retention_take(
+    lc_pouch *pouch, const char *ns, int kind, const char *after,
+    lc_pouch_unix_seconds now, size_t max_count,
+    lc_pouch_outbox_retention_marker *out, lc_pouch_unix_seconds *next_due,
+    lc_error *error) {
+  char first[17U + LC_XID_STRING_SIZE];
+  char later[17U + LC_XID_STRING_SIZE];
+  char other[17U + LC_XID_STRING_SIZE];
+  char due_first[17U + LC_XID_STRING_SIZE];
+  char due_later[17U + LC_XID_STRING_SIZE];
+  char *directory;
+  const char *selected;
+  DIR *dir;
+  struct dirent *entry;
+  size_t count;
+  int rc;
+  first[0] = later[0] = other[0] = due_first[0] = due_later[0] = '\0';
+  count = 0U;
+  directory = NULL;
+  rc = lc_pouch_outbox_retention_directory(pouch, ns, kind, 0, &directory,
+                                           error);
+  if (rc != LC_OK)
+    return rc;
+  dir = opendir(directory);
+  if (dir == NULL) {
+    rc = errno == ENOENT
+             ? LC_OK
+             : lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                            "failed to open terminal retention directory",
+                            strerror(errno), directory, "pouch");
+    goto cleanup;
+  }
+  errno = 0;
+  while ((entry = readdir(dir)) != NULL) {
+    lc_pouch_unix_seconds due;
+    const char *id;
+    if (!lc_pouch_terminal_retention_filename(entry->d_name, &due))
+      continue;
+    id = entry->d_name + 17U;
+    if (count != SIZE_MAX)
+      ++count;
+    if (*next_due == 0 || due < *next_due)
+      *next_due = due;
+    lc_pouch_terminal_retention_keep_name(first, entry->d_name);
+    if (after != NULL && strcmp(id, after) > 0)
+      lc_pouch_terminal_retention_keep_name(later, entry->d_name);
+    if (after == NULL || strcmp(id, after) != 0)
+      lc_pouch_terminal_retention_keep_name(other, entry->d_name);
+    if (due <= now) {
+      lc_pouch_terminal_retention_keep_name(due_first, entry->d_name);
+      if (after != NULL && strcmp(id, after) > 0)
+        lc_pouch_terminal_retention_keep_name(due_later, entry->d_name);
+    }
+  }
+  if (errno != 0)
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to read terminal retention directory",
+                      strerror(errno), directory, "pouch");
+  if (closedir(dir) != 0 && rc == LC_OK)
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to close terminal retention directory",
+                      strerror(errno), directory, "pouch");
+  if (rc != LC_OK)
+    goto cleanup;
+  selected = max_count != SIZE_MAX && count > max_count
+                 ? (later[0] != '\0'   ? later
+                    : other[0] != '\0' ? other
+                                       : first)
+                 : (due_later[0] != '\0' ? due_later : due_first);
+  if (selected[0] != '\0') {
+    lc_pouch_unix_seconds expected_due = 0;
+    lc_pouch_terminal_retention_filename(selected, &expected_due);
+    rc = lc_pouch_outbox_retention_marker_read(pouch, directory, selected, out,
+                                               error);
+    if (rc == LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MISSING) {
+      lc_error_cleanup(error);
+      lc_error_init(error);
+      rc = LC_OK;
+    } else if (rc == LC_OK && out->due_at_unix != expected_due) {
+      lc_pouch_outbox_retention_marker_cleanup(pouch, out);
+      rc =
+          lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                       "terminal retention filename and marker deadline differ",
+                       NULL, selected, "pouch");
+    }
+    /* A body failure retains durable work but must not pin the advisory turn
+     * forever. The validated filename supplies identity only, never a parent
+     * key or authority to delete a receipt. */
+    strcpy(out->selected_id, selected + 17U);
+    out->queued_count = count;
+  }
+cleanup:
+  lc_free_with_allocator(&pouch->allocator, directory);
+  return rc;
+}
+
+/* Order identities within one advisory turn, wrapping only after all lexical
+ * successors. An unreadable body participates by filename without supplying
+ * a parent key or deletion authority. */
+static int lc_pouch_retention_turn_precedes(const char *candidate,
+                                            const char *selected,
+                                            const char *after) {
+  if (selected == NULL || selected[0] == '\0')
+    return 1;
+  if (after != NULL) {
+    int candidate_after = strcmp(candidate, after) > 0;
+    int selected_after = strcmp(selected, after) > 0;
+    if (candidate_after != selected_after)
+      return candidate_after;
+  }
+  return strcmp(candidate, selected) < 0;
+}
+
+static int lc_pouch_retention_marker_failure_turn(
+    lc_pouch *pouch, lc_pouch_outbox_retention_marker *marker,
+    const char *filename, const char *after, char *failed_name, int rc,
+    lc_error *error) {
+  if (rc != LC_ERR_PROTOCOL && rc != LC_ERR_TRANSPORT)
+    return rc;
+  if (lc_pouch_retention_turn_precedes(filename, failed_name, after))
+    strcpy(failed_name, filename);
+  lc_pouch_outbox_retention_marker_cleanup(pouch, marker);
+  lc_error_cleanup(error);
+  lc_error_init(error);
+  return LC_OK;
+}
+
+int lc_pouch_outbox_retention_marker_take(lc_pouch *pouch, const char *ns,
+                                          int kind, const char *after_marker_id,
+                                          lc_pouch_unix_seconds now_unix,
+                                          size_t max_count, uint64_t max_bytes,
+                                          lc_pouch_outbox_retention_marker *out,
+                                          lc_pouch_unix_seconds *next_due_unix,
+                                          lc_error *error) {
   char *directory;
   DIR *dir;
   struct dirent *entry;
-  lc_pouch_outbox_dead_letter_marker oldest;
-  lc_pouch_outbox_dead_letter_marker oldest_after;
-  lc_pouch_outbox_dead_letter_marker oldest_other;
-  lc_pouch_outbox_dead_letter_marker earliest;
-  lc_pouch_outbox_dead_letter_marker due_first;
-  lc_pouch_outbox_dead_letter_marker due_after;
+  lc_pouch_outbox_retention_marker oldest;
+  lc_pouch_outbox_retention_marker oldest_after;
+  lc_pouch_outbox_retention_marker oldest_other;
+  lc_pouch_outbox_retention_marker earliest;
+  lc_pouch_outbox_retention_marker due_first;
+  lc_pouch_outbox_retention_marker due_after;
   char later_name[LC_XID_STRING_SIZE];
   char other_name[LC_XID_STRING_SIZE];
+  char failed_name[LC_XID_STRING_SIZE];
   size_t count;
   uint64_t bytes;
   int capacity_exceeded;
@@ -1953,11 +2133,15 @@ int lc_pouch_outbox_dead_letter_marker_take(
   if (out == NULL || next_due_unix == NULL || now_unix <= 0 ||
       (after_marker_id != NULL && !lc_xid_is_valid(after_marker_id))) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch dead-letter retention take requires outputs",
-                        NULL, NULL, "pouch");
+                        "pouch outbox retention take requires outputs", NULL,
+                        NULL, "pouch");
   }
   memset(out, 0, sizeof(*out));
   *next_due_unix = 0;
+  if (kind != LC_POUCH_RETENTION_DEAD_LETTER)
+    return lc_pouch_terminal_retention_take(pouch, ns, kind, after_marker_id,
+                                            now_unix, max_count, out,
+                                            next_due_unix, error);
   memset(&oldest, 0, sizeof(oldest));
   memset(&oldest_after, 0, sizeof(oldest_after));
   memset(&oldest_other, 0, sizeof(oldest_other));
@@ -1966,27 +2150,27 @@ int lc_pouch_outbox_dead_letter_marker_take(
   memset(&due_after, 0, sizeof(due_after));
   later_name[0] = '\0';
   other_name[0] = '\0';
+  failed_name[0] = '\0';
   directory = NULL;
   dir = NULL;
   count = 0U;
   bytes = 0U;
   capacity_exceeded = 0;
-  rc = lc_pouch_outbox_dead_letter_reclaim_directory(pouch, ns, 0, &directory,
-                                                     error);
+  rc = lc_pouch_outbox_retention_directory(pouch, ns, kind, 0, &directory,
+                                           error);
   if (rc != LC_OK)
     goto cleanup;
   dir = opendir(directory);
   if (dir == NULL) {
     rc = errno == ENOENT
              ? LC_OK
-             : lc_error_set(
-                   error, LC_ERR_TRANSPORT, 0L,
-                   "failed to open pouch dead-letter retention directory",
-                   strerror(errno), directory, "pouch");
+             : lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                            "failed to open pouch outbox retention directory",
+                            strerror(errno), directory, "pouch");
     goto cleanup;
   }
   while (rc == LC_OK && (entry = readdir(dir)) != NULL) {
-    lc_pouch_outbox_dead_letter_marker candidate;
+    lc_pouch_outbox_retention_marker candidate;
 
     if (!lc_xid_is_valid(entry->d_name))
       continue;
@@ -2004,8 +2188,8 @@ int lc_pouch_outbox_dead_letter_marker_take(
       continue;
     }
     memset(&candidate, 0, sizeof(candidate));
-    rc = lc_pouch_outbox_dead_letter_marker_read(
-        pouch, directory, entry->d_name, &candidate, error);
+    rc = lc_pouch_outbox_retention_marker_read(pouch, directory, entry->d_name,
+                                               &candidate, error);
     if (rc == LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MISSING) {
       lc_error_cleanup(error);
       lc_error_init(error);
@@ -2013,8 +2197,17 @@ int lc_pouch_outbox_dead_letter_marker_take(
       continue;
     }
     if (rc != LC_OK) {
-      lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &candidate);
-      break;
+      rc = lc_pouch_retention_marker_failure_turn(
+          pouch, &candidate, entry->d_name, after_marker_id, failed_name, rc,
+          error);
+      lc_pouch_outbox_retention_marker_cleanup(pouch, &candidate);
+      if (rc != LC_OK)
+        break;
+      /* Damaged markers still consume count capacity. Their byte accounting
+       * and parent identity are untrusted until a later successful read. */
+      if (count != SIZE_MAX)
+        ++count;
+      continue;
     }
     if (count != SIZE_MAX)
       ++count;
@@ -2022,34 +2215,34 @@ int lc_pouch_outbox_dead_letter_marker_take(
       bytes = ~(uint64_t)0U;
     else
       bytes += candidate.retained_bytes;
-    rc = lc_pouch_outbox_dead_letter_marker_keep_lexical_first(
-        pouch, &candidate, &oldest, error);
+    rc = lc_pouch_outbox_retention_marker_keep_lexical_first(pouch, &candidate,
+                                                             &oldest, error);
     if (rc == LC_OK && after_marker_id != NULL &&
         strcmp(candidate.marker_id, after_marker_id) > 0) {
-      rc = lc_pouch_outbox_dead_letter_marker_keep_lexical_first(
+      rc = lc_pouch_outbox_retention_marker_keep_lexical_first(
           pouch, &candidate, &oldest_after, error);
     }
     if (rc == LC_OK && after_marker_id != NULL &&
         strcmp(candidate.marker_id, after_marker_id) != 0) {
-      rc = lc_pouch_outbox_dead_letter_marker_keep_lexical_first(
+      rc = lc_pouch_outbox_retention_marker_keep_lexical_first(
           pouch, &candidate, &oldest_other, error);
     }
     if (rc == LC_OK && (earliest.marker_id == NULL ||
                         candidate.due_at_unix < earliest.due_at_unix)) {
-      lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &earliest);
-      rc = lc_pouch_outbox_dead_letter_marker_clone(pouch, &candidate,
-                                                    &earliest, error);
+      lc_pouch_outbox_retention_marker_cleanup(pouch, &earliest);
+      rc = lc_pouch_outbox_retention_marker_clone(pouch, &candidate, &earliest,
+                                                  error);
     }
     if (rc == LC_OK && candidate.due_at_unix <= now_unix) {
-      rc = lc_pouch_outbox_dead_letter_marker_keep_lexical_first(
+      rc = lc_pouch_outbox_retention_marker_keep_lexical_first(
           pouch, &candidate, &due_first, error);
       if (rc == LC_OK && after_marker_id != NULL &&
           strcmp(candidate.marker_id, after_marker_id) > 0) {
-        rc = lc_pouch_outbox_dead_letter_marker_keep_lexical_first(
+        rc = lc_pouch_outbox_retention_marker_keep_lexical_first(
             pouch, &candidate, &due_after, error);
       }
     }
-    lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &candidate);
+    lc_pouch_outbox_retention_marker_cleanup(pouch, &candidate);
     /* A capacity breach is a service-protection event, not an inventory
      * report. Read no more marker bodies after this bounded prefix; when a
      * cursor exists, finish only the directory-name walk to select its true
@@ -2066,7 +2259,7 @@ int lc_pouch_outbox_dead_letter_marker_take(
   }
   if (dir != NULL && closedir(dir) != 0 && rc == LC_OK) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                      "failed to close pouch dead-letter retention directory",
+                      "failed to close pouch outbox retention directory",
                       strerror(errno), directory, "pouch");
   }
   dir = NULL;
@@ -2075,26 +2268,32 @@ int lc_pouch_outbox_dead_letter_marker_take(
   if (later_name[0] != '\0' &&
       (oldest_after.marker_id == NULL ||
        strcmp(later_name, oldest_after.marker_id) < 0)) {
-    lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &oldest_after);
-    rc = lc_pouch_outbox_dead_letter_marker_read(pouch, directory, later_name,
-                                                 &oldest_after, error);
+    lc_pouch_outbox_retention_marker_cleanup(pouch, &oldest_after);
+    rc = lc_pouch_outbox_retention_marker_read(pouch, directory, later_name,
+                                               &oldest_after, error);
     if (rc == LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MISSING) {
       lc_error_cleanup(error);
       lc_error_init(error);
       rc = LC_OK;
     }
+    rc = lc_pouch_retention_marker_failure_turn(pouch, &oldest_after,
+                                                later_name, after_marker_id,
+                                                failed_name, rc, error);
   }
   if (rc == LC_OK && other_name[0] != '\0' &&
       (oldest_other.marker_id == NULL ||
        strcmp(other_name, oldest_other.marker_id) < 0)) {
-    lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &oldest_other);
-    rc = lc_pouch_outbox_dead_letter_marker_read(pouch, directory, other_name,
-                                                 &oldest_other, error);
+    lc_pouch_outbox_retention_marker_cleanup(pouch, &oldest_other);
+    rc = lc_pouch_outbox_retention_marker_read(pouch, directory, other_name,
+                                               &oldest_other, error);
     if (rc == LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MISSING) {
       lc_error_cleanup(error);
       lc_error_init(error);
       rc = LC_OK;
     }
+    rc = lc_pouch_retention_marker_failure_turn(pouch, &oldest_other,
+                                                other_name, after_marker_id,
+                                                failed_name, rc, error);
   }
   if (rc != LC_OK)
     goto cleanup;
@@ -2125,42 +2324,67 @@ int lc_pouch_outbox_dead_letter_marker_take(
       memset(&due_first, 0, sizeof(due_first));
     }
   }
+  if (failed_name[0] != '\0' &&
+      lc_pouch_retention_turn_precedes(failed_name, out->marker_id,
+                                       after_marker_id)) {
+    /* Re-read only the failed identity selected for this turn. Preserve its
+     * actual error for the caller; other damaged bodies cannot pin that turn.
+     * A concurrent repair must still satisfy expiry/capacity before deletion.
+     */
+    lc_pouch_outbox_retention_marker_cleanup(pouch, out);
+    rc = lc_pouch_outbox_retention_marker_read(pouch, directory, failed_name,
+                                               out, error);
+    if (rc == LC_POUCH_OUTBOX_DEAD_LETTER_RECLAIM_MISSING) {
+      lc_error_cleanup(error);
+      lc_error_init(error);
+      rc = LC_OK;
+    }
+    if (rc == LC_OK && out->marker_id != NULL && !capacity_exceeded &&
+        out->due_at_unix > now_unix) {
+      if (*next_due_unix == 0 || out->due_at_unix < *next_due_unix)
+        *next_due_unix = out->due_at_unix;
+      lc_pouch_outbox_retention_marker_cleanup(pouch, out);
+    }
+    strcpy(out->selected_id, failed_name);
+  } else if (out->marker_id != NULL) {
+    strcpy(out->selected_id, out->marker_id);
+  }
   out->queued_count = count;
   out->queued_bytes = bytes;
 
 cleanup:
   if (dir != NULL)
     (void)closedir(dir);
-  lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &oldest);
-  lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &oldest_after);
-  lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &oldest_other);
-  lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &earliest);
-  lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &due_first);
-  lc_pouch_outbox_dead_letter_marker_cleanup(pouch, &due_after);
+  lc_pouch_outbox_retention_marker_cleanup(pouch, &oldest);
+  lc_pouch_outbox_retention_marker_cleanup(pouch, &oldest_after);
+  lc_pouch_outbox_retention_marker_cleanup(pouch, &oldest_other);
+  lc_pouch_outbox_retention_marker_cleanup(pouch, &earliest);
+  lc_pouch_outbox_retention_marker_cleanup(pouch, &due_first);
+  lc_pouch_outbox_retention_marker_cleanup(pouch, &due_after);
   lc_free_with_allocator(&pouch->allocator, directory);
   return rc;
 }
 
-int lc_pouch_outbox_dead_letter_marker_remove(lc_pouch *pouch, const char *ns,
-                                              const char *marker_id,
-                                              lc_error *error) {
+int lc_pouch_outbox_retention_marker_remove(lc_pouch *pouch, const char *ns,
+                                            int kind, const char *marker_id,
+                                            lc_pouch_unix_seconds due_at_unix,
+                                            lc_error *error) {
   char *directory;
   char *path;
   int rc;
 
   directory = NULL;
   path = NULL;
-  rc = lc_pouch_outbox_dead_letter_marker_path(pouch, ns, marker_id, 0,
-                                               &directory, &path, error);
+  rc = lc_pouch_outbox_retention_marker_path(
+      pouch, ns, kind, marker_id, due_at_unix, 0, &directory, &path, error);
   if (rc == LC_OK && unlink(path) != 0 && errno != ENOENT) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                      "failed to remove pouch dead-letter retention marker",
+                      "failed to remove pouch outbox retention marker",
                       strerror(errno), path, "pouch");
   }
   if (rc == LC_OK) {
     rc = lc_pouch_path_fsync_directory(
-        directory, "failed to sync pouch dead-letter retention directory",
-        error);
+        directory, "failed to sync pouch outbox retention directory", error);
   }
   lc_free_with_allocator(&pouch->allocator, directory);
   lc_free_with_allocator(&pouch->allocator, path);

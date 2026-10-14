@@ -2,7 +2,7 @@ local lockdc = require("lockdc")
 
 local endpoint = os.getenv("LOCKDC_URL") or "https://localhost:19441"
 local client_pem = os.getenv("LOCKDC_CLIENT_PEM")
-  or "./devenv/volumes/lockd-disk-a-config/client.pem"
+  or "./build/devenv/credentials/disk/client.pem"
 local namespace = os.getenv("LOCKDC_NAMESPACE") or "default"
 local owner = os.getenv("LOCKDC_OWNER") or "tests-lua-bundle-sources"
 local key_prefix = os.getenv("LOCKDC_KEY_PREFIX") or "tests/lua/bundle-sources"
@@ -128,5 +128,20 @@ for index, variant in ipairs(variants) do
   end
 
   lease:close()
+  local function unexpected_key()
+    error("empty query invoked a key handler")
+  end
+  local empty_result, empty_err = client:query_keys({
+    namespace = namespace,
+    selector_json = '{"eq":{"field":"/__lua_empty_query_probe__","value":"absent"}}',
+    engine = "index",
+    refresh = "wait_for",
+    limit = 16,
+  }, { begin = unexpected_key, chunk = unexpected_key, finish = unexpected_key })
+  if empty_result == nil then
+    client:close()
+    error(("empty query failed for %s bundle source: %s"):format(
+      variant.name, empty_err and empty_err.message or tostring(empty_err)))
+  end
   client:close()
 end

@@ -19,9 +19,9 @@
 #include "lc/lc.h"
 #include "lc_pouch.h"
 
-#define POUCH_E2E_TMP_PREFIX "/tmp/liblockdc-e2e-pouch-"
-#define LOCAL_MUTATE_TMP_PREFIX "/tmp/liblockdc-local-mutate-"
-#define S3_LOCAL_MUTATE_TMP_PREFIX "/tmp/liblockdc-s3-local-mutate-"
+#define POUCH_E2E_TMP_PREFIX LC_E2E_TMP_ROOT "/liblockdc-e2e-pouch-"
+#define LOCAL_MUTATE_TMP_PREFIX LC_E2E_TMP_ROOT "/liblockdc-local-mutate-"
+#define S3_LOCAL_MUTATE_TMP_PREFIX LC_E2E_TMP_ROOT "/liblockdc-s3-local-mutate-"
 
 typedef struct e2e_status_doc {
   char *status;
@@ -518,7 +518,8 @@ static void assert_local_mutate_file_variants(lc_lease *lease,
   char auto_text_mutation[512];
   char auto_bin_mutation[512];
   char missing_file_mutation[512];
-  char missing_path[] = "/tmp/liblockdc-local-mutate-missing-XXXXXX";
+  char missing_path[] =
+      LC_E2E_TMP_ROOT "/liblockdc-local-mutate-missing-XXXXXX";
   int missing_fd;
   int rc;
 
@@ -640,7 +641,7 @@ static void cleanup_pouch_root(const char *root) {
 }
 
 static void cleanup_all_pouch_roots(void) {
-  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-e2e-pouch-",
+  lc_test_tmp_cleanup_stale(LC_E2E_TMP_ROOT, "liblockdc-e2e-pouch-",
                             POUCH_E2E_TMP_PREFIX);
 }
 
@@ -861,9 +862,8 @@ static void test_disk_lease_state_roundtrip(void **state) {
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path =
-      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -946,9 +946,8 @@ static void test_disk_server_minted_multikey_xa_transaction(void **state) {
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path =
-      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -1090,9 +1089,8 @@ static void test_disk_server_explicit_xa_enlists_on_acquire(void **state) {
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path =
-      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -1180,9 +1178,8 @@ test_disk_server_metadata_finalization_preserves_staged_version(void **state) {
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path =
-      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -1246,9 +1243,8 @@ static void test_disk_acquire_for_update_roundtrip(void **state) {
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path =
-      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -1318,9 +1314,8 @@ test_disk_acquire_for_update_handler_error_rolls_back(void **state) {
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path =
-      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -1394,7 +1389,7 @@ static void test_s3_lease_state_roundtrip(void **state) {
   endpoint =
       env_or_default("LOCKDC_E2E_S3_ENDPOINT", "https://localhost:19443");
   bundle_path = env_or_default("LOCKDC_E2E_S3_BUNDLE",
-                               "./devenv/volumes/lockd-s3-config/client.pem");
+                               "./build/devenv/credentials/s3/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -1477,7 +1472,7 @@ static void test_s3_attachment_roundtrip(void **state) {
   endpoint =
       env_or_default("LOCKDC_E2E_S3_ENDPOINT", "https://localhost:19443");
   bundle_path = env_or_default("LOCKDC_E2E_S3_BUNDLE",
-                               "./devenv/volumes/lockd-s3-config/client.pem");
+                               "./build/devenv/credentials/s3/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -1567,7 +1562,7 @@ static void test_mem_uds_queue_roundtrip(void **state) {
 
   (void)state;
   socket_path = env_or_default("LOCKDC_E2E_MEM_SOCKET",
-                               "./devenv/volumes/lockd-mem-run/lockd.sock");
+                               "./build/devenv/state/mem-run/lockd.sock");
   require_socket_or_skip(socket_path);
 
   client = NULL;
@@ -1655,7 +1650,7 @@ static void test_mem_uds_dequeue_batch_roundtrip(void **state) {
 
   (void)state;
   socket_path = env_or_default("LOCKDC_E2E_MEM_SOCKET",
-                               "./devenv/volumes/lockd-mem-run/lockd.sock");
+                               "./build/devenv/state/mem-run/lockd.sock");
   require_socket_or_skip(socket_path);
 
   client = NULL;
@@ -1882,9 +1877,8 @@ test_disk_queue_watch_stream_observes_initial_unavailable(void **state) {
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path =
-      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -1932,9 +1926,8 @@ static void test_disk_queue_watch_stream_observes_enqueue(void **state) {
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path =
-      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -1991,9 +1984,8 @@ test_disk_queue_watch_stream_observes_available_then_unavailable(void **state) {
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path =
-      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -2046,23 +2038,22 @@ static void test_disk_local_mutate_stream_roundtrip(void **state) {
   lc_error error;
   lc_acquire_req acquire_req;
   char key[96];
-  char text_template[] = "/tmp/liblockdc-local-mutate-text-XXXXXX";
-  char binary_template[] = "/tmp/liblockdc-local-mutate-bin-XXXXXX";
+  char text_template[] = LC_E2E_TMP_ROOT "/liblockdc-local-mutate-text-XXXXXX";
+  char binary_template[] = LC_E2E_TMP_ROOT "/liblockdc-local-mutate-bin-XXXXXX";
   int rc;
 
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path =
-      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
   lease = NULL;
   lc_error_init(&error);
   lc_acquire_req_init(&acquire_req);
-  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-local-mutate-",
+  lc_test_tmp_cleanup_stale(LC_E2E_TMP_ROOT, "liblockdc-local-mutate-",
                             LOCAL_MUTATE_TMP_PREFIX);
   write_temp_file_or_die(text_template, LOCAL_MUTATE_TMP_PREFIX,
                          (const unsigned char *)"hello\n\"quoted\"",
@@ -2103,22 +2094,24 @@ static void test_s3_local_mutate_stream_roundtrip(void **state) {
   lc_error error;
   lc_acquire_req acquire_req;
   char key[96];
-  char text_template[] = "/tmp/liblockdc-s3-local-mutate-text-XXXXXX";
-  char binary_template[] = "/tmp/liblockdc-s3-local-mutate-bin-XXXXXX";
+  char text_template[] =
+      LC_E2E_TMP_ROOT "/liblockdc-s3-local-mutate-text-XXXXXX";
+  char binary_template[] =
+      LC_E2E_TMP_ROOT "/liblockdc-s3-local-mutate-bin-XXXXXX";
   int rc;
 
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_S3_ENDPOINT", "https://localhost:19443");
   bundle_path = env_or_default("LOCKDC_E2E_S3_BUNDLE",
-                               "./devenv/volumes/lockd-s3-config/client.pem");
+                               "./build/devenv/credentials/s3/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
   lease = NULL;
   lc_error_init(&error);
   lc_acquire_req_init(&acquire_req);
-  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-s3-local-mutate-",
+  lc_test_tmp_cleanup_stale(LC_E2E_TMP_ROOT, "liblockdc-s3-local-mutate-",
                             S3_LOCAL_MUTATE_TMP_PREFIX);
   write_temp_file_or_die(text_template, S3_LOCAL_MUTATE_TMP_PREFIX,
                          (const unsigned char *)"hello\n\"quoted\"",
@@ -2165,9 +2158,8 @@ static void test_disk_acquire_if_not_exists_conflict(void **state) {
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path =
-      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -2218,9 +2210,8 @@ static void test_disk_state_cas_failure_modes(void **state) {
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path =
-      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -2299,9 +2290,8 @@ static void test_disk_query_rejects_invalid_inputs(void **state) {
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path =
-      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -2359,9 +2349,8 @@ static void test_disk_query_documents_captures_lockd_trailers(void **state) {
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path =
-      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -2465,9 +2454,8 @@ static void test_disk_query_keys_streams_many_indexed_keys(void **state) {
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path =
-      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -2559,7 +2547,7 @@ static void test_s3_attachment_failure_modes(void **state) {
   endpoint =
       env_or_default("LOCKDC_E2E_S3_ENDPOINT", "https://localhost:19443");
   bundle_path = env_or_default("LOCKDC_E2E_S3_BUNDLE",
-                               "./devenv/volumes/lockd-s3-config/client.pem");
+                               "./build/devenv/credentials/s3/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -2631,7 +2619,7 @@ static void test_mem_uds_queue_failure_modes(void **state) {
 
   (void)state;
   socket_path = env_or_default("LOCKDC_E2E_MEM_SOCKET",
-                               "./devenv/volumes/lockd-mem-run/lockd.sock");
+                               "./build/devenv/state/mem-run/lockd.sock");
   require_socket_or_skip(socket_path);
 
   client = NULL;
@@ -2707,9 +2695,8 @@ static void test_disk_management_failure_modes(void **state) {
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path =
-      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -2755,10 +2742,10 @@ static void test_disk_auth_permission_failure_modes(void **state) {
   (void)state;
   endpoint =
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  rw_bundle_path =
-      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
-  tc_bundle_path = "./devenv/volumes/lockd-disk-a-config/tc-client.pem";
+  rw_bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                                  "./build/devenv/credentials/disk/client.pem");
+  tc_bundle_path = env_or_default(
+      "LOCKDC_E2E_TC_BUNDLE", "./build/devenv/credentials/disk/tc-client.pem");
   require_file_or_skip(rw_bundle_path);
   require_file_or_skip(tc_bundle_path);
 
@@ -2860,7 +2847,7 @@ static const e2e_consumer_backend e2e_backend_disk = {
     "LOCKDC_E2E_DISK_A_ENDPOINT",
     "https://127.0.0.1:19441",
     "LOCKDC_E2E_DISK_A_BUNDLE",
-    "./devenv/volumes/lockd-disk-a-config/client.pem",
+    "./build/devenv/credentials/disk/client.pem",
     NULL,
     NULL,
     0};
@@ -2870,7 +2857,7 @@ static const e2e_consumer_backend e2e_backend_s3 = {
     "LOCKDC_E2E_S3_ENDPOINT",
     "https://127.0.0.1:19443",
     "LOCKDC_E2E_S3_BUNDLE",
-    "./devenv/volumes/lockd-s3-config/client.pem",
+    "./build/devenv/credentials/s3/client.pem",
     NULL,
     NULL,
     0};
@@ -2882,7 +2869,7 @@ static const e2e_consumer_backend e2e_backend_mem = {
     NULL,
     NULL,
     "LOCKDC_E2E_MEM_SOCKET",
-    "./devenv/volumes/lockd-mem-run/lockd.sock",
+    "./build/devenv/state/mem-run/lockd.sock",
     1};
 
 static const char *e2e_consumer_delivery_mode_name(int mode) {
@@ -3938,7 +3925,7 @@ static void test_mem_uds_dequeue_with_state_roundtrip(void **state) {
 
   (void)state;
   socket_path = env_or_default("LOCKDC_E2E_MEM_SOCKET",
-                               "./devenv/volumes/lockd-mem-run/lockd.sock");
+                               "./build/devenv/state/mem-run/lockd.sock");
   require_socket_or_skip(socket_path);
 
   client = NULL;
@@ -4031,7 +4018,7 @@ static void test_s3_dequeue_with_state_roundtrip(void **state) {
   endpoint =
       env_or_default("LOCKDC_E2E_S3_ENDPOINT", "https://localhost:19443");
   bundle_path = env_or_default("LOCKDC_E2E_S3_BUNDLE",
-                               "./devenv/volumes/lockd-s3-config/client.pem");
+                               "./build/devenv/credentials/s3/client.pem");
   require_file_or_skip(bundle_path);
 
   client = NULL;
@@ -7799,7 +7786,7 @@ static void test_disk_outbox_implicit_xa_roundtrip(void **state) {
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
   bundle_path =
       env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+                     "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
   make_unique_name("outbox-domain", domain_key, sizeof(domain_key));
   client = NULL;
@@ -7944,7 +7931,7 @@ test_disk_outbox_dispatcher_uses_internal_json_limit(void **state) {
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
   bundle_path =
       env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+                     "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
   make_unique_name("outbox-response-limit", effect_key, sizeof(effect_key));
   memset(header_value, 'a', sizeof(header_value) - 1U);
@@ -8027,7 +8014,7 @@ static void test_disk_outbox_retry_redelivery(void **state) {
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
   bundle_path =
       env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+                     "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
   make_unique_name("outbox-retry", effect_key, sizeof(effect_key));
   client = NULL;
@@ -8157,12 +8144,12 @@ static void test_disk_outbox_startup_recovery(void **state) {
       env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
   bundle_path =
       env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+                     "./build/devenv/credentials/disk/client.pem");
   require_file_or_skip(bundle_path);
   make_unique_name("outbox-recovery", suffix, sizeof(suffix));
   /* This fixture sorts before digest-shaped production keys so a bounded
    * recovery page proves discovery without claiming unrelated durable work in
-   * the shared compose-test namespace. */
+   * the shared local-test namespace. */
   assert_true(snprintf(key, sizeof(key), "__lockdc_io/v1/outbox/-%s", suffix) >
               0);
   client = NULL;

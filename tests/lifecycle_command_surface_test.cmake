@@ -106,15 +106,11 @@ assert_contains(root_makefile "outbox-reconcile-multi-compacted"
 assert_contains(root_makefile "outbox-command-wait"
     "outbox terminal command-wait benchmark")
 
-foreach(script
-        scripts/dev-logs.sh
-        scripts/dev-ps.sh
-        scripts/dev-reset.sh
-        scripts/dev-up.sh
-        scripts/dev-down.sh)
-    if(NOT EXISTS "${LOCKDC_ROOT}/${script}")
-        message(FATAL_ERROR "missing lifecycle runner: ${script}")
-    endif()
+if(NOT EXISTS "${LOCKDC_ROOT}/scripts/devenv.sh")
+    message(FATAL_ERROR "missing Podman Kube lifecycle runner")
+endif()
+foreach(action up down reset ps logs)
+    assert_contains(root_makefile "bash ./scripts/devenv.sh ${action}" "Podman ${action} wiring")
 endforeach()
 
 assert_contains(root_makefile "bash ./scripts/valgrind.sh" "Valgrind runner wiring")

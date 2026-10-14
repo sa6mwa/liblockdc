@@ -24,9 +24,13 @@ foreach(pattern
     "${dist_dir}/liblockdc-${LOCKDC_VERSION}.tar.gz"
     "${dist_dir}/liblockdc-${LOCKDC_VERSION}-*-linux-*.tar.gz"
     "${dist_dir}/liblockdc-${LOCKDC_VERSION}-*-apple-darwin.tar.gz"
+    "${dist_dir}/liblockdc-postgres-${LOCKDC_VERSION}-*-linux-*.tar.gz"
+    "${dist_dir}/liblockdc-postgres-${LOCKDC_VERSION}-*-apple-darwin.tar.gz"
     "${dist_dir}/liblockdc-lua-${LOCKDC_VERSION}.tar.gz"
     "${dist_dir}/lockdc-${LOCKDC_VERSION}-1.rockspec"
     "${dist_dir}/lockdc-${LOCKDC_VERSION}-1.src.rock"
+    "${dist_dir}/lockdc-postgres-${LOCKDC_VERSION}-1.rockspec"
+    "${dist_dir}/lockdc-postgres-${LOCKDC_VERSION}-1.src.rock"
 )
     file(GLOB matched_entries RELATIVE "${dist_dir}" LIST_DIRECTORIES false "${pattern}")
     list(APPEND checksum_inputs ${matched_entries})

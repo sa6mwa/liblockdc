@@ -24,8 +24,8 @@ file(COPY_FILE "${LOCKDC_ROOT}/scripts/clean.sh" "${fake_root}/scripts/clean.sh"
 file(COPY_FILE "${LOCKDC_ROOT}/scripts/assert_generated_path.sh" "${fake_root}/scripts/assert_generated_path.sh")
 file(COPY_FILE "${LOCKDC_ROOT}/cmake/package_clean_dist.cmake" "${fake_root}/cmake/package_clean_dist.cmake")
 file(COPY_FILE "${LOCKDC_ROOT}/cmake/LcGeneratedPath.cmake" "${fake_root}/cmake/LcGeneratedPath.cmake")
-file(WRITE "${fake_root}/scripts/dev-reset.sh" "#!/usr/bin/env bash\nset -euo pipefail\n")
-file(CHMOD "${fake_root}/scripts/dev-reset.sh"
+file(COPY_FILE "${LOCKDC_ROOT}/scripts/devenv.sh" "${fake_root}/scripts/devenv.sh")
+file(CHMOD "${fake_root}/scripts/devenv.sh"
     PERMISSIONS
         OWNER_READ OWNER_WRITE OWNER_EXECUTE
         GROUP_READ GROUP_EXECUTE

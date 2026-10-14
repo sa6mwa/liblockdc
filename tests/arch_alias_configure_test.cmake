@@ -36,17 +36,27 @@ function(assert_arch_alias alias canonical)
             -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
             -DLOCKDC_DEPENDENCY_BUILD_ROOT=${dependency_build_root}
             -DLOCKDC_TARGET_ARCH=${alias}
+            -DLOCKDC_TARGET_OS=${LOCKDC_TARGET_OS}
+            -DLOCKDC_TARGET_LIBC=${LOCKDC_TARGET_LIBC}
             -DCMAKE_C_COMPILER=${LOCKDC_C_COMPILER}
             -DCMAKE_CXX_COMPILER=${fake_cxx}
         RESULT_VARIABLE configure_result
         OUTPUT_VARIABLE configure_stdout
         ERROR_VARIABLE configure_stderr
     )
-    if(NOT configure_result EQUAL 0)
+    # Normalization precedes SDK validation. Only an alias for this SDK's
+    # architecture can configure successfully; other aliases must normalize
+    # and then reject the incompatible SDK rather than importing its binaries.
+    if(canonical STREQUAL LOCKDC_TARGET_ARCH AND NOT configure_result EQUAL 0)
         message(FATAL_ERROR
             "expected alias configure for ${alias} to succeed\n"
             "stdout:\n${configure_stdout}\n"
             "stderr:\n${configure_stderr}")
+    endif()
+    if(NOT canonical STREQUAL LOCKDC_TARGET_ARCH AND
+       (configure_result EQUAL 0 OR NOT configure_stderr MATCHES "SDK target mismatch"))
+        message(FATAL_ERROR
+            "expected alias ${alias} to reject this SDK's architecture\n${configure_stdout}\n${configure_stderr}")
     endif()
 
     file(STRINGS "${build_dir}/CMakeCache.txt" cached_arch REGEX "^LOCKDC_TARGET_ARCH:STRING=")
@@ -57,5 +67,9 @@ function(assert_arch_alias alias canonical)
 endfunction()
 
 assert_arch_alias(amd64 x86_64)
-assert_arch_alias(arm64 aarch64)
+if(LOCKDC_TARGET_OS STREQUAL "darwin")
+    assert_arch_alias(arm64 arm64)
+else()
+    assert_arch_alias(arm64 aarch64)
+endif()
 assert_arch_alias(arm armhf)

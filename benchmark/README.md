@@ -4,6 +4,14 @@ This module is intentionally outside the CMake release gate. It is used by the
 root `benchmark-pouch-go*` Makefile targets for opt-in pouch performance and
 stress work.
 
+`make benchmarks-go` runs the complete Go benchmark suite, including
+compression, compaction, concurrency, and query scale workloads. Its defaults
+are `POUCH_GO_BENCH=.`, `POUCH_GO_BENCHTIME=3s`,
+`POUCH_GO_SEED_ROWS=10000`, and `POUCH_GO_TEST_TIMEOUT=10m`; increase the
+timeout for a full run when necessary. This command reports measurements;
+`make bench-gate` separately runs all native cases and enforces the default
+and strict-durability parity budgets described below.
+
 The pouch benchmark path calls into C through cgo and reports C-measured query
 time as `c-ns/op`, so the cgo bridge is not the metric used for pouch query
 latency. The Go benchmark `ns/op` still includes harness/setup work and is only
@@ -18,6 +26,7 @@ isolated `metric=...` line for the phase under repair. The default timeout is
 
 - `make benchmark-pouch-perf-index-docs`
 - `make benchmark-pouch-perf-full-text-keys`
+- `make benchmark-pouch-perf-full-text-reopen-keys`
 - `make benchmark-pouch-perf-scan-keys`
 - `make benchmark-pouch-perf-flush-intermediate`
 - `make benchmark-pouch-perf-flush-reopen`
@@ -36,7 +45,9 @@ medium, acceptance, compaction, and parity-gate commands remain opt-in.
 
 `BenchmarkFastLockdDisk` and `BenchmarkMediumLockdDisk*` launch a real pinned
 `pkt.systems/lockd` binary with a disk backend rooted in an automatically
-removed `/tmp/liblockdc-lockd-disk-bench-*` directory. The disk side uses the
+removed `/tmp/liblockdc-lockd-disk-bench-*` directory. Both engines explicitly
+use `/tmp` regardless of `TMPDIR`, so redirecting Go build scratch cannot put
+their storage fixtures on different filesystems. The disk side uses the
 exported Go client and full-form LQL expressions. The pouch side measures the
 C query path directly through `selector_lql` and reports C-side query time so
 the cgo bridge is excluded from pouch latency metrics.
@@ -64,8 +75,19 @@ the gate reports the measured speedup for every budget miss. Compression has no
 matching Go disk transform, so the release gate runs only the four comparable
 variants selected by the full-name `POUCH_GO_PARITY_BENCH` expression;
 compression remains reported evidence in the complete six-mode production
-matrix rather than a synthetic cross-engine ratio. `POUCH_GO_PARITY_TIMEOUT=15m`
-is the finite budget for the five-sample, three-scenario release comparison.
+matrix rather than a synthetic cross-engine ratio. The release comparison uses
+the existing bounded production profile: 12 records, two updates, 128 KiB
+payloads and 16 KiB segments, adjustable with
+`POUCH_GO_BOUNDED_PRODUCTION_*`. `POUCH_GO_PARITY_TIMEOUT=90s` bounds the
+five-sample measurement; preparation is separate. The three large scenarios
+remain available through `make benchmark-pouch-go-production` for scale and
+stress investigation.
+Preparation builds the native static library and pinned Go server, without
+building other architectures or unrelated test executables.
+The isolated server fixture uses the supported five-second minimum HA lease,
+zero shutdown drain grace, and graceful cancellation with a two-second
+forced-stop fallback.
+This bounds restart handoff without extending client request deadlines.
 The contract is per operation: acquire, update, stale-precondition rejection,
 release, public and leased reads, attachment write/read, queue delivery,
 intermediate/final/no-op/
@@ -82,6 +104,7 @@ same production operation metrics. Its default 12-row, two-update, 128 KiB,
 `POUCH_GO_DURABLE_*` variables for another profile. `make
 benchmark-pouch-go-durable-gate` uses the same five-sample and 1.25x policy
 when that opt-in durability mode must meet the release performance budget.
+Its five-sample measurement is bounded by `POUCH_GO_DURABLE_GATE_TIMEOUT=90s`.
 Strict sync is not Go disk's default disk policy, but it is a first-class Pouch
 mode: `make perf-gate` runs the default and durable comparison gates
 separately, each against its matching Go disk durability boundary.
@@ -114,6 +137,8 @@ metric: lockd disk eagerly restores state during server startup, while Pouch
 loads the namespace lazily when the first operation needs it. The existing
 `reopen-ns/op` remains a diagnostic sub-phase. `flush-reopen-ns/op` is the
 post-recovery index-publication operation and is independently gated.
+Both engines also flush midway through every production workload, including
+the bounded profile, so intermediate publication has an actual measurement.
 
 The production indexed-query pair distinguishes reader readiness from steady
 state. `index-query-keys-ns/op` is the first indexed `RangeHalf` query after a

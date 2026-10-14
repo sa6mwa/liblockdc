@@ -96,7 +96,7 @@ function(lockdc_write_sdk_metadata package_root)
     lockdc_read_dependency_manifest_value("${_lockdc_dependency_manifest}" "liblql_asset_hash" _lockdc_liblql_asset_hash)
 
     set(_lockdc_cpkt_source_url
-        "https://github.com/sa6mwa/c.pkt.systems/releases/download/v${_lockdc_cpkt_version}/${_lockdc_cpkt_asset_name}")
+        "https://github.com/c89systems/cpkt/releases/download/v${_lockdc_cpkt_version}/${_lockdc_cpkt_asset_name}")
     set(_lockdc_lonejson_source_url
         "https://github.com/sa6mwa/lonejson/releases/download/v${LOCKDC_LONEJSON_VERSION}/${_lockdc_lonejson_asset_name}")
     set(_lockdc_liblql_source_url
@@ -115,6 +115,12 @@ function(lockdc_write_sdk_metadata package_root)
         "set(LOCKDC_DEPENDENCY_MODE \"external\")\n"
         "set(LOCKDC_METADATA_VERSION \"1\")\n")
 
+    # Core SDK prerequisites exclude optional provider build inputs, even when
+    # those providers are built in the same workspace. PostgreSQL owns its own
+    # optional artifact/dependency closure; it cannot become a core prerequisite.
+    file(APPEND "${package_root}/share/lockdc/package-metadata.cmake"
+        "set(LOCKDC_CPKT_VERSION \"${_lockdc_cpkt_version}\")\n")
+
     file(WRITE "${package_root}/share/lockdc/dependencies.json" "{\n")
     file(APPEND "${package_root}/share/lockdc/dependencies.json"
         "  \"schema\": \"lockdc.dependencies.v1\",\n"
@@ -122,14 +128,17 @@ function(lockdc_write_sdk_metadata package_root)
         "  \"version\": \"${LOCKDC_VERSION}\",\n"
         "  \"target_id\": \"${LOCKDC_TARGET_ID}\",\n"
         "  \"dependency_mode\": \"external\",\n"
+        "  \"sdk_prerequisites\": [\n"
+        "    {\"name\": \"cpkt\", \"version\": \"${_lockdc_cpkt_version}\", \"source_url\": \"${_lockdc_cpkt_source_url}\", \"sha256\": \"${_lockdc_cpkt_asset_hash}\"}\n"
+        "  ],\n"
         "  \"dependencies\": [\n")
 
     set(_lockdc_dependency_rows
-        "openssl|${LOCKDC_OPENSSL_VERSION}|c.pkt.systems|${_lockdc_cpkt_asset_name}|${_lockdc_cpkt_source_url}|${_lockdc_cpkt_asset_hash}|Apache-2.0|external-static-consumer"
-        "zlib|${LOCKDC_ZLIB_VERSION}|c.pkt.systems|${_lockdc_cpkt_asset_name}|${_lockdc_cpkt_source_url}|${_lockdc_cpkt_asset_hash}|Zlib|external-static-consumer"
-        "curl|${LOCKDC_CURL_VERSION}|c.pkt.systems|${_lockdc_cpkt_asset_name}|${_lockdc_cpkt_source_url}|${_lockdc_cpkt_asset_hash}|curl|external-static-consumer"
-        "nghttp2|${LOCKDC_NGHTTP2_VERSION}|c.pkt.systems|${_lockdc_cpkt_asset_name}|${_lockdc_cpkt_source_url}|${_lockdc_cpkt_asset_hash}|MIT|external-static-consumer"
-        "libssh2|${LOCKDC_LIBSSH2_VERSION}|c.pkt.systems|${_lockdc_cpkt_asset_name}|${_lockdc_cpkt_source_url}|${_lockdc_cpkt_asset_hash}|BSD-3-Clause|external-static-consumer"
+        "openssl|${LOCKDC_OPENSSL_VERSION}|cpkt|${_lockdc_cpkt_asset_name}|${_lockdc_cpkt_source_url}|${_lockdc_cpkt_asset_hash}|Apache-2.0|external-static-consumer"
+        "zlib|${LOCKDC_ZLIB_VERSION}|cpkt|${_lockdc_cpkt_asset_name}|${_lockdc_cpkt_source_url}|${_lockdc_cpkt_asset_hash}|Zlib|external-static-consumer"
+        "curl|${LOCKDC_CURL_VERSION}|cpkt|${_lockdc_cpkt_asset_name}|${_lockdc_cpkt_source_url}|${_lockdc_cpkt_asset_hash}|curl|external-static-consumer"
+        "nghttp2|${LOCKDC_NGHTTP2_VERSION}|cpkt|${_lockdc_cpkt_asset_name}|${_lockdc_cpkt_source_url}|${_lockdc_cpkt_asset_hash}|MIT|external-static-consumer"
+        "libssh2|${LOCKDC_LIBSSH2_VERSION}|cpkt|${_lockdc_cpkt_asset_name}|${_lockdc_cpkt_source_url}|${_lockdc_cpkt_asset_hash}|BSD-3-Clause|external-static-consumer"
         "libpslog|${LOCKDC_PSLOG_VERSION}|github-release|${LOCKDC_PSLOG_ASSET_NAME}|${_lockdc_pslog_source_url}|${LOCKDC_PSLOG_ASSET_HASH}|MIT|external-static-consumer"
         "lonejson|${LOCKDC_LONEJSON_VERSION}|github-release|${_lockdc_lonejson_asset_name}|${_lockdc_lonejson_source_url}|${_lockdc_lonejson_asset_hash}|MIT|external-static-consumer"
         "liblql|${LOCKDC_LIBLQL_VERSION}|github-release|${_lockdc_liblql_asset_name}|${_lockdc_liblql_source_url}|${_lockdc_liblql_asset_hash}|MIT|external-static-consumer"
@@ -316,8 +325,6 @@ foreach(_lockdc_owned_library_artifact IN LISTS _lockdc_owned_library_artifacts)
 endforeach()
 
 file(MAKE_DIRECTORY "${LOCKDC_DIST_DIR}")
-set(archive_base "${LOCKDC_DIST_DIR}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}.tar")
-set(archive "${archive_base}.gz")
 find_program(LOCKDC_TAR_BIN NAMES tar)
 find_program(LOCKDC_GZIP_BIN NAMES gzip)
 if(NOT LOCKDC_TAR_BIN)
@@ -326,20 +333,51 @@ endif()
 if(NOT LOCKDC_GZIP_BIN)
     message(FATAL_ERROR "failed to find gzip for archive creation")
 endif()
-file(REMOVE "${archive_base}" "${archive}")
-execute_process(
-    COMMAND "${LOCKDC_TAR_BIN}" -cf "${archive_base}" --format=gnu --owner 0 --group 0 "${package_prefix_name}"
-    WORKING_DIRECTORY "${package_stage_root}"
-    RESULT_VARIABLE tar_result
-)
-if(NOT tar_result EQUAL 0)
-    message(FATAL_ERROR "failed to create package archive")
-endif()
-file(REMOVE "${archive}")
-execute_process(
-    COMMAND "${LOCKDC_GZIP_BIN}" -9 -f "${archive_base}"
-    RESULT_VARIABLE gzip_result
-)
-if(NOT gzip_result EQUAL 0)
-    message(FATAL_ERROR "failed to gzip package archive")
+function(lockdc_create_archive prefix)
+    set(base "${LOCKDC_DIST_DIR}/${prefix}.tar")
+    file(REMOVE "${base}" "${base}.gz")
+    execute_process(
+        COMMAND "${LOCKDC_TAR_BIN}" -cf "${base}" --format=gnu --owner 0 --group 0 "${prefix}"
+        WORKING_DIRECTORY "${package_stage_root}"
+        RESULT_VARIABLE result)
+    if(NOT result EQUAL 0)
+        message(FATAL_ERROR "failed to create ${prefix} archive")
+    endif()
+    execute_process(COMMAND "${LOCKDC_GZIP_BIN}" -9 -f "${base}"
+        RESULT_VARIABLE result)
+    if(NOT result EQUAL 0)
+        message(FATAL_ERROR "failed to gzip ${prefix} archive")
+    endif()
+endfunction()
+lockdc_create_archive("${package_prefix_name}")
+
+if(LOCKDC_BUILD_POSTGRES)
+    set(provider_prefix "liblockdc-postgres-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}")
+    set(provider_root "${package_stage_root}/${provider_prefix}")
+    file(REMOVE_RECURSE "${provider_root}")
+    foreach(component postgres-runtime postgres-dev)
+        execute_process(COMMAND "${CMAKE_COMMAND}" --install "${LOCKDC_BINARY_DIR}"
+            --prefix "${provider_root}" --component "${component}"
+            RESULT_VARIABLE result)
+        if(NOT result EQUAL 0)
+            message(FATAL_ERROR "failed to install optional provider ${component}")
+        endif()
+    endforeach()
+    file(MAKE_DIRECTORY "${provider_root}/share/lockdc_postgres")
+    file(WRITE "${provider_root}/share/lockdc_postgres/package-metadata.cmake"
+        "set(LOCKDC_POSTGRES_PACKAGE_NAME \"liblockdc-postgres\")\n"
+        "set(LOCKDC_POSTGRES_VERSION \"${LOCKDC_VERSION}\")\n"
+        "set(LOCKDC_POSTGRES_TARGET_ID \"${LOCKDC_TARGET_ID}\")\n"
+        "set(LOCKDC_POSTGRES_CORE_ABI \"${LOCKDC_ABI_VERSION}\")\n"
+        "set(LOCKDC_POSTGRES_CPKT_VERSION \"${LOCKDC_CPKT_VERSION}\")\n"
+        "set(LOCKDC_POSTGRES_CPKTDB_VERSION \"${LOCKDC_CPKTDB_VERSION}\")\n")
+    lockdc_verify_darwin_macho_metadata("${provider_root}")
+    file(GLOB provider_libraries LIST_DIRECTORIES false
+        "${provider_root}/lib/liblockdc_postgres.a"
+        "${provider_root}/lib/liblockdc_postgres.so*"
+        "${provider_root}/lib/liblockdc_postgres*.dylib")
+    foreach(library IN LISTS provider_libraries)
+        lockdc_strip_packaged_artifact("${library}")
+    endforeach()
+    lockdc_create_archive("${provider_prefix}")
 endif()

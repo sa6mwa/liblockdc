@@ -1,5 +1,6 @@
 #include "lc_api_internal.h"
 #include "lc_pouch_internal.h"
+#include "lc_xa_internal.h"
 
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -37,6 +38,7 @@ typedef struct lc_outbox_delayed_notification {
 #define LC_OUTBOX_DEAD_LETTER_DISCOVERY_SECONDS 60L
 
 static void lc_outbox_release(lc_outbox_handle *outbox);
+static int lc_outbox_is_outbox_key(const char *key);
 static void lc_outbox_retain(lc_outbox_handle *outbox);
 static void
 lc_outbox_transaction_retain(lc_outbox_transaction_handle *transaction);
@@ -54,14 +56,16 @@ static void lc_outbox_signal_dispatcher_locked(lc_outbox_handle *outbox);
 static int lc_outbox_timestamp_add(lc_unix_seconds base, long delta,
                                    const char *field, lc_unix_seconds *out,
                                    lc_error *error);
-static void lc_outbox_schedule_dead_letter_reclaim(lc_outbox_handle *outbox,
-                                                   lc_unix_seconds due_at_unix,
-                                                   lc_unix_seconds now,
-                                                   int capacity_check);
+static void lc_outbox_schedule_retention(lc_outbox_handle *outbox,
+                                         lc_unix_seconds due_at_unix,
+                                         lc_unix_seconds now,
+                                         int capacity_check);
 static int lc_outbox_reclaim_one_dead_letter(lc_outbox_handle *outbox,
                                              lc_unix_seconds now,
                                              lc_unix_seconds *next_due_unix,
                                              int *reclaimed, lc_error *error);
+static void lc_outbox_reclaim_terminal_batch(lc_outbox_handle *outbox,
+                                             lc_unix_seconds *next_due);
 static int lc_outbox_get_or_start_dispatcher_method(lc_outbox *self,
                                                     lc_outbox_dispatcher **out,
                                                     lc_error *error);
@@ -113,6 +117,9 @@ void *lc_outbox_test_after_dispatcher_core_retain_context = NULL;
 lc_outbox_test_hook_fn lc_outbox_test_before_dead_letter_export_open_hook =
     NULL;
 void *lc_outbox_test_before_dead_letter_export_open_context = NULL;
+lc_outbox_test_failure_hook_fn lc_outbox_test_before_terminal_remove_hook =
+    NULL;
+void *lc_outbox_test_before_terminal_remove_context = NULL;
 lc_outbox_test_failure_hook_fn lc_outbox_test_before_ledger_append_hook = NULL;
 void *lc_outbox_test_before_ledger_append_context = NULL;
 lc_outbox_test_failure_hook_fn
@@ -189,6 +196,7 @@ typedef struct lc_outbox_record {
   lonejson_int64 checkpoint_present;
   lonejson_int64 dead_lettered_at_unix;
   char *dead_letter_retention_id;
+  char *completed_retention_id;
   lonejson_int64 replayed_at_unix;
   char *delivery_reference;
   char *response_digest;
@@ -221,6 +229,8 @@ typedef struct lc_outbox_inbox_record {
   char *payload_digest;
   char *operation_id;
   char *processing_state;
+  lonejson_int64 accepted_at_unix;
+  char *retention_id;
 } lc_outbox_inbox_record;
 
 typedef struct lc_outbox_command_record {
@@ -241,6 +251,7 @@ typedef struct lc_outbox_command_record {
   char *failure_message;
   lonejson_int64 failed_at_unix;
   lonejson_int64 has_result_body;
+  char *retention_id;
 } lc_outbox_command_record;
 
 static const lonejson_field lc_outbox_record_fields[] = {
@@ -283,6 +294,8 @@ static const lonejson_field lc_outbox_record_fields[] = {
                                 "delivery_reference"),
     LONEJSON_FIELD_STRING_ALLOC(lc_outbox_record, response_digest,
                                 "response_digest"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_outbox_record, completed_retention_id,
+                                "completed_retention_id"),
     LONEJSON_FIELD_I64(lc_outbox_record, completed_at_unix,
                        "completed_at_unix"),
     LONEJSON_FIELD_STRING_ALLOC(lc_outbox_record, last_error, "last_error"),
@@ -315,7 +328,11 @@ static const lonejson_field lc_outbox_inbox_record_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_outbox_inbox_record, operation_id,
                                 "operation_id"),
     LONEJSON_FIELD_STRING_ALLOC_REQ(lc_outbox_inbox_record, processing_state,
-                                    "processing_state")};
+                                    "processing_state"),
+    LONEJSON_FIELD_I64(lc_outbox_inbox_record, accepted_at_unix,
+                       "accepted_at_unix"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_outbox_inbox_record, retention_id,
+                                "retention_id")};
 
 static const lonejson_field lc_outbox_command_record_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC_REQ(lc_outbox_command_record, record_type,
@@ -348,6 +365,8 @@ static const lonejson_field lc_outbox_command_record_fields[] = {
                                 "failure_message"),
     LONEJSON_FIELD_I64(lc_outbox_command_record, failed_at_unix,
                        "failed_at_unix"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_outbox_command_record, retention_id,
+                                "retention_id"),
     LONEJSON_FIELD_I64(lc_outbox_command_record, has_result_body,
                        "has_result_body")};
 
@@ -377,6 +396,9 @@ struct lc_outbox_handle {
   long dead_letter_retention_seconds;
   size_t dead_letter_max_count;
   uint64_t dead_letter_max_bytes;
+  long retention_seconds[LC_POUCH_RETENTION_KIND_COUNT];
+  size_t retention_max_count[LC_POUCH_RETENTION_KIND_COUNT];
+  char *retention_cursor[LC_POUCH_RETENTION_KIND_COUNT];
   int max_attempts;
   int replay_dead_letters_on_startup;
   pthread_mutex_t notification_mutex;
@@ -397,9 +419,9 @@ struct lc_outbox_handle {
   int recovery_claims_pending;
   int recovery_scan_mode;
   lc_unix_seconds next_recovery_unix;
-  int dead_letter_reclaim_needed;
-  lc_unix_seconds next_dead_letter_reclaim_unix;
-  lc_unix_seconds next_dead_letter_capacity_check_unix;
+  int retention_needed;
+  lc_unix_seconds next_retention_unix;
+  lc_unix_seconds next_retention_capacity_check_unix;
   /* Last durable-marker turn attempted by this dispatcher. It is advisory
    * only, but prevents one busy exact-key lease from starving later retained
    * dead letters in the same bounded maintenance pass. */
@@ -418,6 +440,8 @@ struct lc_outbox_handle {
   uint64_t payload_open_failures;
   uint64_t dead_letter_reclaims;
   uint64_t dead_letter_reclaim_failures;
+  uint64_t terminal_reclaims;
+  uint64_t terminal_reclaim_failures;
   size_t waiting_consumers;
   char *last_error;
   int startup_dead_letter_replay_pending;
@@ -501,7 +525,11 @@ static int lc_outbox_dispatcher_configuration_matches(
          outbox->dead_letter_retention_seconds ==
              core->dead_letter_retention_seconds &&
          outbox->dead_letter_max_count == core->dead_letter_max_count &&
-         outbox->dead_letter_max_bytes == core->dead_letter_max_bytes;
+         outbox->dead_letter_max_bytes == core->dead_letter_max_bytes &&
+         memcmp(outbox->retention_seconds, core->retention_seconds,
+                sizeof(outbox->retention_seconds)) == 0 &&
+         memcmp(outbox->retention_max_count, core->retention_max_count,
+                sizeof(outbox->retention_max_count)) == 0;
 }
 
 static void lc_outbox_publish_committed_outbox(lc_outbox_handle *outbox,
@@ -534,6 +562,34 @@ static void lc_outbox_publish_committed_outbox(lc_outbox_handle *outbox,
   if (dispatcher != NULL)
     lc_outbox_dispatcher_close_method(&dispatcher->pub);
 }
+void lc_outbox_pouch_notify(lc_client *self, const char *ns, const char *key) {
+  lc_client_handle *client = (lc_client_handle *)self;
+  lc_outbox_dispatcher_handle *dispatcher;
+  lc_outbox_handle *core = NULL;
+  if (client == NULL || ns == NULL || key == NULL ||
+      !lc_outbox_is_outbox_key(key))
+    return;
+  /* A root-client recovery uses the same compatible dispatcher and bounded
+   * notification path as a producer. Never create a dispatcher from replay. */
+  pthread_mutex_lock(&client->lifecycle_mutex);
+  for (dispatcher = client->outbox_dispatchers; dispatcher != NULL;
+       dispatcher = dispatcher->registry_next) {
+    pthread_mutex_lock(&dispatcher->lifecycle_mutex);
+    if (!dispatcher->stopping && dispatcher->core != NULL &&
+        strcmp(dispatcher->core->ns, ns) == 0) {
+      core = dispatcher->core;
+      lc_outbox_retain(core);
+      pthread_mutex_unlock(&dispatcher->lifecycle_mutex);
+      break;
+    }
+    pthread_mutex_unlock(&dispatcher->lifecycle_mutex);
+  }
+  pthread_mutex_unlock(&client->lifecycle_mutex);
+  if (core != NULL) {
+    (void)lc_outbox_notify(core, key, 1);
+    lc_outbox_release(core);
+  }
+}
 
 static int lc_outbox_dispatcher_cancel_check(void *context) {
   lc_outbox_handle *outbox = (lc_outbox_handle *)context;
@@ -551,6 +607,10 @@ static int lc_outbox_replay_dead_letters_on_startup(lc_outbox_handle *outbox,
 struct lc_outbox_transaction_handle {
   lc_outbox_transaction pub;
   lc_outbox_handle *outbox;
+  char xid[LC_XID_STRING_SIZE];
+  lc_xa_transaction *xa; /* Weak: the managed transaction pins this facade. */
+  lc_outbox_commit_result xa_result;
+  int xa_bound, xa_ready, xa_applied, xa_decision, xa_result_taken;
   lc_lease **leases;
   size_t lease_count;
   size_t lease_capacity;
@@ -1091,11 +1151,10 @@ lc_outbox_next_dispatch_deadline_locked(const lc_outbox_handle *outbox) {
     if (deadline == 0 || eligible < deadline)
       deadline = eligible;
   }
-  if (!outbox->startup_dead_letter_replay_pending &&
-      outbox->dead_letter_reclaim_needed &&
-      (deadline == 0 || outbox->next_dead_letter_reclaim_unix == 0 ||
-       outbox->next_dead_letter_reclaim_unix < deadline)) {
-    deadline = outbox->next_dead_letter_reclaim_unix;
+  if (!outbox->startup_dead_letter_replay_pending && outbox->retention_needed &&
+      (deadline == 0 || outbox->next_retention_unix == 0 ||
+       outbox->next_retention_unix < deadline)) {
+    deadline = outbox->next_retention_unix;
   }
   return deadline;
 }
@@ -1111,22 +1170,22 @@ static int lc_outbox_recovery_is_due_locked(const lc_outbox_handle *outbox,
           now <= 0 || outbox->next_recovery_unix <= now);
 }
 
-static int
-lc_outbox_dead_letter_reclaim_is_due_locked(const lc_outbox_handle *outbox,
-                                            lc_unix_seconds now) {
+static int lc_outbox_retention_is_due_locked(const lc_outbox_handle *outbox,
+                                             lc_unix_seconds now) {
   return !outbox->startup_dead_letter_replay_pending &&
-         outbox->dead_letter_reclaim_needed &&
-         (outbox->next_dead_letter_reclaim_unix == 0 || now <= 0 ||
-          outbox->next_dead_letter_reclaim_unix <= now);
+         outbox->retention_needed &&
+         (outbox->next_retention_unix == 0 || now <= 0 ||
+          outbox->next_retention_unix <= now);
 }
 
 /* Keep a live Pouch dispatcher aware of work published by another writer,
  * without turning ordinary delivery into a control-directory scan.  A known
  * earlier deadline wins; otherwise a successful empty scan is retried at a
  * bounded cadence. */
-static int lc_outbox_dead_letter_discovery_deadline(
-    lc_unix_seconds now, lc_unix_seconds known_due,
-    lc_unix_seconds *deadline_out, lc_error *error) {
+static int lc_outbox_retention_discovery_deadline(lc_unix_seconds now,
+                                                  lc_unix_seconds known_due,
+                                                  lc_unix_seconds *deadline_out,
+                                                  lc_error *error) {
   lc_unix_seconds discovery_due;
   int rc;
 
@@ -1175,9 +1234,9 @@ int lc_outbox_test_dead_letter_reclaim_is_due(int startup_replay_pending,
 
   memset(&outbox, 0, sizeof(outbox));
   outbox.startup_dead_letter_replay_pending = startup_replay_pending;
-  outbox.dead_letter_reclaim_needed = reclaim_needed;
-  outbox.next_dead_letter_reclaim_unix = next_reclaim_unix;
-  return lc_outbox_dead_letter_reclaim_is_due_locked(&outbox, now);
+  outbox.retention_needed = reclaim_needed;
+  outbox.next_retention_unix = next_reclaim_unix;
+  return lc_outbox_retention_is_due_locked(&outbox, now);
 }
 
 int lc_outbox_test_schedule_dead_letter_reclaim_deadline(
@@ -1193,11 +1252,10 @@ int lc_outbox_test_schedule_dead_letter_reclaim_deadline(
   if (pthread_mutex_init(&outbox.notification_mutex, NULL) != 0)
     return LC_ERR_NOMEM;
   outbox.notification_mutex_initialized = 1;
-  outbox.next_dead_letter_reclaim_unix = prior_reclaim_unix;
-  outbox.next_dead_letter_capacity_check_unix = prior_capacity_check_unix;
-  lc_outbox_schedule_dead_letter_reclaim(&outbox, due_at_unix, now,
-                                         capacity_check);
-  *next_reclaim_unix = outbox.next_dead_letter_reclaim_unix;
+  outbox.next_retention_unix = prior_reclaim_unix;
+  outbox.next_retention_capacity_check_unix = prior_capacity_check_unix;
+  lc_outbox_schedule_retention(&outbox, due_at_unix, now, capacity_check);
+  *next_reclaim_unix = outbox.next_retention_unix;
   (void)pthread_mutex_destroy(&outbox.notification_mutex);
   return LC_OK;
 }
@@ -1227,9 +1285,9 @@ int lc_outbox_test_dead_letter_discovery_deadline(lc_i64 now_unix,
                         "dead-letter discovery test requires an output", NULL,
                         NULL, NULL);
   deadline = 0;
-  rc = lc_outbox_dead_letter_discovery_deadline((lc_unix_seconds)now_unix,
-                                                (lc_unix_seconds)known_due_unix,
-                                                &deadline, error);
+  rc = lc_outbox_retention_discovery_deadline((lc_unix_seconds)now_unix,
+                                              (lc_unix_seconds)known_due_unix,
+                                              &deadline, error);
   if (rc == LC_OK)
     *deadline_out = (lc_i64)deadline;
   return rc;
@@ -1823,9 +1881,9 @@ static int lc_outbox_dead_letter_retention_prepare(
         client, outbox->ns, outbox_key, state_key, &retained_bytes, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_outbox_dead_letter_marker_write(
-        client->pouch, outbox->ns, marker_id, outbox_key, *due_at_unix,
-        retained_bytes, error);
+    rc = lc_pouch_outbox_retention_marker_write(
+        client->pouch, outbox->ns, LC_POUCH_RETENTION_DEAD_LETTER, marker_id,
+        outbox_key, *due_at_unix, retained_bytes, error);
   }
   free(state_key);
   if (rc == LC_OK) {
@@ -1835,10 +1893,10 @@ static int lc_outbox_dead_letter_retention_prepare(
   return rc;
 }
 
-static void lc_outbox_schedule_dead_letter_reclaim(lc_outbox_handle *outbox,
-                                                   lc_unix_seconds due_at_unix,
-                                                   lc_unix_seconds now,
-                                                   int capacity_check) {
+static void lc_outbox_schedule_retention(lc_outbox_handle *outbox,
+                                         lc_unix_seconds due_at_unix,
+                                         lc_unix_seconds now,
+                                         int capacity_check) {
   lc_unix_seconds capacity_due_at;
   int schedule_capacity_check;
 
@@ -1849,8 +1907,8 @@ static void lc_outbox_schedule_dead_letter_reclaim(lc_outbox_handle *outbox,
     capacity_due_at = 0;
     schedule_capacity_check =
         capacity_check && now > 0 &&
-        (outbox->next_dead_letter_capacity_check_unix == 0 ||
-         now >= outbox->next_dead_letter_capacity_check_unix);
+        (outbox->next_retention_capacity_check_unix == 0 ||
+         now >= outbox->next_retention_capacity_check_unix);
     if (schedule_capacity_check) {
       lc_error ignored;
 
@@ -1858,9 +1916,8 @@ static void lc_outbox_schedule_dead_letter_reclaim(lc_outbox_handle *outbox,
       if (lc_outbox_timestamp_add(
               now, LC_OUTBOX_DEAD_LETTER_CAPACITY_COALESCE_SECONDS,
               "dead-letter capacity check",
-              &outbox->next_dead_letter_capacity_check_unix,
-              &ignored) != LC_OK) {
-        outbox->next_dead_letter_capacity_check_unix = 0;
+              &outbox->next_retention_capacity_check_unix, &ignored) != LC_OK) {
+        outbox->next_retention_capacity_check_unix = 0;
       }
       lc_error_cleanup(&ignored);
     }
@@ -1869,22 +1926,22 @@ static void lc_outbox_schedule_dead_letter_reclaim(lc_outbox_handle *outbox,
      * deadline decades away. Wake once at the coalesced deadline so capacity
      * is reevaluated without adding a namespace scan to the delivery path. */
     if (capacity_check && !schedule_capacity_check &&
-        outbox->next_dead_letter_capacity_check_unix > now) {
-      capacity_due_at = outbox->next_dead_letter_capacity_check_unix;
+        outbox->next_retention_capacity_check_unix > now) {
+      capacity_due_at = outbox->next_retention_capacity_check_unix;
     }
-    outbox->dead_letter_reclaim_needed = 1;
-    if (schedule_capacity_check || outbox->next_dead_letter_reclaim_unix == 0 ||
-        due_at_unix < outbox->next_dead_letter_reclaim_unix ||
+    outbox->retention_needed = 1;
+    if (schedule_capacity_check || outbox->next_retention_unix == 0 ||
+        due_at_unix < outbox->next_retention_unix ||
         (capacity_due_at > 0 &&
-         capacity_due_at < outbox->next_dead_letter_reclaim_unix)) {
-      outbox->next_dead_letter_reclaim_unix =
+         capacity_due_at < outbox->next_retention_unix)) {
+      outbox->next_retention_unix =
           schedule_capacity_check
               ? now
               : (capacity_due_at > 0 && capacity_due_at < due_at_unix
                      ? capacity_due_at
                      : due_at_unix);
-      if (outbox->next_dead_letter_reclaim_unix <= 0)
-        outbox->next_dead_letter_reclaim_unix = due_at_unix;
+      if (outbox->next_retention_unix <= 0)
+        outbox->next_retention_unix = due_at_unix;
     }
     lc_outbox_signal_dispatcher_locked(outbox);
   }
@@ -2737,11 +2794,9 @@ int lc_outbox_test_retry_is_not_eligible(lc_unix_seconds not_before_unix,
 }
 #endif
 
-static int
-lc_outbox_command_receipt_from_record(const lc_outbox_command_record *record,
-                                      lc_command_receipt *receipt,
-                                      lc_error *error) {
-  if (record == NULL || receipt == NULL || record->record_type == NULL ||
+static int lc_outbox_validate_durable_command_record(
+    const lc_outbox_command_record *record, lc_error *error) {
+  if (record == NULL || record->record_type == NULL ||
       record->command_id == NULL || record->scope == NULL ||
       record->command_type == NULL || record->idempotency_key == NULL ||
       record->request_digest == NULL || record->state == NULL ||
@@ -2788,6 +2843,20 @@ lc_outbox_command_receipt_from_record(const lc_outbox_command_record *record,
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                         "command receipt state is invalid", NULL, NULL, NULL);
   }
+  return LC_OK;
+}
+
+static int
+lc_outbox_command_receipt_from_record(const lc_outbox_command_record *record,
+                                      lc_command_receipt *receipt,
+                                      lc_error *error) {
+  int rc;
+  if (receipt == NULL)
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "command receipt output is required", NULL, NULL, NULL);
+  rc = lc_outbox_validate_durable_command_record(record, error);
+  if (rc != LC_OK)
+    return rc;
   lc_command_receipt_cleanup(receipt);
   if ((receipt->command_id = lc_strdup_local(record->command_id)) == NULL ||
       (receipt->scope = lc_strdup_local(record->scope)) == NULL ||
@@ -2820,6 +2889,33 @@ lc_outbox_command_receipt_from_record(const lc_outbox_command_record *record,
   return LC_OK;
 }
 
+/* Publish the independently durable work marker before the terminal save.
+ * A held lease prevents reclamation of an uncommitted transition; rollback
+ * makes the marker stale. Matching the opaque identity prevents a later
+ * incarnation of the same application identity from being reclaimed. */
+static int lc_outbox_terminal_retention_prepare(
+    lc_outbox_handle *outbox, lc_client_handle *client, int kind,
+    const char *key, lc_unix_seconds now, char marker_id[LC_XID_STRING_SIZE],
+    lc_error *error) {
+  lc_unix_seconds due;
+  int rc;
+
+  marker_id[0] = '\0';
+  if (!client->is_pouch || outbox->retention_seconds[kind] == -1L)
+    return LC_OK;
+  rc = lc_outbox_timestamp_add(now, outbox->retention_seconds[kind],
+                               "terminal retention", &due, error);
+  if (rc == LC_OK)
+    rc = lc_xid_new(marker_id, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_outbox_retention_marker_write(client->pouch, outbox->ns, kind,
+                                                marker_id, key, due, 0U, error);
+  if (rc == LC_OK)
+    lc_outbox_schedule_retention(outbox, due, now,
+                                 outbox->retention_max_count[kind] != SIZE_MAX);
+  return rc;
+}
+
 static int lc_outbox_stage_command(lc_client_handle *client, lc_lease *lease,
                                    const lc_command_request *request,
                                    const char *command_id, lc_error *error) {
@@ -2846,10 +2942,14 @@ static int lc_outbox_stage_command(lc_client_handle *client, lc_lease *lease,
   return lc_lease_save(lease, &lc_outbox_command_record_map, &record, error);
 }
 
-static int lc_outbox_stage_inbox(lc_client_handle *client, lc_lease *lease,
+static int lc_outbox_stage_inbox(lc_outbox_handle *outbox, lc_lease *lease,
                                  const lc_inbox_message *message,
                                  lc_error *error) {
   lc_outbox_inbox_record record;
+  lc_client_handle *client = outbox->client;
+  char marker_id[LC_XID_STRING_SIZE];
+  lc_unix_seconds now;
+  int rc;
 
   if (lc_outbox_validate_inbox_message(client, message, error) != LC_OK)
     return error != NULL ? error->code : LC_ERR_INVALID;
@@ -2863,6 +2963,17 @@ static int lc_outbox_stage_inbox(lc_client_handle *client, lc_lease *lease,
   record.payload_digest = (char *)message->payload_digest;
   record.operation_id = (char *)message->operation_id;
   record.processing_state = "accepted";
+  now = (lc_unix_seconds)time(NULL);
+  if (now <= 0)
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "failed to read inbox receipt clock", NULL, NULL, NULL);
+  rc = lc_outbox_terminal_retention_prepare(outbox, client,
+                                            LC_POUCH_RETENTION_INBOX,
+                                            lease->key, now, marker_id, error);
+  if (rc != LC_OK)
+    return rc;
+  record.accepted_at_unix = (lonejson_int64)now;
+  record.retention_id = marker_id[0] == '\0' ? NULL : marker_id;
   return lc_lease_save(lease, &lc_outbox_inbox_record_map, &record, error);
 }
 
@@ -3172,6 +3283,7 @@ lc_outbox_stage_command_terminal(lc_outbox_transaction_handle *transaction,
   lc_attach_res attach_result;
   lonejson *runtime;
   time_t now;
+  char marker_id[LC_XID_STRING_SIZE];
   int rc;
 
   if (transaction == NULL || transaction->terminal ||
@@ -3255,8 +3367,15 @@ lc_outbox_stage_command_terminal(lc_outbox_transaction_handle *transaction,
     updated.completed_at_unix = (lonejson_int64)now;
     updated.has_result_body = result->body != NULL;
   }
-  rc = lc_lease_save(transaction->command_lease, &lc_outbox_command_record_map,
-                     &updated, error);
+  rc = lc_outbox_terminal_retention_prepare(
+      transaction->outbox, transaction->outbox->client,
+      LC_POUCH_RETENTION_COMMAND, transaction->command_lease->key,
+      (lc_unix_seconds)now, marker_id, error);
+  if (rc == LC_OK) {
+    updated.retention_id = marker_id[0] == '\0' ? NULL : marker_id;
+    rc = lc_lease_save(transaction->command_lease,
+                       &lc_outbox_command_record_map, &updated, error);
+  }
   if (rc == LC_OK && result->body != NULL) {
     lc_attach_req_init(&attach);
     attach.name = "result";
@@ -3364,6 +3483,8 @@ static void lc_outbox_record_clear(lc_client_handle *client,
   lc_client_free(client, record->dispatch_state);
   lc_client_free(client, record->last_error);
   lc_client_free(client, record->prior_dead_letter_error);
+  lc_client_free(client, record->dead_letter_retention_id);
+  lc_client_free(client, record->completed_retention_id);
   memset(record, 0, sizeof(*record));
 }
 
@@ -3616,6 +3737,9 @@ static int lc_outbox_record_copy(lc_client_handle *client,
       (src->dead_letter_retention_id != NULL &&
        (dst->dead_letter_retention_id =
             lc_client_strdup(client, src->dead_letter_retention_id)) == NULL) ||
+      (src->completed_retention_id != NULL &&
+       (dst->completed_retention_id =
+            lc_client_strdup(client, src->completed_retention_id)) == NULL) ||
       (src->prior_dead_letter_error != NULL &&
        (dst->prior_dead_letter_error =
             lc_client_strdup(client, src->prior_dead_letter_error)) == NULL)) {
@@ -3837,6 +3961,7 @@ static int lc_outbox_job_terminal(lc_outbox_job *self, const char *state,
   lc_outbox_record record;
   lc_release_req release;
   char dead_letter_marker_id[LC_XID_STRING_SIZE];
+  char completed_marker_id[LC_XID_STRING_SIZE];
   lc_unix_seconds dead_letter_due_at_unix;
   lc_unix_seconds dead_letter_now;
   int checkpoint_cleanup_failed;
@@ -3886,6 +4011,13 @@ static int lc_outbox_job_terminal(lc_outbox_job *self, const char *state,
       record.response_digest =
           (char *)(completion == NULL ? NULL : completion->response_digest);
       record.completed_at_unix = (lonejson_int64)now;
+      rc = lc_outbox_terminal_retention_prepare(
+          job->outbox, job->client, LC_POUCH_RETENTION_COMPLETED,
+          job->outbox_key, (lc_unix_seconds)now, completed_marker_id, error);
+      if (rc != LC_OK)
+        return rc;
+      record.completed_retention_id =
+          completed_marker_id[0] == '\0' ? NULL : completed_marker_id;
     }
     if (strcmp(state, "dead_letter") == 0) {
       time_t now = time(NULL);
@@ -3921,8 +4053,8 @@ static int lc_outbox_job_terminal(lc_outbox_job *self, const char *state,
     if (rc != LC_OK)
       return rc;
     if (dead_letter_scheduled) {
-      lc_outbox_schedule_dead_letter_reclaim(
-          job->outbox, dead_letter_due_at_unix, dead_letter_now, 1);
+      lc_outbox_schedule_retention(job->outbox, dead_letter_due_at_unix,
+                                   dead_letter_now, 1);
     }
     job->staged_terminal_state = state;
     job->staged_terminal_not_before_unix = not_before_unix;
@@ -4471,8 +4603,8 @@ static int lc_outbox_claim_outbox(lc_outbox_handle *outbox, const char *key,
       if (rc == LC_OK)
         rc = lc_lease_save(lease, &lc_outbox_record_map, &record, error);
       if (rc == LC_OK && dead_letter_scheduled) {
-        lc_outbox_schedule_dead_letter_reclaim(outbox, dead_letter_due_at_unix,
-                                               (lc_unix_seconds)now, 1);
+        lc_outbox_schedule_retention(outbox, dead_letter_due_at_unix,
+                                     (lc_unix_seconds)now, 1);
       }
       if (rc == LC_OK) {
         lc_release_req release;
@@ -4536,8 +4668,8 @@ static int lc_outbox_claim_outbox(lc_outbox_handle *outbox, const char *key,
       if (rc == LC_OK)
         rc = lc_lease_save(lease, &lc_outbox_record_map, &record, error);
       if (rc == LC_OK && dead_letter_scheduled) {
-        lc_outbox_schedule_dead_letter_reclaim(outbox, dead_letter_due_at_unix,
-                                               (lc_unix_seconds)now, 1);
+        lc_outbox_schedule_retention(outbox, dead_letter_due_at_unix,
+                                     (lc_unix_seconds)now, 1);
       }
       if (rc == LC_OK) {
         lc_release_req release;
@@ -5060,7 +5192,7 @@ static void *lc_outbox_dispatcher_main(void *context) {
         outbox->recovery_claims_pending = 1;
       }
       if (lc_outbox_recovery_is_due_locked(outbox, now) ||
-          lc_outbox_dead_letter_reclaim_is_due_locked(outbox, now))
+          lc_outbox_retention_is_due_locked(outbox, now))
         break;
       due = lc_outbox_next_dispatch_deadline_locked(outbox);
       if (due > 0) {
@@ -5099,7 +5231,7 @@ static void *lc_outbox_dispatcher_main(void *context) {
      * dispatcher turn then performs ordinary retention. */
     reclaim_dead_letters =
         !outbox->startup_dead_letter_replay_pending &&
-        lc_outbox_dead_letter_reclaim_is_due_locked(outbox, selected_now);
+        lc_outbox_retention_is_due_locked(outbox, selected_now);
     /* A new overflow while reconciliation runs must be distinguishable from
      * the request that selected this sweep. Direct keys remain candidates for
      * a consumer; the private thread never removes or claims them. */
@@ -5108,8 +5240,8 @@ static void *lc_outbox_dispatcher_main(void *context) {
       outbox->recovery_immediate = 0;
     }
     if (reclaim_dead_letters) {
-      outbox->dead_letter_reclaim_needed = 0;
-      outbox->next_dead_letter_reclaim_unix = 0;
+      outbox->retention_needed = 0;
+      outbox->next_retention_unix = 0;
     }
     pthread_mutex_unlock(&outbox->notification_mutex);
 
@@ -5148,6 +5280,7 @@ static void *lc_outbox_dispatcher_main(void *context) {
         reclaimed = 1;
         ++reclaimed_count;
       }
+      lc_outbox_reclaim_terminal_batch(outbox, &next_due);
       pthread_mutex_lock(&outbox->notification_mutex);
       outbox->dead_letter_reclaims += (uint64_t)reclaimed_count;
       if (reclaim_rc != LC_OK) {
@@ -5161,8 +5294,8 @@ static void *lc_outbox_dispatcher_main(void *context) {
                                     &retry_error) != LC_OK)
           retry_at = 0;
         lc_error_cleanup(&retry_error);
-        outbox->dead_letter_reclaim_needed = 1;
-        outbox->next_dead_letter_reclaim_unix = retry_at;
+        outbox->retention_needed = 1;
+        outbox->next_retention_unix = retry_at;
         ++outbox->dead_letter_reclaim_failures;
       } else {
         if (reclaimed && pass == LC_OUTBOX_DEAD_LETTER_RECLAIM_BATCH) {
@@ -5180,26 +5313,26 @@ static void *lc_outbox_dispatcher_main(void *context) {
             next_due = 0;
           }
           lc_error_cleanup(&defer_error);
-          outbox->dead_letter_reclaim_needed = 1;
-          outbox->next_dead_letter_reclaim_unix = next_due;
+          outbox->retention_needed = 1;
+          outbox->next_retention_unix = next_due;
         } else {
           lc_unix_seconds discovery_due;
           lc_error discovery_error;
 
           discovery_due = 0;
           lc_error_init(&discovery_error);
-          if (lc_outbox_dead_letter_discovery_deadline(
+          if (lc_outbox_retention_discovery_deadline(
                   (lc_unix_seconds)time(NULL), next_due, &discovery_due,
                   &discovery_error) == LC_OK) {
             /* Even an empty scan must be retried: another shared Pouch
              * writer can publish a marker after we release this mutex. */
-            outbox->dead_letter_reclaim_needed = 1;
-            outbox->next_dead_letter_reclaim_unix = discovery_due;
+            outbox->retention_needed = 1;
+            outbox->next_retention_unix = discovery_due;
           } else if (next_due > 0) {
             /* Preserve already-known work if an exceptional clock value
              * prevents calculating the periodic rediscovery deadline. */
-            outbox->dead_letter_reclaim_needed = 1;
-            outbox->next_dead_letter_reclaim_unix = next_due;
+            outbox->retention_needed = 1;
+            outbox->next_retention_unix = next_due;
           }
           lc_error_cleanup(&discovery_error);
         }
@@ -5782,41 +5915,24 @@ static void lc_outbox_transaction_abort_enrolled_lease(
   transaction->terminal = 1;
 }
 
-/* An outbox transaction is an explicit XA decision even when its first
- * participant is the only one. Pouch can mint an xid for an ordinary lease,
- * but that implicit single-lease path intentionally has no durable decision
- * record. Mint the outbox xid immediately before its first participating
- * acquire instead: begin() itself stays side-effect free, while a
- * domain-first transaction has the same recoverable commit semantics as an
- * outbox-first one. */
+/* The constructor reserves one stable ID without writing storage. SQL-first,
+ * outbox-first and domain-first enrollment therefore share the same identity.
+ */
 static int
 lc_outbox_transaction_acquire_xid(lc_outbox_transaction_handle *transaction,
-                                  char minted[LC_XID_STRING_SIZE],
                                   const char **out, lc_error *error) {
-  const char *txn_id;
-
-  if (transaction == NULL || minted == NULL || out == NULL) {
+  if (transaction == NULL || out == NULL) {
     return lc_error_set(
         error, LC_ERR_INVALID, 0L,
         "outbox transaction xid requires transaction and output", NULL, NULL,
         NULL);
   }
-  if (transaction->lease_count == 0U) {
-    int rc = lc_xid_new(minted, error);
-
-    if (rc != LC_OK)
-      return rc;
-    *out = minted;
-    return LC_OK;
-  }
-  txn_id =
-      transaction->leases[0] == NULL ? NULL : transaction->leases[0]->txn_id;
-  if (txn_id == NULL || txn_id[0] == '\0') {
+  if (!lc_xid_is_valid(transaction->xid)) {
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                         "outbox transaction participant is missing its xid",
                         NULL, NULL, NULL);
   }
-  *out = txn_id;
+  *out = transaction->xid;
   return LC_OK;
 }
 
@@ -5828,7 +5944,6 @@ static int lc_outbox_transaction_acquire_method(
   lc_acquire_req acquire;
   lc_lease *lease;
   lc_outbox_participant_handle *participant;
-  char minted_txn_id[LC_XID_STRING_SIZE];
   int rc;
   if (transaction == NULL || request == NULL || out == NULL ||
       transaction->terminal || transaction->terminal_vote_started ||
@@ -5840,8 +5955,7 @@ static int lc_outbox_transaction_acquire_method(
                         NULL, NULL, NULL);
   }
   acquire = request->acquire;
-  rc = lc_outbox_transaction_acquire_xid(transaction, minted_txn_id,
-                                         &acquire.txn_id, error);
+  rc = lc_outbox_transaction_acquire_xid(transaction, &acquire.txn_id, error);
   if (rc != LC_OK)
     return rc;
   if (acquire.ns == NULL)
@@ -5916,7 +6030,6 @@ static int lc_outbox_transaction_accept_command_method(
   lc_lease *lease;
   char *key;
   char command_id[48];
-  char minted_txn_id[LC_XID_STRING_SIZE];
   lc_outbox_command_record record;
   lc_command_request effective_request;
   char generated_key[LC_XID_STRING_SIZE];
@@ -5951,8 +6064,7 @@ static int lc_outbox_transaction_accept_command_method(
   acquire.owner = transaction->outbox->owner;
   acquire.ttl_seconds = transaction->outbox->transaction_ttl_seconds;
   acquire.if_not_exists = 1;
-  rc = lc_outbox_transaction_acquire_xid(transaction, minted_txn_id,
-                                         &acquire.txn_id, error);
+  rc = lc_outbox_transaction_acquire_xid(transaction, &acquire.txn_id, error);
   if (rc != LC_OK) {
     free(key);
     return rc;
@@ -6025,7 +6137,6 @@ static int lc_outbox_transaction_accept_inbox_method(
   lc_acquire_req acquire;
   lc_lease *lease;
   char *key;
-  char minted_txn_id[LC_XID_STRING_SIZE];
   int rc;
 
   if (transaction == NULL || transaction->terminal ||
@@ -6050,8 +6161,7 @@ static int lc_outbox_transaction_accept_inbox_method(
   acquire.owner = transaction->outbox->owner;
   acquire.ttl_seconds = transaction->outbox->transaction_ttl_seconds;
   acquire.if_not_exists = 1;
-  rc = lc_outbox_transaction_acquire_xid(transaction, minted_txn_id,
-                                         &acquire.txn_id, error);
+  rc = lc_outbox_transaction_acquire_xid(transaction, &acquire.txn_id, error);
   if (rc != LC_OK) {
     free(key);
     return rc;
@@ -6075,8 +6185,7 @@ static int lc_outbox_transaction_accept_inbox_method(
     return rc;
   }
   free(key);
-  rc =
-      lc_outbox_stage_inbox(transaction->outbox->client, lease, message, error);
+  rc = lc_outbox_stage_inbox(transaction->outbox, lease, message, error);
   if (rc == LC_OK)
     rc = lc_outbox_transaction_add_lease(transaction, lease, error);
   if (rc == LC_OK && transaction->causation_id == NULL) {
@@ -6151,7 +6260,6 @@ static int lc_outbox_transaction_append_impl(lc_outbox_transaction *self,
   lc_lease *lease;
   lc_outbox_entry effective_entry;
   char *key;
-  char minted_txn_id[LC_XID_STRING_SIZE];
   int rc;
   if (transaction == NULL || transaction->terminal ||
       transaction->terminal_vote_started || receipt == NULL || entry == NULL)
@@ -6174,8 +6282,7 @@ static int lc_outbox_transaction_append_impl(lc_outbox_transaction *self,
   acquire.owner = transaction->outbox->owner;
   acquire.ttl_seconds = transaction->outbox->transaction_ttl_seconds;
   acquire.if_not_exists = 1;
-  rc = lc_outbox_transaction_acquire_xid(transaction, minted_txn_id,
-                                         &acquire.txn_id, error);
+  rc = lc_outbox_transaction_acquire_xid(transaction, &acquire.txn_id, error);
   if (rc != LC_OK) {
     free(key);
     return rc;
@@ -6516,10 +6623,46 @@ static int lc_outbox_transaction_commit_method(lc_outbox_transaction *self,
   if (out == NULL)
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "outbox commit result is required", NULL, NULL, NULL);
+  {
+    lc_outbox_transaction_handle *transaction =
+        (lc_outbox_transaction_handle *)self;
+    if (transaction != NULL && transaction->xa_bound) {
+      if (!transaction->xa_applied)
+        return lc_error_set(
+            error, LC_ERR_PENDING, 0L,
+            "drive managed XA completion before collecting outbox receipts",
+            NULL, NULL, NULL);
+      if (transaction->xa_decision != LC_XA_DECISION_COMMIT ||
+          transaction->xa_result_taken)
+        return lc_error_set(
+            error, LC_ERR_INVALID, 0L,
+            "outbox XA transaction was aborted or its result was already taken",
+            NULL, NULL, NULL);
+      lc_outbox_commit_result_cleanup(out);
+      *out = transaction->xa_result;
+      memset(&transaction->xa_result, 0, sizeof(transaction->xa_result));
+      transaction->xa_result_taken = 1;
+      return LC_OK;
+    }
+  }
   return lc_outbox_transaction_terminal(self, 0, out, error);
 }
 static int lc_outbox_transaction_rollback_method(lc_outbox_transaction *self,
                                                  lc_error *error) {
+  lc_outbox_transaction_handle *transaction =
+      (lc_outbox_transaction_handle *)self;
+  if (transaction != NULL && transaction->xa_bound) {
+    if (!transaction->xa_applied)
+      return lc_error_set(
+          error, LC_ERR_PENDING, 0L,
+          "drive managed XA rollback before confirming outbox completion", NULL,
+          NULL, NULL);
+    return transaction->xa_decision == LC_XA_DECISION_ABORT
+               ? LC_OK
+               : lc_error_set(error, LC_ERR_INVALID, 0L,
+                              "durable COMMIT cannot be rolled back", NULL,
+                              NULL, NULL);
+  }
   return lc_outbox_transaction_terminal(self, 1, NULL, error);
 }
 static void
@@ -6527,7 +6670,7 @@ lc_outbox_transaction_destroy(lc_outbox_transaction_handle *transaction) {
   lc_outbox_handle *outbox;
   size_t i;
   outbox = transaction->outbox;
-  if (!transaction->terminal)
+  if (!transaction->terminal && !transaction->xa_bound)
     (void)lc_outbox_transaction_terminal(
         &transaction->pub,
         transaction->terminal_vote_started ? transaction->terminal_rollback : 1,
@@ -6537,6 +6680,7 @@ lc_outbox_transaction_destroy(lc_outbox_transaction_handle *transaction) {
     lc_lease_close(transaction->leases[i]);
   lc_outbox_transaction_clear_notification_keys(transaction);
   lc_outbox_transaction_clear_fresh_outboxes(transaction);
+  lc_outbox_commit_result_cleanup(&transaction->xa_result);
   lc_client_free(outbox->client, transaction->leases);
   lc_client_free(outbox->client, transaction->causation_id);
   lc_client_free(outbox->client, transaction->command_id);
@@ -6565,6 +6709,165 @@ static void lc_outbox_transaction_close_method(lc_outbox_transaction *self) {
   lc_outbox_transaction_release(transaction);
 }
 
+static const char *
+lc_outbox_transaction_id_method(lc_outbox_transaction *self) {
+  lc_outbox_transaction_handle *transaction =
+      (lc_outbox_transaction_handle *)self;
+  return transaction != NULL ? transaction->xid : NULL;
+}
+static int lc_outbox_transaction_bind_xa_method(lc_outbox_transaction *self,
+                                                lc_xa_transaction *xa,
+                                                lc_error *error) {
+  lc_outbox_transaction_handle *transaction =
+      (lc_outbox_transaction_handle *)self;
+  const char *id = lc_xa_transaction_id(xa);
+  char prior_id[LC_XID_STRING_SIZE];
+  int prior_bound;
+  int rc;
+  if (transaction == NULL || id == NULL || transaction->close_requested ||
+      transaction->terminal ||
+      (transaction->xa != NULL && transaction->xa != xa))
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "XA binding requires an open outbox and valid transaction", NULL, NULL,
+        NULL);
+  if (transaction->xa == xa)
+    return LC_OK;
+  if ((transaction->lease_count != 0U || transaction->xa_bound) &&
+      strcmp(transaction->xid, id) != 0)
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "adopt the outbox global ID before binding existing participants", NULL,
+        NULL, NULL);
+  strcpy(prior_id, transaction->xid);
+  prior_bound = transaction->xa_bound;
+  strcpy(transaction->xid, id);
+  transaction->xa = xa;
+  transaction->xa_bound = 1;
+  lc_outbox_transaction_retain(transaction);
+  rc = lc_xa_transaction_attach_outbox(
+      xa, self, &transaction->outbox->client->pub, error);
+  if (rc != LC_OK) {
+    transaction->xa = NULL;
+    transaction->xa_bound = prior_bound;
+    strcpy(transaction->xid, prior_id);
+    lc_outbox_transaction_release(transaction);
+  }
+  return rc;
+}
+static int lc_outbox_transaction_commit_start_method(
+    lc_outbox_transaction *self, int64_t deadline,
+    lc_xa_coordinator_operation **out, lc_error *error) {
+  lc_outbox_transaction_handle *transaction =
+      (lc_outbox_transaction_handle *)self;
+  if (out != NULL)
+    *out = NULL;
+  if (transaction == NULL || transaction->xa == NULL ||
+      transaction->close_requested)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "outbox has no live managed XA binding", NULL, NULL,
+                        NULL);
+  return lc_xa_transaction_commit_start(transaction->xa, deadline, out, error);
+}
+static int lc_outbox_transaction_rollback_start_method(
+    lc_outbox_transaction *self, int64_t deadline,
+    lc_xa_coordinator_operation **out, lc_error *error) {
+  lc_outbox_transaction_handle *transaction =
+      (lc_outbox_transaction_handle *)self;
+  if (out != NULL)
+    *out = NULL;
+  if (transaction == NULL || transaction->xa == NULL ||
+      transaction->close_requested)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "outbox has no live managed XA binding", NULL, NULL,
+                        NULL);
+  return lc_xa_transaction_rollback_start(transaction->xa, deadline, out,
+                                          error);
+}
+int lc_outbox_xa_prepare(lc_outbox_transaction *self, int commit,
+                         lc_error *error) {
+  lc_outbox_transaction_handle *transaction =
+      (lc_outbox_transaction_handle *)self;
+  lc_outbox_commit_result prepared;
+  size_t i;
+  if (transaction->xa_ready)
+    return LC_OK;
+  if (commit && (transaction->close_requested || transaction->terminal))
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "bound outbox was closed or failed before XA prepare",
+                        NULL, NULL, NULL);
+  memset(&prepared, 0, sizeof(prepared));
+  if (transaction->fresh_outbox_count != 0U) {
+    prepared.outbox_receipts = (lc_outbox_receipt *)calloc(
+        transaction->fresh_outbox_count, sizeof(*prepared.outbox_receipts));
+    if (prepared.outbox_receipts == NULL)
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "cannot preallocate XA outbox receipts", NULL, NULL,
+                          NULL);
+    for (i = 0U; i < transaction->fresh_outbox_count; ++i) {
+      ++prepared.outbox_receipt_count;
+      prepared.outbox_receipts[i].outbox_key =
+          lc_strdup_local(transaction->fresh_outbox_keys[i]);
+      prepared.outbox_receipts[i].effect_key =
+          lc_strdup_local(transaction->fresh_outbox_effect_keys[i]);
+      if (prepared.outbox_receipts[i].outbox_key == NULL ||
+          prepared.outbox_receipts[i].effect_key == NULL) {
+        lc_outbox_commit_result_cleanup(&prepared);
+        return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "cannot preallocate XA outbox receipt identity",
+                            NULL, NULL, NULL);
+      }
+    }
+  }
+  transaction->xa_result = prepared;
+  transaction->xa_ready = 1;
+  return LC_OK;
+}
+void lc_outbox_xa_seal(lc_outbox_transaction *self) {
+  lc_outbox_transaction_handle *transaction =
+      (lc_outbox_transaction_handle *)self;
+  transaction->terminal_vote_started = 1;
+  lc_outbox_transaction_invalidate_participants(transaction);
+}
+void lc_outbox_xa_unprepare(lc_outbox_transaction *self) {
+  lc_outbox_transaction_handle *transaction =
+      (lc_outbox_transaction_handle *)self;
+  if (!transaction->terminal_vote_started) {
+    lc_outbox_commit_result_cleanup(&transaction->xa_result);
+    transaction->xa_ready = 0;
+  }
+}
+void lc_outbox_xa_applied(lc_outbox_transaction *self, int decision) {
+  lc_outbox_transaction_handle *transaction =
+      (lc_outbox_transaction_handle *)self;
+  size_t i;
+  if (transaction->xa_applied)
+    return;
+  transaction->xa_applied = 1;
+  transaction->xa_decision = decision;
+  transaction->terminal = 1;
+  lc_outbox_transaction_invalidate_participants(transaction);
+  for (i = 0U; i < transaction->lease_count; ++i) {
+    lc_lease_close(transaction->leases[i]);
+    transaction->leases[i] = NULL;
+  }
+  transaction->command_lease = NULL;
+  if (decision == LC_XA_DECISION_COMMIT)
+    for (i = 0U; i < transaction->fresh_outbox_count; ++i)
+      lc_outbox_publish_committed_outbox(transaction->outbox,
+                                         transaction->fresh_outbox_keys[i]);
+  else
+    lc_outbox_commit_result_cleanup(&transaction->xa_result);
+}
+void lc_outbox_xa_detach(lc_outbox_transaction *self) {
+  lc_outbox_transaction_handle *transaction =
+      (lc_outbox_transaction_handle *)self;
+  transaction->xa = NULL;
+  transaction->terminal_vote_started = 1;
+  lc_outbox_transaction_invalidate_participants(transaction);
+  lc_outbox_transaction_release(transaction);
+}
+
 static lc_outbox_transaction *
 lc_outbox_transaction_new(lc_outbox_handle *outbox, lc_lease *first,
                           lc_error *error) {
@@ -6577,9 +6880,19 @@ lc_outbox_transaction_new(lc_outbox_handle *outbox, lc_lease *first,
     return NULL;
   }
   transaction->outbox = outbox;
+  if (first != NULL && lc_xid_is_valid(first->txn_id))
+    strcpy(transaction->xid, first->txn_id);
+  else if (lc_xid_new(transaction->xid, error) != LC_OK) {
+    lc_client_free(outbox->client, transaction);
+    return NULL;
+  }
   transaction->ref_count = 1U;
   lc_outbox_retain(outbox);
   transaction->pub.accept_command = lc_outbox_transaction_accept_command_method;
+  transaction->pub.id = lc_outbox_transaction_id_method;
+  transaction->pub.bind_xa = lc_outbox_transaction_bind_xa_method;
+  transaction->pub.commit_start = lc_outbox_transaction_commit_start_method;
+  transaction->pub.rollback_start = lc_outbox_transaction_rollback_start_method;
   transaction->pub.accept_inbox = lc_outbox_transaction_accept_inbox_method;
   transaction->pub.acquire = lc_outbox_transaction_acquire_method;
   transaction->pub.append = lc_outbox_transaction_append_method;
@@ -6781,7 +7094,7 @@ static int lc_outbox_accept_inbox_method(lc_outbox *self,
     return rc;
   }
   free(key);
-  rc = lc_outbox_stage_inbox(outbox->client, lease, message, error);
+  rc = lc_outbox_stage_inbox(outbox, lease, message, error);
   if (rc != LC_OK) {
     lc_outbox_rollback_lease(lease);
     return rc;
@@ -7279,6 +7592,7 @@ static int lc_outbox_resume_command_by_id_method(
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "transaction and command receipt outputs are required",
                         NULL, NULL, NULL);
+  *out_txn = NULL;
   lc_command_receipt_init(&current);
   rc = lc_outbox_get_command_receipt_by_id_method(self, command_id, &current,
                                                   error);
@@ -7367,6 +7681,8 @@ static int lc_outbox_get_stats_method(lc_outbox *self, lc_outbox_stats *out,
   out->payload_open_failures = outbox->payload_open_failures;
   out->dead_letter_reclaims = outbox->dead_letter_reclaims;
   out->dead_letter_reclaim_failures = outbox->dead_letter_reclaim_failures;
+  out->terminal_reclaims = outbox->terminal_reclaims;
+  out->terminal_reclaim_failures = outbox->terminal_reclaim_failures;
   had_last_error = outbox->last_error != NULL;
   out->last_error = lc_strdup_local(outbox->last_error);
   pthread_mutex_unlock(&outbox->notification_mutex);
@@ -7398,11 +7714,10 @@ static int lc_outbox_reconcile_method(lc_outbox *self, lc_error *error) {
   return LC_OK;
 }
 
-static int
-lc_outbox_open_dead_letter(lc_outbox_handle *outbox, lc_client_handle *client,
-                           const char *outbox_key, lc_lease **lease_out,
-                           lc_outbox_record *record, int *not_dead_letter_out,
-                           lc_error *error) {
+static int lc_outbox_open_terminal_outbox(
+    lc_outbox_handle *outbox, lc_client_handle *client, const char *outbox_key,
+    const char *terminal_state, lc_lease **lease_out, lc_outbox_record *record,
+    int *not_dead_letter_out, lc_error *error) {
   lc_acquire_req acquire;
   lc_get_res result;
   lonejson *runtime;
@@ -7444,11 +7759,14 @@ lc_outbox_open_dead_letter(lc_outbox_handle *outbox, lc_client_handle *client,
   if (rc == LC_OK &&
       (record->record_type == NULL || record->dispatch_state == NULL ||
        strcmp(record->record_type, "lockdc.outbox.v1") != 0 ||
-       strcmp(record->dispatch_state, "dead_letter") != 0)) {
+       strcmp(record->dispatch_state, terminal_state) != 0)) {
     if (not_dead_letter_out != NULL)
       *not_dead_letter_out = 1;
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "outbox record is not a dead letter", NULL, NULL, NULL);
+                      strcmp(terminal_state, "dead_letter") == 0
+                          ? "outbox record is not a dead letter"
+                          : "outbox record is not completed",
+                      NULL, NULL, NULL);
   }
   if (rc != LC_OK) {
     runtime->cleanup(runtime, &lc_outbox_record_map, record);
@@ -7487,8 +7805,8 @@ static int lc_outbox_replay_dead_letter_on_client(lc_outbox_handle *outbox,
   }
 #endif
   lease = NULL;
-  rc = lc_outbox_open_dead_letter(outbox, client, outbox_key, &lease, &record,
-                                  NULL, error);
+  rc = lc_outbox_open_terminal_outbox(outbox, client, outbox_key, "dead_letter",
+                                      &lease, &record, NULL, error);
   if (rc != LC_OK)
     return rc;
   rc = lc_outbox_validate_durable_outbox_record(&record, error);
@@ -7547,8 +7865,9 @@ static int lc_outbox_replay_dead_letter_on_client(lc_outbox_handle *outbox,
      * cleanup fails after that decision, retention safely retires this stale
      * marker when it observes the now-pending parent. */
     lc_error_init(&ignored);
-    (void)lc_pouch_outbox_dead_letter_marker_remove(
-        client->pouch, outbox->ns, original_dead_letter_retention_id, &ignored);
+    (void)lc_pouch_outbox_retention_marker_remove(
+        client->pouch, outbox->ns, LC_POUCH_RETENTION_DEAD_LETTER,
+        original_dead_letter_retention_id, 0, &ignored);
     lc_error_cleanup(&ignored);
   }
   record.dispatch_state = original_dispatch_state;
@@ -7703,9 +8022,10 @@ static int lc_outbox_replay_dead_letters_on_startup(lc_outbox_handle *outbox,
   return LC_OK;
 }
 
-static int lc_outbox_delete_dead_letter_on_client(
-    lc_outbox_handle *outbox, lc_client_handle *client, const char *outbox_key,
-    const char *expected_retention_id, int *stale_out, lc_error *error) {
+static int lc_outbox_delete_terminal_outbox_on_client(
+    lc_outbox_handle *outbox, lc_client_handle *client, int kind,
+    const char *outbox_key, const char *expected_retention_id, int *stale_out,
+    lc_error *error) {
   lc_outbox_record record;
   lc_lease *lease;
   lc_lease *deadline_lease;
@@ -7718,6 +8038,7 @@ static int lc_outbox_delete_dead_letter_on_client(
   int deleted;
   int deleted_state_attachments;
   int not_dead_letter;
+  const char *retention_id;
   int rc;
 
   if (stale_out != NULL)
@@ -7729,8 +8050,10 @@ static int lc_outbox_delete_dead_letter_on_client(
   state_key = NULL;
   state_marker_id[0] = '\0';
   not_dead_letter = 0;
-  rc = lc_outbox_open_dead_letter(outbox, client, outbox_key, &lease, &record,
-                                  &not_dead_letter, error);
+  rc = lc_outbox_open_terminal_outbox(
+      outbox, client, outbox_key,
+      kind == LC_POUCH_RETENTION_COMPLETED ? "completed" : "dead_letter",
+      &lease, &record, &not_dead_letter, error);
   if (rc != LC_OK) {
     /* A marker can outlive an explicit parent deletion if the process stops
      * after removing the envelope but before removing its control file. That
@@ -7743,9 +8066,12 @@ static int lc_outbox_delete_dead_letter_on_client(
     }
     return rc;
   }
+  retention_id = kind == LC_POUCH_RETENTION_COMPLETED
+                     ? record.completed_retention_id
+                     : record.dead_letter_retention_id;
   if (expected_retention_id != NULL &&
-      (record.dead_letter_retention_id == NULL ||
-       strcmp(record.dead_letter_retention_id, expected_retention_id) != 0)) {
+      (retention_id == NULL ||
+       strcmp(retention_id, expected_retention_id) != 0)) {
     lc_outbox_record_loaded_clear(client, &record);
     lc_outbox_rollback_lease(lease);
     if (stale_out != NULL)
@@ -7842,6 +8168,12 @@ static int lc_outbox_delete_dead_letter_on_client(
   }
   deleted = 0;
   rc = lc_lease_delete_all_attachments(lease, &deleted, error);
+#ifdef LOCKDC_TEST_BUILD
+  if (rc == LC_OK && kind == LC_POUCH_RETENTION_COMPLETED &&
+      lc_outbox_test_before_terminal_remove_hook != NULL)
+    rc = lc_outbox_test_before_terminal_remove_hook(
+        lc_outbox_test_before_terminal_remove_context, error);
+#endif
   if (rc == LC_OK) {
     lc_remove_req_init(&remove);
     rc = lc_lease_remove(lease, &remove, error);
@@ -7863,8 +8195,9 @@ static int lc_outbox_delete_dead_letter_on_client(
     lc_error ignored;
 
     lc_error_init(&ignored);
-    (void)lc_pouch_outbox_dead_letter_marker_remove(
-        client->pouch, outbox->ns, record.dead_letter_retention_id, &ignored);
+    (void)lc_pouch_outbox_retention_marker_remove(
+        client->pouch, outbox->ns, LC_POUCH_RETENTION_DEAD_LETTER,
+        record.dead_letter_retention_id, 0, &ignored);
     lc_error_cleanup(&ignored);
   }
   lc_outbox_record_loaded_clear(client, &record);
@@ -7876,9 +8209,9 @@ static int lc_outbox_delete_dead_letter_on_client(
 static int lc_outbox_delete_dead_letter_method(lc_outbox *self,
                                                const char *outbox_key,
                                                lc_error *error) {
-  return lc_outbox_delete_dead_letter_on_client(
-      (lc_outbox_handle *)self, ((lc_outbox_handle *)self)->client, outbox_key,
-      NULL, NULL, error);
+  return lc_outbox_delete_terminal_outbox_on_client(
+      (lc_outbox_handle *)self, ((lc_outbox_handle *)self)->client,
+      LC_POUCH_RETENTION_DEAD_LETTER, outbox_key, NULL, NULL, error);
 }
 
 /* Retention never discovers records through a namespace query. Its only scan
@@ -7890,7 +8223,7 @@ static int lc_outbox_reclaim_one_dead_letter(lc_outbox_handle *outbox,
                                              lc_unix_seconds *next_due_unix,
                                              int *reclaimed, lc_error *error) {
   lc_client_handle *maintenance_client;
-  lc_pouch_outbox_dead_letter_marker marker;
+  lc_pouch_outbox_retention_marker marker;
   int stale;
   int rc;
 
@@ -7905,45 +8238,255 @@ static int lc_outbox_reclaim_one_dead_letter(lc_outbox_handle *outbox,
   }
   *next_due_unix = 0;
   *reclaimed = 0;
+  if (outbox->dead_letter_retention_seconds == -1L)
+    return LC_OK;
   memset(&marker, 0, sizeof(marker));
-  rc = lc_pouch_outbox_dead_letter_marker_take(
-      maintenance_client->pouch, outbox->ns, outbox->dead_letter_reclaim_cursor,
-      now, outbox->dead_letter_max_count, outbox->dead_letter_max_bytes,
-      &marker, next_due_unix, error);
-  if (rc != LC_OK)
-    goto cleanup;
-  if (marker.marker_id == NULL)
-    goto cleanup;
-  {
+  rc = lc_pouch_outbox_retention_marker_take(
+      maintenance_client->pouch, outbox->ns, LC_POUCH_RETENTION_DEAD_LETTER,
+      outbox->dead_letter_reclaim_cursor, now, outbox->dead_letter_max_count,
+      outbox->dead_letter_max_bytes, &marker, next_due_unix, error);
+  if (marker.selected_id[0] != '\0') {
     char *next_cursor;
 
-    next_cursor = lc_client_strdup(outbox->client, marker.marker_id);
-    if (next_cursor != NULL) {
-      lc_client_free(outbox->client, outbox->dead_letter_reclaim_cursor);
-      outbox->dead_letter_reclaim_cursor = next_cursor;
+    next_cursor = lc_client_strdup(outbox->client, marker.selected_id);
+    if (next_cursor == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy dead-letter retention cursor", NULL,
+                        NULL, NULL);
+      goto cleanup;
     }
+    lc_client_free(outbox->client, outbox->dead_letter_reclaim_cursor);
+    outbox->dead_letter_reclaim_cursor = next_cursor;
   }
+  if (rc != LC_OK || marker.marker_id == NULL)
+    goto cleanup;
   stale = 0;
-  rc = lc_outbox_delete_dead_letter_on_client(outbox, maintenance_client,
-                                              marker.outbox_key,
-                                              marker.marker_id, &stale, error);
+  rc = lc_outbox_delete_terminal_outbox_on_client(
+      outbox, maintenance_client, LC_POUCH_RETENTION_DEAD_LETTER,
+      marker.outbox_key, marker.marker_id, &stale, error);
   if (rc == LC_OUTBOX_DEAD_LETTER_RETENTION_STALE && stale) {
     lc_error_cleanup(error);
     lc_error_init(error);
     rc = LC_OK;
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_outbox_dead_letter_marker_remove(
-        maintenance_client->pouch, outbox->ns, marker.marker_id, error);
+    rc = lc_pouch_outbox_retention_marker_remove(
+        maintenance_client->pouch, outbox->ns, LC_POUCH_RETENTION_DEAD_LETTER,
+        marker.marker_id, 0, error);
     if (rc == LC_OK)
       *reclaimed = 1;
   }
 
 cleanup:
-  lc_pouch_outbox_dead_letter_marker_cleanup(maintenance_client->pouch,
-                                             &marker);
+  lc_pouch_outbox_retention_marker_cleanup(maintenance_client->pouch, &marker);
   return rc;
 }
+
+/* Terminal receipt cleanup takes its exact lease and stages attachment and
+ * parent deletion in one transaction. A failure preserves both for retry. */
+static int lc_outbox_delete_terminal_receipt(
+    lc_outbox_handle *outbox, lc_client_handle *client, int kind,
+    const lc_pouch_outbox_retention_marker *marker, lc_error *error) {
+  lc_outbox_command_record command;
+  lc_outbox_inbox_record inbox;
+  lc_lease *lease;
+  lc_acquire_req acquire;
+  lc_get_res result;
+  lc_remove_req remove;
+  lc_release_req release;
+  lonejson *runtime;
+  const char *identity;
+  int terminal;
+  int deleted;
+  int rc;
+
+  {
+    const char *prefix = kind == LC_POUCH_RETENTION_COMMAND
+                             ? "__lockdc_io/v1/command/"
+                             : "__lockdc_io/v1/inbox/";
+    if (strncmp(marker->outbox_key, prefix, strlen(prefix)) != 0 ||
+        marker->outbox_key[strlen(prefix)] == '\0')
+      return lc_error_set(
+          error, LC_ERR_PROTOCOL, 0L,
+          "terminal retention marker has an invalid receipt key", NULL, NULL,
+          NULL);
+  }
+  lease = NULL;
+  identity = NULL;
+  terminal = 0;
+  memset(&command, 0, sizeof(command));
+  memset(&inbox, 0, sizeof(inbox));
+  memset(&result, 0, sizeof(result));
+  rc = lc_outbox_require_json_runtime(client, &runtime, error);
+  if (rc != LC_OK)
+    return rc;
+  lc_acquire_req_init(&acquire);
+  acquire.ns = outbox->ns;
+  acquire.key = marker->outbox_key;
+  acquire.owner = outbox->owner;
+  acquire.ttl_seconds = outbox->transaction_ttl_seconds;
+  rc = lc_acquire(&client->pub, &acquire, &lease, error);
+  if (rc == LC_OK && kind == LC_POUCH_RETENTION_COMMAND) {
+    rc = lc_lease_load(lease, &lc_outbox_command_record_map, &command, NULL,
+                       &result, error);
+    if (rc == LC_OK && !result.no_content) {
+      rc = lc_outbox_validate_durable_command_record(&command, error);
+      terminal =
+          command.state != NULL && (strcmp(command.state, "completed") == 0 ||
+                                    strcmp(command.state, "failed") == 0);
+      identity = command.retention_id;
+    }
+  } else if (rc == LC_OK) {
+    rc = lc_lease_load(lease, &lc_outbox_inbox_record_map, &inbox, NULL,
+                       &result, error);
+    terminal = inbox.record_type != NULL &&
+               strcmp(inbox.record_type, "lockdc.inbox.v1") == 0 &&
+               inbox.processing_state != NULL &&
+               strcmp(inbox.processing_state, "accepted") == 0;
+    identity = inbox.retention_id;
+  }
+  if (rc == LC_OK && (!terminal || identity == NULL ||
+                      strcmp(identity, marker->marker_id) != 0))
+    rc = LC_OUTBOX_DEAD_LETTER_RETENTION_STALE;
+  if (rc == LC_OK) {
+    deleted = 0;
+    rc = lc_lease_delete_all_attachments(lease, &deleted, error);
+#ifdef LOCKDC_TEST_BUILD
+    if (rc == LC_OK && lc_outbox_test_before_terminal_remove_hook != NULL)
+      rc = lc_outbox_test_before_terminal_remove_hook(
+          lc_outbox_test_before_terminal_remove_context, error);
+#endif
+    if (rc == LC_OK) {
+      lc_remove_req_init(&remove);
+      rc = lc_lease_remove(lease, &remove, error);
+    }
+    if (rc == LC_OK) {
+      lc_release_req_init(&release);
+      rc = lc_lease_release(lease, &release, error);
+      if (rc == LC_OK)
+        lease = NULL;
+    }
+  }
+  if (lease != NULL)
+    lc_outbox_rollback_lease(lease);
+  runtime->cleanup(runtime, &lc_outbox_command_record_map, &command);
+  runtime->cleanup(runtime, &lc_outbox_inbox_record_map, &inbox);
+  lc_get_res_cleanup(&result);
+  return rc;
+}
+
+static int lc_outbox_reclaim_one_terminal(lc_outbox_handle *outbox, int kind,
+                                          lc_unix_seconds now,
+                                          lc_unix_seconds *next_due,
+                                          int *reclaimed, lc_error *error) {
+  lc_client_handle *client = outbox->dispatcher_client != NULL
+                                 ? outbox->dispatcher_client
+                                 : outbox->client;
+  lc_pouch_outbox_retention_marker marker;
+  char *cursor;
+  int stale;
+  int rc;
+
+  *next_due = 0;
+  *reclaimed = 0;
+  if (!client->is_pouch || outbox->retention_seconds[kind] == -1L)
+    return LC_OK;
+  memset(&marker, 0, sizeof(marker));
+  rc = lc_pouch_outbox_retention_marker_take(
+      client->pouch, outbox->ns, kind, outbox->retention_cursor[kind], now,
+      outbox->retention_max_count[kind], ~(uint64_t)0U, &marker, next_due,
+      error);
+  if (marker.selected_id[0] != '\0') {
+    cursor = lc_client_strdup(outbox->client, marker.selected_id);
+    if (cursor == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy terminal retention cursor", NULL, NULL,
+                        NULL);
+      goto cleanup;
+    }
+    lc_client_free(outbox->client, outbox->retention_cursor[kind]);
+    outbox->retention_cursor[kind] = cursor;
+  }
+  if (rc != LC_OK || marker.marker_id == NULL)
+    goto cleanup;
+  stale = 0;
+  if (kind == LC_POUCH_RETENTION_COMPLETED)
+    rc = lc_outbox_delete_terminal_outbox_on_client(
+        outbox, client, kind, marker.outbox_key, marker.marker_id, &stale,
+        error);
+  else
+    rc =
+        lc_outbox_delete_terminal_receipt(outbox, client, kind, &marker, error);
+  if (rc == LC_OUTBOX_DEAD_LETTER_RETENTION_STALE) {
+    lc_error_cleanup(error);
+    lc_error_init(error);
+    rc = LC_OK;
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_outbox_retention_marker_remove(client->pouch, outbox->ns,
+                                                 kind, marker.marker_id,
+                                                 marker.due_at_unix, error);
+    if (rc == LC_OK)
+      *reclaimed = 1;
+  }
+cleanup:
+  lc_pouch_outbox_retention_marker_cleanup(client->pouch, &marker);
+  return rc;
+}
+
+/* Each family gets a bounded turn. A busy record cannot starve other types;
+ * errors remain observable and retain durable work for a later turn. */
+static void lc_outbox_reclaim_terminal_batch(lc_outbox_handle *outbox,
+                                             lc_unix_seconds *next_due) {
+  int kind;
+  for (kind = LC_POUCH_RETENTION_COMPLETED;
+       kind < LC_POUCH_RETENTION_KIND_COUNT; ++kind) {
+    unsigned int pass;
+    for (pass = 0U; pass < LC_OUTBOX_DEAD_LETTER_RECLAIM_BATCH; ++pass) {
+      lc_unix_seconds due;
+      lc_error error;
+      int reclaimed;
+      int rc;
+      lc_error_init(&error);
+      rc = lc_outbox_reclaim_one_terminal(
+          outbox, kind, (lc_unix_seconds)time(NULL), &due, &reclaimed, &error);
+      if (rc != LC_OK) {
+        lc_outbox_record_error(outbox, &error);
+        due = (lc_unix_seconds)time(NULL) + 1;
+      } else if (reclaimed) {
+        due = (lc_unix_seconds)time(NULL) + 1;
+      }
+      pthread_mutex_lock(&outbox->notification_mutex);
+      if (rc != LC_OK)
+        ++outbox->terminal_reclaim_failures;
+      else if (reclaimed)
+        ++outbox->terminal_reclaims;
+      pthread_mutex_unlock(&outbox->notification_mutex);
+      lc_error_cleanup(&error);
+      if (due > 0 && (*next_due == 0 || due < *next_due))
+        *next_due = due;
+      if (rc != LC_OK || !reclaimed)
+        break;
+    }
+  }
+}
+
+#ifdef LOCKDC_TEST_BUILD
+int lc_outbox_test_reclaim_terminal(lc_outbox *self, int kind, lc_i64 now,
+                                    size_t *reclaimed, lc_i64 *next_due,
+                                    lc_error *error) {
+  int did_reclaim;
+  int rc;
+  if (self == NULL || kind < LC_POUCH_RETENTION_COMPLETED ||
+      kind >= LC_POUCH_RETENTION_KIND_COUNT || now <= 0 || reclaimed == NULL ||
+      next_due == NULL)
+    return LC_ERR_INVALID;
+  rc = lc_outbox_reclaim_one_terminal((lc_outbox_handle *)self, kind, now,
+                                      next_due, &did_reclaim, error);
+  *reclaimed = did_reclaim ? 1U : 0U;
+  return rc;
+}
+#endif
 
 typedef struct lc_outbox_dead_letter_export_capture {
   lc_outbox_handle *outbox;
@@ -7971,8 +8514,9 @@ lc_outbox_export_dead_letter_key(lc_outbox_dead_letter_export_capture *capture,
         lc_outbox_test_before_dead_letter_export_open_context);
   }
 #endif
-  rc = lc_outbox_open_dead_letter(capture->outbox, capture->outbox->client,
-                                  capture->key, &lease, &record, NULL, error);
+  rc = lc_outbox_open_terminal_outbox(capture->outbox, capture->outbox->client,
+                                      capture->key, "dead_letter", &lease,
+                                      &record, NULL, error);
   if (rc != LC_OK) {
     /* Index selection and the direct read are separate operations. A record
      * replayed or deleted between them is no longer exportable, not an export
@@ -8156,6 +8700,12 @@ static void lc_outbox_destroy(lc_outbox_handle *outbox) {
   free(outbox->recovery_cursor);
   lc_client_free(client, outbox->state_reclaim_cursor);
   lc_client_free(client, outbox->dead_letter_reclaim_cursor);
+  {
+    int kind;
+    for (kind = LC_POUCH_RETENTION_COMPLETED;
+         kind < LC_POUCH_RETENTION_KIND_COUNT; ++kind)
+      lc_client_free(client, outbox->retention_cursor[kind]);
+  }
   lc_client_free(client, outbox->last_error);
   if (outbox->dispatcher_cond_initialized)
     pthread_cond_destroy(&outbox->dispatcher_cond);
@@ -8326,6 +8876,24 @@ static int lc_outbox_new(lc_client *self, const lc_outbox_config *config,
   outbox->dead_letter_max_bytes = config->dead_letter_max_bytes == 0U
                                       ? (uint64_t)64U * 1024U * 1024U
                                       : config->dead_letter_max_bytes;
+  outbox->retention_seconds[LC_POUCH_RETENTION_COMPLETED] =
+      config->completed_retention_seconds == 0L
+          ? 30L * 24L * 60L * 60L
+          : config->completed_retention_seconds;
+  outbox->retention_max_count[LC_POUCH_RETENTION_COMPLETED] =
+      config->completed_max_count == 0U ? SIZE_MAX
+                                        : config->completed_max_count;
+  outbox->retention_seconds[LC_POUCH_RETENTION_INBOX] =
+      config->inbox_retention_seconds == 0L ? 30L * 24L * 60L * 60L
+                                            : config->inbox_retention_seconds;
+  outbox->retention_max_count[LC_POUCH_RETENTION_INBOX] =
+      config->inbox_max_count == 0U ? SIZE_MAX : config->inbox_max_count;
+  outbox->retention_seconds[LC_POUCH_RETENTION_COMMAND] =
+      config->command_retention_seconds == 0L
+          ? 30L * 24L * 60L * 60L
+          : config->command_retention_seconds;
+  outbox->retention_max_count[LC_POUCH_RETENTION_COMMAND] =
+      config->command_max_count == 0U ? SIZE_MAX : config->command_max_count;
   outbox->startup_dead_letter_replay_pending =
       outbox->replay_dead_letters_on_startup;
   outbox->retry_initial_delay_seconds =
@@ -8366,6 +8934,38 @@ static int lc_outbox_new(lc_client *self, const lc_outbox_config *config,
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "dead-letter retention is available only for Pouch",
                         NULL, NULL, NULL);
+  }
+  if (!client->is_pouch &&
+      (config->completed_retention_seconds != 0L ||
+       config->completed_max_count != 0U ||
+       config->inbox_retention_seconds != 0L || config->inbox_max_count != 0U ||
+       config->command_retention_seconds != 0L ||
+       config->command_max_count != 0U)) {
+    lc_outbox_close_method(&outbox->pub);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "terminal retention is available only for Pouch", NULL,
+                        NULL, NULL);
+  }
+  {
+    int kind;
+    for (kind = LC_POUCH_RETENTION_COMPLETED;
+         kind < LC_POUCH_RETENTION_KIND_COUNT; ++kind) {
+      lc_unix_seconds due;
+      if (outbox->retention_seconds[kind] < -1L) {
+        lc_outbox_close_method(&outbox->pub);
+        return lc_error_set(
+            error, LC_ERR_INVALID, 0L,
+            "terminal retention seconds must be -1, zero, or positive", NULL,
+            NULL, NULL);
+      }
+      if (client->is_pouch && outbox->retention_seconds[kind] != -1L &&
+          lc_outbox_timestamp_add((lc_unix_seconds)time(NULL),
+                                  outbox->retention_seconds[kind],
+                                  "terminal retention", &due, error) != LC_OK) {
+        lc_outbox_close_method(&outbox->pub);
+        return error != NULL ? error->code : LC_ERR_INVALID;
+      }
+    }
   }
   now = time(NULL);
   if (now == (time_t)-1) {
@@ -8459,9 +9059,12 @@ static int lc_outbox_new(lc_client *self, const lc_outbox_config *config,
   if (client->is_pouch) {
     lc_client_handle_retain(client);
     outbox->dispatcher_client = client;
-    if (outbox->dead_letter_retention_seconds != -1L) {
-      outbox->dead_letter_reclaim_needed = 1;
-      outbox->next_dead_letter_reclaim_unix = (lc_unix_seconds)now;
+    if (outbox->dead_letter_retention_seconds != -1L ||
+        outbox->retention_seconds[LC_POUCH_RETENTION_COMPLETED] != -1L ||
+        outbox->retention_seconds[LC_POUCH_RETENTION_INBOX] != -1L ||
+        outbox->retention_seconds[LC_POUCH_RETENTION_COMMAND] != -1L) {
+      outbox->retention_needed = 1;
+      outbox->next_retention_unix = (lc_unix_seconds)now;
     }
   } else {
     lc_client *dispatcher_client = NULL;
@@ -9041,6 +9644,18 @@ static int lc_outbox_get_or_start_dispatcher_method(lc_outbox *self,
         outbox->dead_letter_retention_seconds;
     config.dead_letter_max_count = outbox->dead_letter_max_count;
     config.dead_letter_max_bytes = outbox->dead_letter_max_bytes;
+    config.completed_retention_seconds =
+        outbox->retention_seconds[LC_POUCH_RETENTION_COMPLETED];
+    config.completed_max_count =
+        outbox->retention_max_count[LC_POUCH_RETENTION_COMPLETED];
+    config.inbox_retention_seconds =
+        outbox->retention_seconds[LC_POUCH_RETENTION_INBOX];
+    config.inbox_max_count =
+        outbox->retention_max_count[LC_POUCH_RETENTION_INBOX];
+    config.command_retention_seconds =
+        outbox->retention_seconds[LC_POUCH_RETENTION_COMMAND];
+    config.command_max_count =
+        outbox->retention_max_count[LC_POUCH_RETENTION_COMMAND];
   }
   core = NULL;
   rc = lc_outbox_new(&outbox->client->pub, &config, 1, &core, error);

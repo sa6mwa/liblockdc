@@ -8,7 +8,9 @@ function(lockdc_import_cmake_cache_value binary_dir var_name)
         REGEX "^${var_name}(:[^=]+)?="
         LIMIT_COUNT 1)
     if(cache_line)
-        string(REGEX REPLACE "^[^=]*=" "" cache_value "${cache_line}")
+        string(FIND "${cache_line}" "=" cache_separator)
+        math(EXPR cache_value_start "${cache_separator} + 1")
+        string(SUBSTRING "${cache_line}" ${cache_value_start} -1 cache_value)
         set(${var_name} "${cache_value}" PARENT_SCOPE)
     endif()
 endfunction()
@@ -36,7 +38,8 @@ function(lockdc_resolve_bootlin_runtime sysroot external_root primary_lib_dir
     endif()
 
     foreach(runtime_dir
-        "${external_root}/c.pkt.systems/install/lib"
+        "${external_root}/cpkt/install/lib"
+        "${external_root}/cpktdb/install/lib"
         "${external_root}/curl/install/lib"
         "${external_root}/openssl/install/lib"
         "${external_root}/nghttp2/install/lib"

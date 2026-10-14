@@ -18,14 +18,15 @@ static void print_usage(const char *argv0) {
   fputs("  -k KEY        state key to mutate (required)\n", stderr);
   fputs("  -m MUTATION   lql mutate expression (required, repeatable)\n",
         stderr);
-  fputs("  -u URL        primary lockd endpoint (default: "
+  fputs("  -u URL        primary lockd endpoint (LOCKDC_URL or default: "
         "https://localhost:19441)\n",
         stderr);
-  fputs("  -f URL        fallback lockd endpoint (default: "
+  fputs("  -f URL        fallback lockd endpoint (LOCKDC_FALLBACK_URL or "
+        "default: "
         "https://localhost:19442)\n",
         stderr);
-  fputs("  -c FILE       client PEM bundle (default: "
-        "devenv/volumes/lockd-disk-a-config/client.pem)\n",
+  fputs("  -c FILE       client PEM bundle (LOCKDC_CLIENT_PEM or default: "
+        "build/devenv/credentials/disk/client.pem)\n",
         stderr);
   fputs("  -n NAME       default namespace (default: default)\n", stderr);
   fputs("  -o OWNER      lease owner (default: example-local-mutate)\n",
@@ -76,9 +77,18 @@ int main(int argc, char **argv) {
   int rc;
   int opt;
 
-  endpoint = EXAMPLE_ENDPOINT;
-  fallback_endpoint = EXAMPLE_FALLBACK_ENDPOINT;
-  client_pem = EXAMPLE_CLIENT_PEM;
+  endpoint = getenv("LOCKDC_URL");
+  if (endpoint == NULL || endpoint[0] == '\0') {
+    endpoint = EXAMPLE_ENDPOINT;
+  }
+  fallback_endpoint = getenv("LOCKDC_FALLBACK_URL");
+  if (fallback_endpoint == NULL || fallback_endpoint[0] == '\0') {
+    fallback_endpoint = EXAMPLE_FALLBACK_ENDPOINT;
+  }
+  client_pem = getenv("LOCKDC_CLIENT_PEM");
+  if (client_pem == NULL || client_pem[0] == '\0') {
+    client_pem = EXAMPLE_CLIENT_PEM;
+  }
   ns = EXAMPLE_NAMESPACE;
   owner = EXAMPLE_OWNER;
   base_dir = ".";

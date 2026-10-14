@@ -148,7 +148,7 @@ int main(void) {
 
 set(lockdc_consumer_prefix_path
     "${release_prefix}"
-    "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install"
+    "${LOCKDC_EXTERNAL_ROOT}/cpkt/install"
     "${LOCKDC_EXTERNAL_ROOT}/pslog/install"
     "${LOCKDC_EXTERNAL_ROOT}/lonejson/install"
     "${LOCKDC_EXTERNAL_ROOT}/liblql/install")
@@ -161,11 +161,11 @@ set(configure_args
     "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
     "-DCMAKE_PREFIX_PATH=${lockdc_consumer_prefix_path_arg}"
     "-Dlockdc_DIR=${release_prefix}/lib/cmake/lockdc"
-    "-DCURL_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/CURL"
-    "-DOpenSSL_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/OpenSSL"
-    "-DZLIB_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/zlib"
-    "-Dnghttp2_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/nghttp2"
-    "-DLibssh2_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/libssh2"
+    "-DCURL_DIR=${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/CURL"
+    "-DOpenSSL_DIR=${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/OpenSSL"
+    "-DZLIB_DIR=${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/zlib"
+    "-Dnghttp2_DIR=${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/nghttp2"
+    "-DLibssh2_DIR=${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/cmake/libssh2"
     "-Dpslog_DIR=${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/cmake/pslog"
     "-Dlonejson_DIR=${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/cmake/lonejson"
     "-Dliblql_DIR=${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib/cmake/liblql"

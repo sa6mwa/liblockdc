@@ -1,13 +1,7 @@
-build/
+/build/
 cmake-build-*/
 .cache/
 .luarocks-build/
 dist/
 /stash/
 /logs/
-
-devenv/volumes/**
-!devenv/volumes/
-!devenv/volumes/minio-data/
-!devenv/volumes/minio-data/lockd-client-s3/
-!devenv/volumes/**/.gitkeep

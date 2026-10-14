@@ -125,7 +125,9 @@ func startLockdDiskHarnessWithOptionsAndHAMode(tb testing.TB, cryptoEnabled bool
 	if st, err := os.Stat(bin); err != nil || st.IsDir() {
 		tb.Skipf("lockd disk benchmark requires lockd binary at %s; run through make benchmark-pouch-go* or set LOCKDC_BENCH_LOCKD_BIN", bin)
 	}
-	root, err := os.MkdirTemp("", "liblockdc-lockd-disk-bench-")
+	// Pouch's C fixture uses /tmp directly. Keep both engines on that same
+	// filesystem even when the caller redirects Go's TMPDIR for build scratch.
+	root, err := os.MkdirTemp("/tmp", "liblockdc-lockd-disk-bench-")
 	if err != nil {
 		tb.Fatalf("create lockd disk temp root: %v", err)
 	}
@@ -161,10 +163,10 @@ func startLockdDiskHarnessWithOptionsAndHAMode(tb testing.TB, cryptoEnabled bool
 		haMode:             haMode,
 		logs:               &bytes.Buffer{},
 	}
-	h.start(tb)
 	tb.Cleanup(func() {
 		h.stop(tb)
 	})
+	h.start(tb)
 	return h
 }
 
@@ -177,11 +179,26 @@ func (h *lockdDiskHarness) commandArgs() []string {
 		"--log-level", "error",
 		"--default-namespace", lockdDiskBenchNamespace,
 		"--qrf-disabled",
+		// All fixture leases are released before restart; a production drain
+		// grace would only delay shutdown and outlive the bounded fallback.
+		"--drain-grace", "0",
+		"--shutdown-timeout", "1s",
+		// Bound lease handoff when the pinned CLI exits before HA cleanup.
+		"--ha-lease-ttl", "5s",
 		"--disk-retention", "0",
 		"--indexer-flush-docs", "64",
 		"--indexer-flush-interval", "1s",
 		"--logstore-segment-size", strconv.FormatInt(h.segmentTargetBytes, 10),
 		"--ha", h.haMode,
+	}
+}
+
+func TestLockdDiskHarnessUsesPouchFilesystem(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	h := startLockdDiskHarness(t)
+	root := filepath.Dir(h.dataRoot)
+	if filepath.Dir(root) != "/tmp" {
+		t.Fatalf("Go disk fixture root %q differs from Pouch's /tmp filesystem", root)
 	}
 }
 
@@ -194,15 +211,35 @@ func TestLockdDiskHarnessCommandArgsPreserveHAMode(t *testing.T) {
 		haMode:             lockdDiskDurableHAMode,
 	}
 	args := h.commandArgs()
-	for index := 0; index+1 < len(args); index++ {
-		if args[index] == "--ha" {
-			if args[index+1] != lockdDiskDurableHAMode {
-				t.Fatalf("lockd disk harness --ha=%q, want %q", args[index+1], lockdDiskDurableHAMode)
+	for flag, want := range map[string]string{
+		"--ha":               lockdDiskDurableHAMode,
+		"--drain-grace":      "0",
+		"--shutdown-timeout": "1s",
+		"--ha-lease-ttl":     "5s",
+	} {
+		found := false
+		for index := 0; index+1 < len(args); index++ {
+			if args[index] == flag {
+				if args[index+1] != want {
+					t.Fatalf("lockd disk harness %s=%q, want %q", flag, args[index+1], want)
+				}
+				found = true
+				break
 			}
-			return
+		}
+		if !found {
+			t.Fatalf("lockd disk harness command is missing %s", flag)
 		}
 	}
-	t.Fatal("lockd disk harness command is missing --ha")
+}
+
+func TestLockdDiskHarnessStopsGracefully(t *testing.T) {
+	h := startLockdDiskHarness(t)
+	cmd := h.cmd
+	h.stop(t)
+	if cmd.ProcessState == nil || !cmd.ProcessState.Success() {
+		t.Fatalf("lockd must exit normally on fixture teardown: %v", cmd.ProcessState)
+	}
 }
 
 func (h *lockdDiskHarness) start(tb testing.TB) {
@@ -214,6 +251,10 @@ func (h *lockdDiskHarness) start(tb testing.TB) {
 		args = append(args, "--disable-storage-encryption")
 	}
 	cmd := exec.CommandContext(ctx, h.bin, args...)
+	// Request ordinary shutdown before the bounded forced-stop fallback.
+	// A forced stop leaves the HA lease for the next startup to wait on.
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = 2 * time.Second
 	cmd.Stdout = h.logs
 	cmd.Stderr = h.logs
 	if err := cmd.Start(); err != nil {

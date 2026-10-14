@@ -1,0 +1,17 @@
+package = "lockdc-postgres"
+version = "@PROJECT_VERSION@-1"
+source = {
+  url = "https://github.com/sa6mwa/liblockdc/releases/download/v@PROJECT_VERSION@/liblockdc-lua-@PROJECT_VERSION@.tar.gz",
+  dir = "liblockdc-lua-@PROJECT_VERSION@",
+}
+description = {
+  summary = "Optional PostgreSQL XA driver registration for lockdc",
+  homepage = "https://github.com/sa6mwa/liblockdc",
+  license = "MIT",
+}
+dependencies = { "lua >= 5.5, < 5.6", "lockdc == @PROJECT_VERSION@-1" }
+build = {
+  type = "command",
+  build_command = "bash scripts/build_postgres_lua_rock.sh \"$(CC)\" \"$(CFLAGS)\" \"$(LIBFLAG)\" \"$(OBJ_EXTENSION)\" \"$(LIB_EXTENSION)\" \"$(LUA_INCDIR)\" \"@PROJECT_VERSION@\"",
+  install = { lib = { ["lockdc.postgres"] = ".luarocks-build/lockdc/postgres.so" } },
+}

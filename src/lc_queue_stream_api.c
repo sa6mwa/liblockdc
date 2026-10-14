@@ -1171,7 +1171,7 @@ int lc_engine_client_watch_queue(lc_engine_client *client,
                                  lc_engine_error *error) {
   lc_engine_watch_queue_request body_src;
   lonejson_field body_fields[2];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   const char *ns;
   struct curl_slist *headers;
   size_t endpoint_index;
@@ -1352,7 +1352,7 @@ static int lc_engine_client_subscribe_internal(
     const char *path, lc_engine_error *error) {
   lc_engine_dequeue_request body_src;
   lonejson_field body_fields[7];
-  lonejson_map body_map;
+  lonejson_map body_map = {0};
   const char *ns;
   struct curl_slist *headers;
   long wait_seconds;

@@ -4,6 +4,19 @@ set -euo pipefail
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 preset=${1:-deps-x86_64-linux-gnu}
+postgres_setting=${LOCKDC_BUILD_POSTGRES:-OFF}
+case "${2:-}" in
+  --with-postgres) postgres_setting=ON ;;
+  --without-postgres) postgres_setting=OFF ;;
+  '') ;;
+  *) echo 'expected --with-postgres or --without-postgres after the preset' >&2; exit 2 ;;
+esac
+if [ "$#" -gt 2 ]; then echo 'too many dependency arguments' >&2; exit 2; fi
+case "$postgres_setting" in
+  ON|on|TRUE|true|1) build_postgres=ON ;;
+  OFF|off|FALSE|false|0) build_postgres=OFF ;;
+  *) echo 'LOCKDC_BUILD_POSTGRES must be ON or OFF' >&2; exit 2 ;;
+esac
 
 unset LD_LIBRARY_PATH
 dry_run=${LOCKDC_DEPS_DRY_RUN:-0}
@@ -104,9 +117,11 @@ case "$preset" in
     ;;
   *)
     echo "usage: scripts/deps.sh [deps-x86_64-linux-gnu|deps-x86_64-linux-musl|deps-aarch64-linux-gnu|deps-aarch64-linux-musl|deps-armhf-linux-gnu|deps-armhf-linux-musl|deps-arm64-apple-darwin]" >&2
+    echo "       append --with-postgres to provision the optional cpktdb SDK" >&2
     exit 2
     ;;
 esac
+cmake_extra_args+=("-DLOCKDC_BUILD_POSTGRES=$build_postgres")
 
 lockdc_assert_generated_path "$repo_root" "$local_download_root"
 lockdc_assert_generated_path "$repo_root" "$deps_root"
@@ -117,6 +132,7 @@ if [ "$dry_run" = "1" ]; then
   printf 'cmake_preset=%s\n' "$cmake_preset"
   printf 'deps_root=%s\n' "$deps_root"
   printf 'deps_build_root=%s\n' "$deps_build_root"
+  printf 'postgres=%s\n' "$build_postgres"
   exit 0
 fi
 
@@ -155,71 +171,92 @@ lonejson_version=$(resolve_cmake_cache_string LOCKDC_LONEJSON_VERSION "${LOCKDC_
 cmocka_version=$(resolve_cmake_cache_string LOCKDC_CMOCKA_VERSION "${LOCKDC_CMOCKA_VERSION:-}")
 pslog_version=$(resolve_cmake_cache_string LOCKDC_PSLOG_VERSION "${LOCKDC_PSLOG_VERSION:-}")
 
-cmocka_asset_name="cmocka-$cmocka_version.tar.xz"
-cmocka_download_url="https://cmocka.org/files/2.0/$cmocka_asset_name"
-case "$cmocka_asset_name" in
-  cmocka-2.0.2.tar.xz)
-    cmocka_asset_hash=39f92f366bdf3f1a02af4da75b4a5c52df6c9f7e736c7d65de13283f9f0ef416
+cpkt_asset_name="cpkt-$cpkt_version-${preset#deps-}.tar.gz"
+cpkt_download_url="https://github.com/c89systems/cpkt/releases/download/v$cpkt_version/$cpkt_asset_name"
+case "$cpkt_asset_name" in
+  cpkt-0.3.0-x86_64-linux-gnu.tar.gz)
+    cpkt_asset_hash=7b59ac702da1aab906c48c33a67954954c074f591d714085f3e4bd7a23619a66
+    ;;
+  cpkt-0.3.0-x86_64-linux-musl.tar.gz)
+    cpkt_asset_hash=61c6e657cefd916b5f500374917ccc7e039d27b2ef1353a45a8f6f22d91c75ed
+    ;;
+  cpkt-0.3.0-aarch64-linux-gnu.tar.gz)
+    cpkt_asset_hash=4f1f964e5e54f191162d42871815a74afd9da02c77adce304a52dd03397d4740
+    ;;
+  cpkt-0.3.0-aarch64-linux-musl.tar.gz)
+    cpkt_asset_hash=7e25be64d73bc7140f01659c0c0e11e066990c88587fce2ca49ba8bf874a31aa
+    ;;
+  cpkt-0.3.0-armhf-linux-gnu.tar.gz)
+    cpkt_asset_hash=2b57c7090186ed06a1df2525407e0cc222d6be1b40e3d7ff09c62e25354bee42
+    ;;
+  cpkt-0.3.0-armhf-linux-musl.tar.gz)
+    cpkt_asset_hash=dcc7d29a6536382ce05fc1351917bb7118b8db13a4fb52e3cb96d4a91ff977f5
+    ;;
+  cpkt-0.3.0-arm64-apple-darwin.tar.gz)
+    cpkt_asset_hash=5bf571b6dfeb19a8dc796cb584fd8e770eb1a10a3d2b98ab46269d7c8e895fce
     ;;
   *)
-    printf 'unsupported cmocka release asset: %s\n' "$cmocka_asset_name" >&2
+    printf 'unsupported cpkt release asset: %s\n' "$cpkt_asset_name" >&2
     exit 1
     ;;
 esac
 
-cpkt_asset_name="c.pkt.systems-$cpkt_version-${preset#deps-}.tar.gz"
-cpkt_download_url="https://github.com/sa6mwa/c.pkt.systems/releases/download/v$cpkt_version/$cpkt_asset_name"
-case "$cpkt_asset_name" in
-  c.pkt.systems-0.10.0-x86_64-linux-gnu.tar.gz)
-    cpkt_asset_hash=fb64caa3cad66e01669705412cd88cb4267025ca0a083fa936fe25786011391d
-    ;;
-  c.pkt.systems-0.10.0-x86_64-linux-musl.tar.gz)
-    cpkt_asset_hash=668977f4a14875d4ee2acec6f3d630ce96b57786d3ab3242c6ee3d10b5e63c87
-    ;;
-  c.pkt.systems-0.10.0-aarch64-linux-gnu.tar.gz)
-    cpkt_asset_hash=111e8f5215728ae8c784c59de35fc33822a7f72bc1c48d807013b678077d6307
-    ;;
-  c.pkt.systems-0.10.0-aarch64-linux-musl.tar.gz)
-    cpkt_asset_hash=39883280a4e37a03c7ba952421cfdd926e79b49b635200c1fcb783738200c541
-    ;;
-  c.pkt.systems-0.10.0-armhf-linux-gnu.tar.gz)
-    cpkt_asset_hash=df5e953677217c87314dd01514227cbdbbd2fb72115083b5747606f37f00d060
-    ;;
-  c.pkt.systems-0.10.0-armhf-linux-musl.tar.gz)
-    cpkt_asset_hash=d78e8e3de15d497c9048cfd3e64db815ee7e7d707ec2ba66e094af13f979ebdc
-    ;;
-  c.pkt.systems-0.10.0-arm64-apple-darwin.tar.gz)
-    cpkt_asset_hash=f63f0e6e847108b287726dbd8d2566ee9255d2c744d8cfcf3b192a4ca791de77
-    ;;
-  *)
-    printf 'unsupported c.pkt.systems release asset: %s\n' "$cpkt_asset_name" >&2
-    exit 1
-    ;;
-esac
+if [ "$build_postgres" = ON ]; then
+  cpktdb_version=$(resolve_cmake_cache_string LOCKDC_CPKTDB_VERSION "${LOCKDC_CPKTDB_VERSION:-}")
+  cpktdb_asset_name="cpktdb-$cpktdb_version-${preset#deps-}.tar.gz"
+  cpktdb_download_url="https://github.com/c89systems/cpktdb/releases/download/v$cpktdb_version/$cpktdb_asset_name"
+  case "$cpktdb_asset_name" in
+    cpktdb-0.3.0-x86_64-linux-gnu.tar.gz)
+      cpktdb_asset_hash=2ce49dca2f79be9d6fb22d3d318a8b304f343e3d797ba4657938483d8fff1385
+      ;;
+    cpktdb-0.3.0-x86_64-linux-musl.tar.gz)
+      cpktdb_asset_hash=a2ef89e84fac33dd019f965777e8600c812dfb305c1e24db1072d539361d60e0
+      ;;
+    cpktdb-0.3.0-aarch64-linux-gnu.tar.gz)
+      cpktdb_asset_hash=60429dba503290b4648d28143e823d5f03a8adbf2f01e112441fcf99f53d2ee9
+      ;;
+    cpktdb-0.3.0-aarch64-linux-musl.tar.gz)
+      cpktdb_asset_hash=0bcef6312a74923b755eb1658a801036b6f99fa39ed191a30ef93a3c0eda91fd
+      ;;
+    cpktdb-0.3.0-armhf-linux-gnu.tar.gz)
+      cpktdb_asset_hash=448a6f1d000b6874b0b574a8edad30d50fadb2a8449be1d1b4510da8b2b3b17f
+      ;;
+    cpktdb-0.3.0-armhf-linux-musl.tar.gz)
+      cpktdb_asset_hash=0958789b65ef20da41232ba5f45ab46ebb9fdecdb5fc6f0c5d3069320a71bb72
+      ;;
+    cpktdb-0.3.0-arm64-apple-darwin.tar.gz)
+      cpktdb_asset_hash=01d1b212e7b96c7389cc91fa24c756dd0e1e00648cf42daef42a8b4b75e4bbe7
+      ;;
+    *)
+      printf 'unsupported cpktdb release asset: %s\n' "$cpktdb_asset_name" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 lonejson_asset_name="liblonejson-$lonejson_version-${preset#deps-}.tar.gz"
 lonejson_download_url="https://github.com/sa6mwa/lonejson/releases/download/v$lonejson_version/$lonejson_asset_name"
 case "$lonejson_asset_name" in
-  liblonejson-0.44.0-x86_64-linux-gnu.tar.gz)
-    lonejson_asset_hash=5255a32cef6dd89cd4f068c2a4f1bd6a8f8e79d5cffe6d6922cb2506d320c520
+  liblonejson-0.45.0-x86_64-linux-gnu.tar.gz)
+    lonejson_asset_hash=aef11c4511bb6aa8ed4e0646204e14b7934affd6e5cec5b8e8bff36e80217826
     ;;
-  liblonejson-0.44.0-x86_64-linux-musl.tar.gz)
-    lonejson_asset_hash=5520d01f1b3b20e4cd31beeeec906f061b41ea924e1c4bdbade2ad3830387c3d
+  liblonejson-0.45.0-x86_64-linux-musl.tar.gz)
+    lonejson_asset_hash=823efad9719011af0602cefacf0506ac603bfb54d5986883fcabed60db93544b
     ;;
-  liblonejson-0.44.0-aarch64-linux-gnu.tar.gz)
-    lonejson_asset_hash=c0383600f45e8a027cfeb68e70e20d81c957ae9e18a18ad07bd4e56605f90368
+  liblonejson-0.45.0-aarch64-linux-gnu.tar.gz)
+    lonejson_asset_hash=659cc67e2c26c9615f84fa6f1c26fae4a3a4b00980d8bbb02c04625b2facaf7e
     ;;
-  liblonejson-0.44.0-aarch64-linux-musl.tar.gz)
-    lonejson_asset_hash=ab4fdda63bc2a7a0046a740158fbb5e2e7eb2d92cb3051f8e7f0d739b7dc7c80
+  liblonejson-0.45.0-aarch64-linux-musl.tar.gz)
+    lonejson_asset_hash=96e020ce3dab9de5dc13a64e83a278b7519cdf7fcc2d3c93fdfc740fe5fb0cd5
     ;;
-  liblonejson-0.44.0-armhf-linux-gnu.tar.gz)
-    lonejson_asset_hash=d20200676ed838c89021b1099aa4e25fb73e36425f8e6241336bcf72c04befd8
+  liblonejson-0.45.0-armhf-linux-gnu.tar.gz)
+    lonejson_asset_hash=ab2f89eb4054fbb1b4cd85b6be5d9d2005b364459ba362b910bc35ac1c6511b5
     ;;
-  liblonejson-0.44.0-armhf-linux-musl.tar.gz)
-    lonejson_asset_hash=8e3bf6bfba135f40e1064f3a03502c71862cd294c47754ab3c65acec34769a50
+  liblonejson-0.45.0-armhf-linux-musl.tar.gz)
+    lonejson_asset_hash=8b103a732181b06d90fc5f39c074a887969522d29e0d9006b30982f31969982d
     ;;
-  liblonejson-0.44.0-arm64-apple-darwin.tar.gz)
-    lonejson_asset_hash=d129d04988f255d92fea2d97a346a24ba0fe49e90262a96617d41347d955584e
+  liblonejson-0.45.0-arm64-apple-darwin.tar.gz)
+    lonejson_asset_hash=9dc6b277241068a2ab1a737357cf18982c5612ec43280f161044ce719aed50dc
     ;;
   *)
     printf 'unsupported lonejson release asset: %s\n' "$lonejson_asset_name" >&2
@@ -261,26 +298,26 @@ esac
 pslog_asset_name="libpslog-$pslog_version-${preset#deps-}.tar.gz"
 pslog_download_url="https://github.com/sa6mwa/libpslog/releases/download/v$pslog_version/$pslog_asset_name"
 case "$pslog_asset_name" in
-  libpslog-0.10.0-x86_64-linux-gnu.tar.gz)
-    pslog_asset_hash=db4089205cd674ec65540ea7a2388a827a8db5dd7c841db39d4beb8d9eff3d26
+  libpslog-0.12.0-x86_64-linux-gnu.tar.gz)
+    pslog_asset_hash=21239262bc06eecb504e45e0902f374ccd86751dcb32087dd84af4d2553ea0e2
     ;;
-  libpslog-0.10.0-x86_64-linux-musl.tar.gz)
-    pslog_asset_hash=b9c1f212df866e03a2d55bf95a1294f678b3d4765ec09281d7294653225ae424
+  libpslog-0.12.0-x86_64-linux-musl.tar.gz)
+    pslog_asset_hash=3a43206260bbf1095a363ffc4ddb5514dac2a621aa030db0e7f9b4364a93bb4d
     ;;
-  libpslog-0.10.0-aarch64-linux-gnu.tar.gz)
-    pslog_asset_hash=3d08b7a8e175805c9441edd67cfad29dda3593eb03273b1011a70e959ddc2426
+  libpslog-0.12.0-aarch64-linux-gnu.tar.gz)
+    pslog_asset_hash=304575fa07f14e5ff4d7614f7c450a3e88a586d5f353352bff8b678ee739da76
     ;;
-  libpslog-0.10.0-aarch64-linux-musl.tar.gz)
-    pslog_asset_hash=80a5374714479311b3f1f232f8ef658f693ed03d7c1b21bc5d913b8b9df4fc10
+  libpslog-0.12.0-aarch64-linux-musl.tar.gz)
+    pslog_asset_hash=72a3b4e1f89c339cadb996137a79db8ee6e67be1f580f482269f6b0088cda115
     ;;
-  libpslog-0.10.0-armhf-linux-gnu.tar.gz)
-    pslog_asset_hash=5b0207766882dd1cb913e49c4c5ec6e9643a38a241045457a0e64d415a8295cd
+  libpslog-0.12.0-armhf-linux-gnu.tar.gz)
+    pslog_asset_hash=993461d481ec6c3912be29f5a0f95bcf5274aae6a1d2d698350e804c688122a9
     ;;
-  libpslog-0.10.0-armhf-linux-musl.tar.gz)
-    pslog_asset_hash=daa40aec6622f7c9cfb650954ef86ac0b22ed718277d03d39f27114d28710889
+  libpslog-0.12.0-armhf-linux-musl.tar.gz)
+    pslog_asset_hash=037fa1d56a01dc8b9fccf54960b8083337cbc5edfaa5f15d715f96413d1f6b77
     ;;
-  libpslog-0.10.0-arm64-apple-darwin.tar.gz)
-    pslog_asset_hash=64a742fb493785ac234901eefa678e73f04441146d53009551078431cdc68e20
+  libpslog-0.12.0-arm64-apple-darwin.tar.gz)
+    pslog_asset_hash=a5945f2dc4ad16dd8a71572f40117ddfdfae371d185cb03dab5205cdf780c321
     ;;
   *)
     printf 'unsupported libpslog release asset: %s\n' "$pslog_asset_name" >&2
@@ -297,8 +334,11 @@ toolchain_value() {
 
 case "$dependency_target_id" in
   *-linux-*)
-    "$repo_root/scripts/cpkt-toolchains.sh" ensure "$dependency_target_id" >/dev/null
     toolchain_description=$("$repo_root/scripts/cpkt-toolchains.sh" discover "$dependency_target_id")
+    if ! printf '%s\n' "$toolchain_description" | grep -q '^status=ready$'; then
+      "$repo_root/scripts/cpkt-toolchains.sh" ensure "$dependency_target_id" >/dev/null
+      toolchain_description=$("$repo_root/scripts/cpkt-toolchains.sh" discover "$dependency_target_id")
+    fi
     if ! printf '%s\n' "$toolchain_description" | grep -q '^status=ready$'; then
       printf 'Bootlin toolchain is not ready for %s\n%s\n' "$dependency_target_id" "$toolchain_description" >&2
       exit 1
@@ -315,6 +355,10 @@ case "$dependency_target_id" in
     compiler=$(basename -- "$compiler_path")
     ;;
   *)
+    if [ -z "${CPKT_OSXCROSS_HOST:-}" ] && [ -n "${LOCKDC_OSXCROSS_HOST:-}" ]; then
+      export CPKT_OSXCROSS_HOST=$LOCKDC_OSXCROSS_HOST
+    fi
+    "$repo_root/scripts/cpkt-toolchains.sh" ensure "$dependency_target_id" >/dev/null
     toolchain_description=$("$repo_root/scripts/cpkt-toolchains.sh" discover "$dependency_target_id")
     toolchain_source=$(toolchain_value source)
     toolchain_archive=$(toolchain_value archive)
@@ -323,8 +367,9 @@ case "$dependency_target_id" in
     toolchain_sysroot=$(toolchain_value sysroot)
     toolchain_target_triple=$(toolchain_value target_triple)
     compiler_path=$(toolchain_value cc)
-    if [ -z "$compiler_path" ]; then
-      compiler_path=${CC:-cc}
+    if [ -z "$compiler_path" ] || ! printf '%s\n' "$toolchain_description" | grep -q '^status=ready$'; then
+      printf 'Darwin toolchain is not ready; run scripts/cpkt-toolchains.sh ensure arm64-apple-darwin\n' >&2
+      exit 1
     fi
     compiler_machine=$("$compiler_path" -dumpmachine 2>/dev/null || echo unknown)
     compiler_version=$("$compiler_path" --version 2>/dev/null | head -n1 || echo unknown)
@@ -370,6 +415,7 @@ toolchain_target_triple=$toolchain_target_triple
 cpkt_version=$cpkt_version
 cpkt_asset_name=$cpkt_asset_name
 cpkt_asset_hash=$cpkt_asset_hash
+postgres=$build_postgres
 openssl_version=$openssl_version
 zlib_version=$zlib_version
 curl_version=$curl_version
@@ -382,11 +428,15 @@ liblql_version=$liblql_version
 liblql_asset_name=$liblql_asset_name
 liblql_asset_hash=$liblql_asset_hash
 cmocka_version=$cmocka_version
-cmocka_asset_name=$cmocka_asset_name
-cmocka_asset_hash=$cmocka_asset_hash
 pslog_version=$pslog_version
 pslog_asset_name=$pslog_asset_name
 pslog_asset_hash=$pslog_asset_hash"
+if [ "$build_postgres" = ON ]; then
+  manifest="$manifest
+cpktdb_version=$cpktdb_version
+cpktdb_asset_name=$cpktdb_asset_name
+cpktdb_asset_hash=$cpktdb_asset_hash"
+fi
 
 manifest_value() {
   local key=$1
@@ -423,18 +473,18 @@ copy_matching_files() {
     fi
   done
   if [ "$copied" -eq 0 ]; then
-    printf 'no c.pkt.systems files matched for destination: %s\n' "$destination" >&2
+    printf 'no cpkt files matched for destination: %s\n' "$destination" >&2
     exit 1
   fi
 }
 
 stage_cpkt_license() {
   local package_name=$1
-  local source_path="$deps_root/c.pkt.systems/install/share/doc/c.pkt.systems/third_party/$package_name/LICENSE"
+  local source_path="$deps_root/cpkt/install/share/doc/cpkt/core/third_party/$package_name/LICENSE"
   local destination_dir="$deps_root/$package_name/install/share/doc/liblockdc-third-party/$package_name"
 
   if [ ! -f "$source_path" ]; then
-    printf 'missing c.pkt.systems license for %s: %s\n' "$package_name" "$source_path" >&2
+    printf 'missing cpkt license for %s: %s\n' "$package_name" "$source_path" >&2
     exit 1
   fi
 
@@ -467,19 +517,29 @@ acquire_verified_archive() {
 
 download_cpkt_bundle() {
   local archive_path="$local_download_root/$cpkt_asset_name"
-  local extract_root="$deps_root/c.pkt.systems/install"
+  local extract_root="$deps_root/cpkt/install"
   local actual_hash
 
   mkdir -p "$local_download_root" "$extract_root"
-  acquire_verified_archive "c.pkt.systems" "$cpkt_download_url" "$cpkt_asset_hash" "$cpkt_asset_name" "$archive_path"
+  acquire_verified_archive "cpkt" "$cpkt_download_url" "$cpkt_asset_hash" "$cpkt_asset_name" "$archive_path"
 
   actual_hash=$(sha256sum "$archive_path" | awk '{print $1}')
   if [ "$actual_hash" != "$cpkt_asset_hash" ]; then
-    printf 'c.pkt.systems checksum mismatch for %s\nexpected %s\nactual   %s\n' \
+    printf 'cpkt checksum mismatch for %s\nexpected %s\nactual   %s\n' \
       "$cpkt_asset_name" "$cpkt_asset_hash" "$actual_hash" >&2
     exit 1
   fi
 
+  rm -rf "$extract_root"
+  mkdir -p "$extract_root"
+  tar -xzf "$archive_path" -C "$extract_root" --strip-components=1
+}
+
+download_cpktdb_bundle() {
+  local archive_path="$local_download_root/$cpktdb_asset_name"
+  local extract_root="$deps_root/cpktdb/install"
+
+  acquire_verified_archive "cpktdb" "$cpktdb_download_url" "$cpktdb_asset_hash" "$cpktdb_asset_name" "$archive_path"
   rm -rf "$extract_root"
   mkdir -p "$extract_root"
   tar -xzf "$archive_path" -C "$extract_root" --strip-components=1
@@ -525,13 +585,6 @@ download_liblql_bundle() {
   tar -xzf "$archive_path" -C "$extract_root" --strip-components=1
 }
 
-download_cmocka_bundle() {
-  local archive_path="$local_download_root/$cmocka_asset_name"
-
-  mkdir -p "$local_download_root"
-  acquire_verified_archive "cmocka" "$cmocka_download_url" "$cmocka_asset_hash" "$cmocka_asset_name" "$archive_path"
-}
-
 download_pslog_bundle() {
   local archive_path="$local_download_root/$pslog_asset_name"
 
@@ -540,7 +593,7 @@ download_pslog_bundle() {
 }
 
 stage_cpkt_component_layout() {
-  local cpkt_root="$deps_root/c.pkt.systems/install"
+  local cpkt_root="$deps_root/cpkt/install"
 
   download_cpkt_bundle
   rm -rf \
@@ -671,16 +724,17 @@ required_paths=(
   "$deps_root/zlib/install/include/zconf.h"
   "$deps_root/curl/install/lib/libcurl.a"
   "$curl_shared_path"
-  "$deps_root/c.pkt.systems/install/lib/cmake/CURL/CURLConfig.cmake"
-  "$deps_root/c.pkt.systems/install/lib/cmake/OpenSSL/OpenSSLConfig.cmake"
-  "$deps_root/c.pkt.systems/install/lib/cmake/libssh2/libssh2-config.cmake"
-  "$deps_root/c.pkt.systems/install/lib/cmake/nghttp2/nghttp2Config.cmake"
-  "$deps_root/c.pkt.systems/install/lib/cmake/zlib/ZLIBConfig.cmake"
-  "$deps_root/c.pkt.systems/install/lib/pkgconfig/libcurl.pc"
-  "$deps_root/c.pkt.systems/install/lib/pkgconfig/openssl.pc"
-  "$deps_root/c.pkt.systems/install/lib/pkgconfig/libssh2.pc"
-  "$deps_root/c.pkt.systems/install/lib/pkgconfig/libnghttp2.pc"
-  "$deps_root/c.pkt.systems/install/lib/pkgconfig/zlib.pc"
+  "$deps_root/cpkt/install/lib/cmake/CURL/CURLConfig.cmake"
+  "$deps_root/cpkt/install/lib/cmake/OpenSSL/OpenSSLConfig.cmake"
+  "$deps_root/cpkt/install/lib/cmake/libssh2/libssh2-config.cmake"
+  "$deps_root/cpkt/install/lib/cmake/nghttp2/nghttp2Config.cmake"
+  "$deps_root/cpkt/install/lib/cmake/zlib/ZLIBConfig.cmake"
+  "$deps_root/cpkt/install/lib/pkgconfig/libcurl.pc"
+  "$deps_root/cpkt/install/lib/pkgconfig/openssl.pc"
+  "$deps_root/cpkt/install/lib/pkgconfig/libssh2.pc"
+  "$deps_root/cpkt/install/lib/pkgconfig/libnghttp2.pc"
+  "$deps_root/cpkt/install/lib/pkgconfig/zlib.pc"
+  "$deps_root/cpkt/install/share/cpkt/packages/core.json"
   "$deps_root/pslog/install/lib/libpslog.a"
   "$deps_root/pslog/install/include/pslog.h"
   "$pslog_shared_path"
@@ -697,8 +751,16 @@ required_paths=(
   "$deps_root/liblql/install/lib/cmake/liblql/liblqlConfig.cmake"
   "$deps_root/liblql/install/lib/cmake/liblql/liblqlConfigVersion.cmake"
 )
+if [ "$build_postgres" = ON ]; then
+  required_paths+=(
+    "$deps_root/cpktdb/install/share/cpkt/packages/db.json"
+    "$deps_root/cpktdb/install/lib/cmake/CpktPostgres/CpktPostgresConfig.cmake"
+    "$deps_root/cpktdb/install/include/cpkt/postgres.h"
+    "$deps_root/cpktdb/install/lib/libcpkt_postgres.a"
+  )
+fi
 if [ "$preset" != "deps-arm64-apple-darwin" ]; then
-  required_paths+=("$deps_root/cmocka/install/lib/libcmocka.a")
+  required_paths+=("$deps_root/cpkt/install/lib/libcmocka.a")
 fi
 
 for path in "${required_paths[@]}"; do
@@ -732,16 +794,16 @@ fi
 
 reset_dependency_build_root
 stage_cpkt_component_layout
+if [ "$build_postgres" = ON ]; then download_cpktdb_bundle; fi
 download_lonejson_bundle
 download_liblql_bundle
 download_pslog_bundle
 cmake_extra_args+=("-DLOCKDC_PSLOG_ARCHIVE_PATH=$local_download_root/$pslog_asset_name")
-if [ "$preset" != "deps-arm64-apple-darwin" ]; then
-  download_cmocka_bundle
-  cmake_extra_args+=("-DLOCKDC_CMOCKA_ARCHIVE_PATH=$local_download_root/$cmocka_asset_name")
-fi
 cmake_extra_args+=("-DLOCKDC_ZLIB_VERSION=$zlib_version")
 cmake_extra_args+=("-DLOCKDC_CPKT_VERSION=$cpkt_version")
+if [ "$build_postgres" = ON ]; then
+  cmake_extra_args+=("-DLOCKDC_CPKTDB_VERSION=$cpktdb_version")
+fi
 cmake --preset "$cmake_preset" --fresh "${cmake_extra_args[@]}"
 cmake --build --preset "$cmake_preset" --target lc_deps
 stage_dependency_license "pslog" "libpslog" "$deps_root/pslog/install/share/doc/libpslog/LICENSE"

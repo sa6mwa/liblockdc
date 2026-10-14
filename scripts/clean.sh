@@ -18,7 +18,7 @@ remove_if_present() {
   fi
 }
 
-"$script_dir/dev-reset.sh"
+"$script_dir/devenv.sh" reset
 
 remove_if_present "$repo_root/build"
 remove_if_present "$repo_root/dist"

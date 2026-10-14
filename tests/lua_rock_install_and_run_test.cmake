@@ -103,18 +103,23 @@ endif()
 if(NOT DEFINED LOCKDC_SDK_PREFIX OR LOCKDC_SDK_PREFIX STREQUAL "")
     set(LOCKDC_SDK_PREFIX "${LOCKDC_BINARY_DIR}/lua-rock-tests/${LOCKDC_TEST_NAME}/prefix")
     file(REMOVE_RECURSE "${LOCKDC_SDK_PREFIX}")
-    execute_process(
-        COMMAND "${CMAKE_COMMAND}" --install "${LOCKDC_BINARY_DIR}" --prefix "${LOCKDC_SDK_PREFIX}"
-        RESULT_VARIABLE install_result
-        OUTPUT_VARIABLE install_stdout
-        ERROR_VARIABLE install_stderr
-    )
-    if(NOT install_result EQUAL 0)
-        message(FATAL_ERROR
-            "failed to stage SDK prefix for LuaRocks test ${LOCKDC_TEST_NAME}\n"
-            "stdout:\n${install_stdout}\n"
-            "stderr:\n${install_stderr}")
-    endif()
+    # The base rock consumes only the core SDK. Optional provider components
+    # may be configured without being built by the focused E2E targets.
+    foreach(lockdc_sdk_component runtime dev)
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" --install "${LOCKDC_BINARY_DIR}"
+                --prefix "${LOCKDC_SDK_PREFIX}" --component "${lockdc_sdk_component}"
+            RESULT_VARIABLE install_result
+            OUTPUT_VARIABLE install_stdout
+            ERROR_VARIABLE install_stderr
+        )
+        if(NOT install_result EQUAL 0)
+            message(FATAL_ERROR
+                "failed to stage ${lockdc_sdk_component} SDK component for LuaRocks test ${LOCKDC_TEST_NAME}\n"
+                "stdout:\n${install_stdout}\n"
+                "stderr:\n${install_stderr}")
+        endif()
+    endforeach()
 endif()
 
 if(DEFINED LOCKDC_ROCKSPEC_PATH AND NOT LOCKDC_ROCKSPEC_PATH STREQUAL "")
@@ -131,9 +136,9 @@ else()
 endif()
 
 set(lonejson_cache_dir "${LOCKDC_BINARY_DIR}/lua-rock-cache")
-set(lonejson_src_rock "${lonejson_cache_dir}/lonejson-0.44.0-1.src.rock")
-set(lonejson_src_rock_url "https://github.com/sa6mwa/lonejson/releases/download/v0.44.0/lonejson-0.44.0-1.src.rock")
-set(lonejson_src_rock_sha256 "77446df62691aa80065d3050b9be605247cb9c52d58ae0bab80ced198f92737a")
+set(lonejson_src_rock "${lonejson_cache_dir}/lonejson-0.45.0-1.src.rock")
+set(lonejson_src_rock_url "https://github.com/sa6mwa/lonejson/releases/download/v0.45.0/lonejson-0.45.0-1.src.rock")
+set(lonejson_src_rock_sha256 "22306c264c3645654acbc95a9147fe07b3920e442195cf12c59beeb60f3ab93e")
 set(lua_tree_dir "${LOCKDC_BINARY_DIR}/lua-rock-tests/${LOCKDC_TEST_NAME}/tree")
 set(lua_rock_workdir "${LOCKDC_ROOT}")
 
@@ -169,9 +174,9 @@ if(DEFINED CMAKE_BUILD_TYPE AND NOT CMAKE_BUILD_TYPE STREQUAL "")
     endif()
 endif()
 
-set(lockdc_cpkt_lua_incdir "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/include")
+set(lockdc_cpkt_lua_incdir "${LOCKDC_EXTERNAL_ROOT}/cpkt/install/include")
 if(NOT EXISTS "${lockdc_cpkt_lua_incdir}/lua.h")
-    message(FATAL_ERROR "c.pkt.systems Lua headers are required: ${lockdc_cpkt_lua_incdir}/lua.h")
+    message(FATAL_ERROR "cpkt Lua headers are required: ${lockdc_cpkt_lua_incdir}/lua.h")
 endif()
 lockdc_resolve_bootlin_runtime(
     "${CMAKE_SYSROOT}"
@@ -181,7 +186,7 @@ lockdc_resolve_bootlin_runtime(
     lockdc_runtime_dirs)
 set(lockdc_lua_external_link_flags "-Wl,--disable-new-dtags")
 set(lockdc_lua_pkg_config_path
-    "${LOCKDC_SDK_PREFIX}/lib/pkgconfig:${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/pkgconfig")
+    "${LOCKDC_SDK_PREFIX}/lib/pkgconfig:${LOCKDC_EXTERNAL_ROOT}/cpkt/install/lib/pkgconfig")
 foreach(lockdc_runtime_dir IN LISTS lockdc_runtime_dirs)
     if(NOT lockdc_runtime_dir STREQUAL "${LOCKDC_SDK_PREFIX}/lib")
         string(APPEND lockdc_lua_external_link_flags " -Wl,-rpath,${lockdc_runtime_dir}")
@@ -211,9 +216,9 @@ list(APPEND test_env "ASAN_OPTIONS=detect_leaks=0")
 if(DEFINED LOCKDC_EXTERNAL_ROOT AND NOT LOCKDC_EXTERNAL_ROOT STREQUAL "")
     set(lockdc_lua_external_include_flags "")
     set(lockdc_lua_cpkt_include_flags "")
-    if(EXISTS "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/include/lua.h")
+    if(EXISTS "${LOCKDC_EXTERNAL_ROOT}/cpkt/install/include/lua.h")
         set(lockdc_lua_cpkt_include_flags
-            "-I${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/include")
+            "-I${LOCKDC_EXTERNAL_ROOT}/cpkt/install/include")
     endif()
     foreach(lockdc_lua_external_dep curl openssl nghttp2 pslog lonejson liblql libssh2 zlib)
         set(lockdc_lua_external_prefix "${LOCKDC_EXTERNAL_ROOT}/${lockdc_lua_external_dep}/install")
