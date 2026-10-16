@@ -214,7 +214,11 @@ typedef void (*lc_free_fn)(void *context, void *ptr);
 /**
  * Allocator override used by the client and all derived handles.
  *
- * Leave zeroed to use the platform allocator.
+ * Leave zeroed to use the process-wide built-in allocator. Custom malloc/free
+ * hooks must be provided together; realloc is optional.
+ * Custom hooks bypass the optional built-in allocation tracker. The caller
+ * remains responsible for diagnostics and the lifetime of its allocator
+ * context.
  */
 typedef struct lc_allocator {
   /** Allocates `size` bytes, or returns `NULL` on failure. */
@@ -3792,9 +3796,27 @@ int lc_xid_is_valid(const char *text);
 /**
  * Initializes an allocator override to use the default allocator.
  *
- * Accepts `NULL`. The resulting all-zero hook set selects libc allocation.
+ * Accepts `NULL`. All-zero hooks select the process-wide built-in allocator.
  */
 void lc_allocator_init(lc_allocator *allocator);
+/**
+ * Selects allocation tracking for the process-wide built-in allocator.
+ *
+ * Tracking defaults to 0 (off); pass 1 to enable exact live allocation counts
+ * and requested payload bytes at ordinary exit or shared-library unload. A
+ * clean tracked shutdown is silent. Custom allocator hooks, raw facade result
+ * metadata, and allocations made by the host or dependencies are excluded.
+ *
+ * Call once at process startup, before any SDK allocation or concurrent SDK
+ * use. This precondition also applies when an earlier SDK call used the
+ * implicit default. The allocator cannot be switched while objects may still be
+ * alive. Omitting this call leaves tracking off. Invalid values and repeated
+ * successful configuration return LC_ERR_INVALID without changing the selected
+ * allocator. Allocations dispatch directly to the selected callbacks, with no
+ * per-allocation tracking-flag test. Abrupt termination does not run the
+ * diagnostic.
+ */
+int lc_allocator_tracking_configure(int enabled, lc_error *error);
 /**
  * Initializes client configuration with public defaults.
  *

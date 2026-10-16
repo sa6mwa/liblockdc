@@ -120,7 +120,7 @@ assert_log_contains("cmake\\|-DLOCKDC_BINARY_DIR=.*/build/x86_64-linux-gnu-relea
 assert_log_contains("cmake\\|-DLOCKDC_ROOT=.*-DLOCKDC_BINARY_DIR=.*/build/x86_64-linux-gnu-release\\|-DLOCKDC_DIST_DIR=.*/dist\\|-P\\|.*/cmake/package_checksums\\.cmake\\|" "checksums invocation")
 assert_log_contains("test_release_from_source\\|.*/fake-root\\|.*/dist/liblockdc-0\\.0\\.0-test\\.tar\\.gz\\|" "source release verification invocation")
 assert_log_contains("cmake\\|-DLOCKDC_ROOT=.*-DLOCKDC_DIST_DIR=.*/dist\\|-DLOCKDC_USE_EXISTING_ARCHIVE=ON\\|-DLOCKDC_RELEASE_PRESETS=x86_64-linux-gnu-release;x86_64-linux-musl-release;aarch64-linux-gnu-release;aarch64-linux-musl-release;armhf-linux-gnu-release;armhf-linux-musl-release\\|-P\\|.*/tests/release_tarball_sdk_matrix_test\\.cmake\\|" "read-only release tarball SDK matrix verification invocation")
-assert_log_contains("cmake\\|-DLOCKDC_ROOT=.*-DLOCKDC_BINARY_DIR=.*/build/x86_64-linux-gnu-release\\|-DLOCKDC_DIST_DIR=.*/dist\\|-DLOCKDC_USE_EXISTING_ARCHIVE=ON\\|-P\\|.*/tests/release_tarball_sdk_test\\.cmake\\|" "read-only host release tarball SDK verification invocation")
+assert_log_not_contains("/tests/release_tarball_sdk_test\\.cmake\\|" "duplicate host SDK verification outside the matrix")
 assert_log_contains("cmake\\|-DLOCKDC_ROOT=.*-DLOCKDC_BINARY_DIR=.*/build/x86_64-linux-gnu-release\\|-DLOCKDC_DIST_DIR=.*/dist\\|-DLOCKDC_USE_EXISTING_ARCHIVE=ON\\|-DLOCKDC_LUA_BIN=.*/build/x86_64-linux-gnu-release/lockdc_lua_runner\\|-P\\|.*/tests/lua_release_package_test\\.cmake\\|" "read-only Lua release package verification invocation")
 assert_log_contains("cmake\\|-DLOCKDC_ROOT=.*-DLOCKDC_DIST_DIR=.*/dist\\|-DLOCKDC_VERIFY_WORK_DIR=.*/build/release-matrix-verify\\|-DLOCKDC_RELEASE_PRESETS=x86_64-linux-gnu-release;x86_64-linux-musl-release;aarch64-linux-gnu-release;aarch64-linux-musl-release;armhf-linux-gnu-release;armhf-linux-musl-release\\|-P\\|.*/tests/release_matrix_archives_test\\.cmake\\|" "final archive verification invocation")
 string(REGEX MATCHALL "package_archive\\.cmake" archive_package_invocations "${log_contents}")
@@ -136,3 +136,62 @@ if(NOT lua_package_count EQUAL 1)
         "release package matrix should create exactly one Lua source rock, got ${lua_package_count}:\n${log_contents}")
 endif()
 assert_log_not_contains("ctest\\|" "ctest invocation")
+
+# Exercise the real matrix driver with tiny consumer fixtures. Native targets
+# must build/run in one invocation; cross targets must never execute here.
+file(MAKE_DIRECTORY "${fake_root}/tests")
+file(WRITE "${fake_root}/tests/release_tarball_sdk_test.cmake" [=[
+file(APPEND "$ENV{LOCKDC_MATRIX_TEST_LOG}"
+    "${LOCKDC_BINARY_DIR}|${LOCKDC_RUN_DOWNSTREAM_BINARIES}|${LOCKDC_VERIFIED_CONFIG_DIGESTS}\n")
+if(LOCKDC_BINARY_DIR MATCHES "$ENV{LOCKDC_MATRIX_FAIL_PRESET}$")
+    message(FATAL_ERROR "consumer fixture failure")
+endif()
+set(config_dir "${LOCKDC_BINARY_DIR}/release-tarball-sdk-test/release/sdk/lib/cmake/lockdc")
+file(MAKE_DIRECTORY "${config_dir}")
+if(LOCKDC_BINARY_DIR MATCHES "darwin-release$")
+    file(WRITE "${config_dir}/lockdcConfig.cmake" "Darwin package logic")
+else()
+    file(WRITE "${config_dir}/lockdcConfig.cmake" "Linux package logic")
+endif()
+]=])
+set(matrix_presets
+    x86_64-linux-gnu-release x86_64-linux-musl-release
+    aarch64-linux-gnu-release aarch64-linux-musl-release
+    armhf-linux-gnu-release armhf-linux-musl-release arm64-apple-darwin-release)
+file(MAKE_DIRECTORY "${fake_root}/build/arm64-apple-darwin-release")
+file(WRITE "${fake_root}/build/arm64-apple-darwin-release/package-metadata.cmake" "")
+foreach(fail_preset none x86_64-linux-musl-release aarch64-linux-gnu-release)
+    set(matrix_log "${test_root}/matrix-${fail_preset}.log")
+    file(WRITE "${matrix_log}" "")
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E env
+        "LOCKDC_MATRIX_TEST_LOG=${matrix_log}" "LOCKDC_MATRIX_FAIL_PRESET=${fail_preset}"
+        "${CMAKE_COMMAND}" -DLOCKDC_ROOT=${fake_root}
+        "-DLOCKDC_RELEASE_PRESETS=${matrix_presets}"
+        -P "${LOCKDC_ROOT}/tests/release_tarball_sdk_matrix_test.cmake"
+        RESULT_VARIABLE rc OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    if(fail_preset STREQUAL "none")
+        if(NOT rc EQUAL 0)
+            message(FATAL_ERROR "SDK matrix failed: ${output}\n${error}")
+        endif()
+    elseif(rc EQUAL 0 OR NOT error MATCHES "consumer fixture failure")
+        message(FATAL_ERROR "SDK matrix did not propagate failure: ${output}\n${error}")
+    endif()
+    file(READ "${matrix_log}" calls)
+    set(expected "")
+    set(digests)
+    string(SHA256 linux_digest "Linux package logic")
+    foreach(preset IN LISTS matrix_presets)
+        set(run OFF)
+        if(preset MATCHES "^x86_64-linux-")
+            set(run ON)
+        endif()
+        string(APPEND expected "${fake_root}/build/${preset}|${run}|${digests}\n")
+        if(preset STREQUAL fail_preset)
+            break()
+        endif()
+        list(APPEND digests "${linux_digest}")
+    endforeach()
+    if(NOT calls STREQUAL expected)
+        message(FATAL_ERROR "SDK matrix repeated, omitted or misrouted a target:\n${calls}")
+    endif()
+endforeach()

@@ -47,6 +47,9 @@ local core_stub = {
   ERR_PENDING = 48,
   NACK_FAILURE = 48,
   NACK_DEFER = 49,
+  allocator_tracking_configure = function(enabled)
+    return enabled, 'tracking configuration', 42
+  end,
   version_string = function()
     return 'test-version'
   end,
@@ -83,6 +86,12 @@ local function assert_truthy(value, message)
 end
 
 local function test_json_helpers()
+  for _, enabled in ipairs({ false, true, 0, 1 }) do
+    local value, err, status = lockdc.allocator_tracking_configure(enabled)
+    assert_eq(value, enabled, 'tracking configuration should delegate unchanged')
+    assert_eq(err, 'tracking configuration', 'tracking errors should propagate')
+    assert_eq(status, 42, 'tracking status should propagate')
+  end
   assert_eq(lockdc.version_string(), 'test-version', 'version_string should delegate to core')
   assert_eq(lockdc.xid_new(), '0123456789abcdefghijkl', 'xid_new should delegate to core')
   assert_eq(lockdc.ERR_INVALID, core_stub.ERR_INVALID,

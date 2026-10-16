@@ -948,6 +948,22 @@ the public API or durable format.
   durability; it only delays space reclamation. Callers that require immediate
   reclamation can invoke explicit namespace maintenance.
 
+  Each compaction capture owns one 128 KiB heap buffer, reused for payload-span
+  copying and candidate checksums and freed when that capture ends. Preliminary
+  candidate scanning and snapshot creation use successive captures, so at most
+  one such buffer is live per namespace maintenance operation.
+  Compaction streams stored bytes directly and updates CRC incrementally;
+  scratch space stays independent of record size, avoids per-record allocation,
+  and keeps large buffers off small default pthread stacks, including those in
+  fully static musl applications. Allocation failure aborts maintenance without
+  publishing a partial snapshot; existing records remain readable and a later
+  maintenance attempt can retry.
+
+  Regression tests exercise both the background worker's default thread stack
+  and an explicitly constrained stack that respects the running platform's
+  minimum. These thread-stack limits are independent of the 128 KiB heap I/O
+  buffer; the tests report the configured thread-stack size.
+
 - Terminal retention and reclamation:
   A completed lease, released queue delivery, deleted state, and resolved
   transaction must disappear from the live logical projection immediately.

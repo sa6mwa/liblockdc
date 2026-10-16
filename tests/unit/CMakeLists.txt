@@ -52,53 +52,44 @@ function(lc_add_unit_test target_name)
   endif()
 endfunction()
 
-function(lc_add_https_unit_test_case target_name case_macro)
-  add_executable(${target_name}
-    test_lc_transport_https.c
-    ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
-  )
-  target_link_libraries(${target_name} PRIVATE
-    ${lc_test_link_target}
-    lc::cmocka
-    lc::openssl_ssl_shared
-    lc::openssl_crypto_shared
-    Threads::Threads
-  )
-  target_link_options(${target_name} PRIVATE
-    $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_strdup_local>
-    $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_client_strdup>
-  )
-  target_include_directories(${target_name} PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-  )
-  target_compile_definitions(${target_name} PRIVATE ${case_macro})
-  lc_configure_c_test_target(${target_name})
-  if(LOCKDC_ENABLE_COVERAGE)
-    target_compile_options(${target_name} PRIVATE
-      $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:--coverage -O0 -g>
-    )
-    target_link_options(${target_name} PRIVATE
-      $<$<LINK_LANGUAGE:C>:--coverage>
-    )
-  endif()
-  add_test(NAME ${target_name} COMMAND ${target_name})
-  set_tests_properties(${target_name} PROPERTIES TIMEOUT 60)
-  if(LOCKDC_C_TEST_ENVIRONMENT)
-    set_tests_properties(${target_name} PROPERTIES
-      ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
-  endif()
-endfunction()
-
-function(lc_add_cross_runtime_https_unit_test_case target_name case_macro)
-  lc_add_https_unit_test_case(${target_name} ${case_macro})
-  set_tests_properties(${target_name} PROPERTIES
-    LABELS "unit;transport;cross-runtime")
-  set_property(GLOBAL APPEND PROPERTY LOCKDC_CROSS_RUNTIME_TEST_TARGETS
-    ${target_name})
-endfunction()
-
 lc_add_unit_test(lc_unit_streams test_lc_streams.c)
+add_executable(lc_allocator_exit_probe test_lc_allocator_exit.c
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+if(TARGET lc_static)
+  target_link_libraries(lc_allocator_exit_probe PRIVATE lc_static)
+else()
+  target_link_libraries(lc_allocator_exit_probe PRIVATE ${lc_test_link_target})
+endif()
+target_include_directories(lc_allocator_exit_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+lc_configure_c_test_target(lc_allocator_exit_probe)
+add_executable(lc_allocator_public_exit_probe test_lc_allocator_public_exit.c)
+if(TARGET lc_shared)
+  target_link_libraries(lc_allocator_public_exit_probe PRIVATE lc_shared)
+else()
+  target_link_libraries(lc_allocator_public_exit_probe PRIVATE lc_static)
+endif()
+lc_configure_c_test_target(lc_allocator_public_exit_probe)
+add_dependencies(lc_allocator_exit_probe lc_allocator_public_exit_probe)
+set(allocator_probe_command ${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:lc_allocator_exit_probe>)
+set(allocator_public_probe_command ${CMAKE_CROSSCOMPILING_EMULATOR})
+if(LOCKDC_DEVELOPMENT_RUNTIME_LOADER)
+  # The production DSO uses $ORIGIN; development dependencies live in separate
+  # prefixes. Supply them to this loader invocation without ambient overrides.
+  list(JOIN LOCKDC_DEVELOPMENT_RUNTIME_DIRS ":" allocator_public_library_path)
+  list(APPEND allocator_public_probe_command "${LOCKDC_DEVELOPMENT_RUNTIME_LOADER}"
+    --library-path "${allocator_public_library_path}")
+endif()
+list(APPEND allocator_public_probe_command $<TARGET_FILE:lc_allocator_public_exit_probe>)
+add_test(NAME lc_allocator_exit_probe COMMAND "${CMAKE_COMMAND}"
+  "-DPROBE_COMMAND=${allocator_probe_command}"
+  "-DPUBLIC_PROBE_COMMAND=${allocator_public_probe_command}"
+  -P "${CMAKE_SOURCE_DIR}/tests/allocator_exit_report_test.cmake")
+set_tests_properties(lc_allocator_exit_probe PROPERTIES
+  LABELS "unit;allocator;cross-runtime" TIMEOUT 60)
+if(LOCKDC_C_TEST_ENVIRONMENT)
+  set_tests_properties(lc_allocator_exit_probe PROPERTIES ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+endif()
+set_property(GLOBAL APPEND PROPERTY LOCKDC_CROSS_RUNTIME_TEST_TARGETS lc_allocator_exit_probe)
 add_executable(lc_unit_tmp_cleanup_probe
   test_lc_tmp_cleanup.c
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
@@ -216,6 +207,19 @@ lc_add_unit_test(lc_unit_pouch test_lc_pouch.c)
 lc_add_unit_test(lc_unit_pouch_xa test_lc_pouch_xa.c)
 target_compile_definitions(lc_unit_pouch_xa PRIVATE LOCKDC_TEST_BUILD=1)
 lc_add_unit_test(lc_unit_xa_borrow test_lc_xa_borrow.c)
+function(lc_add_tracking_case name target filter)
+  # Native cases reuse existing binaries. The production allocator probe
+  # exercises both settings in every cross-runtime configuration.
+  add_test(NAME ${name} COMMAND ${target})
+  set_tests_properties(${name} PROPERTIES
+    LABELS "unit;allocator" TIMEOUT 30
+    ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT};LOCKDC_TEST_ALLOCATOR_TRACKING=1;CMOCKA_TEST_FILTER=${filter}"
+    PASS_REGULAR_EXPRESSION "\\[  PASSED  \\] 1 test")
+endfunction()
+lc_add_tracking_case(lc_allocator_pouch_compaction lc_unit_pouch
+  test_compaction_reclaims_expired_obsolete_files)
+lc_add_tracking_case(lc_allocator_outbox_lifecycle lc_unit_outbox
+  test_pouch_outbox_stateful_delivery_lifecycle)
 target_link_options(lc_unit_pouch PRIVATE -Wl,--wrap=time)
 if(CMAKE_CROSSCOMPILING AND CMAKE_CROSSCOMPILING_EMULATOR)
   set(lc_pouch_cross_emulator ${CMAKE_CROSSCOMPILING_EMULATOR})
@@ -247,338 +251,53 @@ target_sources(lc_unit_streams PRIVATE
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
 )
 
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_client_open_rejects_bundle_without_ca
-  LC_HTTPS_CASE_CLIENT_OPEN_REJECTS_BUNDLE_WITHOUT_CA
-)
-lc_add_cross_runtime_https_unit_test_case(
-  lc_unit_transport_https_client_open_accepts_memory_bundle_source
-  LC_HTTPS_CASE_CLIENT_OPEN_ACCEPTS_MEMORY_BUNDLE_SOURCE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_client_open_propagates_callback_bundle_source_failure
-  LC_HTTPS_CASE_CLIENT_OPEN_PROPAGATES_CALLBACK_BUNDLE_SOURCE_FAILURE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_client_open_accepts_fd_bundle_source
-  LC_HTTPS_CASE_CLIENT_OPEN_ACCEPTS_FD_BUNDLE_SOURCE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_client_open_accepts_chunked_callback_bundle_source
-  LC_HTTPS_CASE_PUBLIC_CLIENT_OPEN_ACCEPTS_CHUNKED_CALLBACK_BUNDLE_SOURCE
-)
-lc_add_cross_runtime_https_unit_test_case(
-  lc_unit_transport_https_public_client_namespaced_load_rejects_empty_namespace
-  LC_HTTPS_CASE_PUBLIC_CLIENT_NAMESPACED_LOAD_REJECTS_EMPTY_NAMESPACE
-)
-lc_add_cross_runtime_https_unit_test_case(
-  lc_unit_transport_https_state_paths_use_mtls
-  LC_HTTPS_CASE_STATE_PATHS_USE_MTLS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_state_transport_honors_client_cancel
-  LC_HTTPS_CASE_STATE_TRANSPORT_HONORS_CLIENT_CANCEL
-)
-lc_add_cross_runtime_https_unit_test_case(
-  lc_unit_transport_https_state_parses_buffered_typed_json_response
-  LC_HTTPS_CASE_STATE_PARSES_BUFFERED_TYPED_JSON_RESPONSE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_state_accepts_numeric_headers_with_trailing_ows
-  LC_HTTPS_CASE_STATE_ACCEPTS_NUMERIC_HEADERS_WITH_TRAILING_OWS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_state_rejects_invalid_numeric_headers_as_protocol
-  LC_HTTPS_CASE_STATE_REJECTS_INVALID_NUMERIC_HEADERS_AS_PROTOCOL
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_management_paths_use_mtls
-  LC_HTTPS_CASE_MANAGEMENT_PATHS_USE_MTLS
-)
-lc_add_cross_runtime_https_unit_test_case(
-  lc_unit_transport_https_queue_paths_use_mtls
-  LC_HTTPS_CASE_QUEUE_PATHS_USE_MTLS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_queue_rejects_oversized_error_body
-  LC_HTTPS_CASE_QUEUE_REJECTS_OVERSIZED_ERROR_BODY
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_watch_rejects_oversized_error_body
-  LC_HTTPS_CASE_WATCH_REJECTS_OVERSIZED_ERROR_BODY
-)
-lc_add_cross_runtime_https_unit_test_case(
-  lc_unit_transport_https_watch_filters_and_finishes_trailing_event
-  LC_HTTPS_CASE_WATCH_FILTERS_AND_FINISHES_TRAILING_EVENT
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_watch_rejects_malformed_selected_event
-  LC_HTTPS_CASE_WATCH_REJECTS_MALFORMED_SELECTED_EVENT
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_watch_rejects_oversized_line
-  LC_HTTPS_CASE_WATCH_REJECTS_OVERSIZED_LINE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_watch_rejects_oversized_event_data_after_prior_event
-  LC_HTTPS_CASE_WATCH_REJECTS_OVERSIZED_EVENT_DATA_AFTER_PRIOR_EVENT
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_queue_rejects_overflowing_numeric_fields
-  LC_HTTPS_CASE_QUEUE_REJECTS_OVERFLOWING_NUMERIC_FIELDS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_queue_preserves_typed_json_parse_errors
-  LC_HTTPS_CASE_QUEUE_PRESERVES_TYPED_JSON_PARSE_ERRORS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_subscribe_accepts_content_length_with_trailing_ows
-  LC_HTTPS_CASE_SUBSCRIBE_ACCEPTS_CONTENT_LENGTH_WITH_TRAILING_OWS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_subscribe_rejects_oversized_header_line
-  LC_HTTPS_CASE_SUBSCRIBE_REJECTS_OVERSIZED_HEADER_LINE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_subscribe_rejects_oversized_boundary
-  LC_HTTPS_CASE_SUBSCRIBE_REJECTS_OVERSIZED_BOUNDARY
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_subscribe_rejects_too_many_headers
-  LC_HTTPS_CASE_SUBSCRIBE_REJECTS_TOO_MANY_HEADERS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_subscribe_rejects_oversized_header_after_completed_delivery
-  LC_HTTPS_CASE_SUBSCRIBE_REJECTS_OVERSIZED_HEADER_AFTER_COMPLETED_DELIVERY
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_subscribe_respects_client_meta_limit
-  LC_HTTPS_CASE_SUBSCRIBE_RESPECTS_CLIENT_META_LIMIT
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_subscribe_rejects_default_meta_overflow
-  LC_HTTPS_CASE_SUBSCRIBE_REJECTS_DEFAULT_META_OVERFLOW
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_subscribe_rejects_payload_without_content_length
-  LC_HTTPS_CASE_SUBSCRIBE_REJECTS_PAYLOAD_WITHOUT_CONTENT_LENGTH
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_subscribe_rejects_missing_closing_boundary
-  LC_HTTPS_CASE_SUBSCRIBE_REJECTS_MISSING_CLOSING_BOUNDARY
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_subscribe_propagates_payload_callback_failure
-  LC_HTTPS_CASE_SUBSCRIBE_PROPAGATES_PAYLOAD_CALLBACK_FAILURE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_subscribe_treats_cancelled_callback_failure_as_ok
-  LC_HTTPS_CASE_SUBSCRIBE_TREATS_CANCELLED_CALLBACK_FAILURE_AS_OK
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_subscribe_treats_cancelled_finish_failure_as_ok
-  LC_HTTPS_CASE_SUBSCRIBE_TREATS_CANCELLED_FINISH_FAILURE_AS_OK
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_client_emits_pslog_messages
-  LC_HTTPS_CASE_PUBLIC_CLIENT_EMITS_PSLOG_MESSAGES
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_client_can_disable_sdk_sys_field
-  LC_HTTPS_CASE_PUBLIC_CLIENT_CAN_DISABLE_SDK_SYS_FIELD
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_bound_lease_methods_emit_logs
-  LC_HTTPS_CASE_PUBLIC_BOUND_LEASE_METHODS_EMIT_LOGS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_lease_attach_rejects_malformed_json_response
-  LC_HTTPS_CASE_PUBLIC_LEASE_ATTACH_REJECTS_MALFORMED_JSON_RESPONSE
-)
-lc_add_cross_runtime_https_unit_test_case(
-  lc_unit_transport_https_public_lease_attach_retries_node_passive_and_cleans_parser_state
-  LC_HTTPS_CASE_PUBLIC_LEASE_ATTACH_RETRIES_NODE_PASSIVE_AND_CLEANS_PARSER_STATE
-)
-lc_add_cross_runtime_https_unit_test_case(
-  lc_unit_transport_https_engine_request_deadline_bounds_node_passive_failover
-  LC_HTTPS_CASE_ENGINE_REQUEST_DEADLINE_BOUNDS_NODE_PASSIVE_FAILOVER
-)
-lc_add_cross_runtime_https_unit_test_case(
-  lc_unit_transport_https_public_attachment_get_preserves_i64_timestamp_headers
-  LC_HTTPS_CASE_PUBLIC_ATTACHMENT_GET_PRESERVES_I64_TIMESTAMP_HEADERS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_lease_attach_rejects_non_rewindable_retry_source
-  LC_HTTPS_CASE_PUBLIC_LEASE_ATTACH_REJECTS_NON_REWINDABLE_RETRY_SOURCE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_client_update_rejects_non_rewindable_retry_source
-  LC_HTTPS_CASE_PUBLIC_CLIENT_UPDATE_REJECTS_NON_REWINDABLE_RETRY_SOURCE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_lease_update_rejects_non_rewindable_retry_source
-  LC_HTTPS_CASE_PUBLIC_LEASE_UPDATE_REJECTS_NON_REWINDABLE_RETRY_SOURCE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_queue_retries_node_passive_and_cleans_parser_state
-  LC_HTTPS_CASE_QUEUE_RETRIES_NODE_PASSIVE_AND_CLEANS_PARSER_STATE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_enqueue_from_retries_node_passive_and_cleans_parser_state
-  LC_HTTPS_CASE_ENQUEUE_FROM_RETRIES_NODE_PASSIVE_AND_CLEANS_PARSER_STATE
-)
-lc_add_cross_runtime_https_unit_test_case(
-  lc_unit_transport_https_enqueue_from_checks_public_metadata_range
-  LC_HTTPS_CASE_ENQUEUE_FROM_CHECKS_PUBLIC_METADATA_RANGE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_enqueue_from_rejects_non_rewindable_retry_source
-  LC_HTTPS_CASE_ENQUEUE_FROM_REJECTS_NON_REWINDABLE_RETRY_SOURCE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_lease_save_uses_mapped_lonejson_upload
-  LC_HTTPS_CASE_PUBLIC_LEASE_SAVE_USES_MAPPED_LONEJSON_UPLOAD
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_lease_save_ignores_response_limit_for_request_body
-  LC_HTTPS_CASE_PUBLIC_LEASE_SAVE_IGNORES_RESPONSE_LIMIT_FOR_REQUEST_BODY
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_lease_get_refreshes_state_view
-  LC_HTTPS_CASE_PUBLIC_LEASE_GET_REFRESHES_STATE_VIEW
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_client_load_preserves_preinitialized_json_value_capture
-  LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_PRESERVES_PREINITIALIZED_JSON_VALUE_CAPTURE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_client_load_clears_mixed_json_value_mapped_destination
-  LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_CLEARS_MIXED_JSON_VALUE_MAPPED_DESTINATION
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_client_load_clears_reused_mapped_destination
-  LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_CLEARS_REUSED_MAPPED_DESTINATION
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_client_load_fails_on_metadata_allocation
-  LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_FAILS_ON_METADATA_ALLOCATION
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_lease_load_respects_configured_json_response_limit
-  LC_HTTPS_CASE_PUBLIC_LEASE_LOAD_RESPECTS_CONFIGURED_JSON_RESPONSE_LIMIT
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_client_load_respects_configured_spooled_response_limit
-  LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_RESPECTS_CONFIGURED_SPOOLED_RESPONSE_LIMIT
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_lease_load_parse_failure_does_not_refresh_state_view
-  LC_HTTPS_CASE_PUBLIC_LEASE_LOAD_PARSE_FAILURE_DOES_NOT_REFRESH_STATE_VIEW
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_lease_load_empty_does_not_refresh_state_view
-  LC_HTTPS_CASE_PUBLIC_LEASE_LOAD_EMPTY_DOES_NOT_REFRESH_STATE_VIEW
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_lease_load_preserves_preinitialized_json_value_capture
-  LC_HTTPS_CASE_PUBLIC_LEASE_LOAD_PRESERVES_PREINITIALIZED_JSON_VALUE_CAPTURE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_lease_load_fails_on_metadata_allocation
-  LC_HTTPS_CASE_PUBLIC_LEASE_LOAD_FAILS_ON_METADATA_ALLOCATION
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_client_load_parse_failure_does_not_log_success
-  LC_HTTPS_CASE_PUBLIC_CLIENT_LOAD_PARSE_FAILURE_DOES_NOT_LOG_SUCCESS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_lease_save_fails_on_state_etag_allocation
-  LC_HTTPS_CASE_PUBLIC_LEASE_SAVE_FAILS_ON_STATE_ETAG_ALLOCATION
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_lease_mutate_local_covers_no_content_path
-  LC_HTTPS_CASE_PUBLIC_LEASE_MUTATE_LOCAL_COVERS_NO_CONTENT_PATH
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_management_methods_emit_logs
-  LC_HTTPS_CASE_PUBLIC_MANAGEMENT_METHODS_EMIT_LOGS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_enqueue_emits_logs
-  LC_HTTPS_CASE_PUBLIC_ENQUEUE_EMITS_LOGS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_enqueue_streams_payload_from_source
-  LC_HTTPS_CASE_PUBLIC_ENQUEUE_STREAMS_PAYLOAD_FROM_SOURCE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_dequeue_emits_stream_transport_logs
-  LC_HTTPS_CASE_PUBLIC_DEQUEUE_EMITS_STREAM_TRANSPORT_LOGS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_query_stream_captures_headers_and_body
-  LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_CAPTURES_HEADERS_AND_BODY
-)
-lc_add_cross_runtime_https_unit_test_case(
-  lc_unit_transport_https_public_query_keys_streams_chunks_and_headers
-  LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_STREAMS_CHUNKS_AND_HEADERS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_query_keys_captures_body_metadata
-  LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_CAPTURES_BODY_METADATA
-)
-lc_add_cross_runtime_https_unit_test_case(
-  lc_unit_transport_https_public_query_keys_accepts_empty_results
-  LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_ACCEPTS_EMPTY_RESULTS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_query_keys_streams_large_response_without_client_alloc
-  LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_STREAMS_LARGE_RESPONSE_WITHOUT_CLIENT_ALLOC
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_query_keys_propagates_chunk_callback_failure
-  LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_PROPAGATES_CHUNK_CALLBACK_FAILURE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_query_keys_propagates_end_callback_failure
-  LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_PROPAGATES_END_CALLBACK_FAILURE
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_query_keys_rejects_malformed_keys_json
-  LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_REJECTS_MALFORMED_KEYS_JSON
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_query_stream_captures_trailers_after_body
-  LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_CAPTURES_TRAILERS_AFTER_BODY
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_query_stream_trailers_override_headers
-  LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_TRAILERS_OVERRIDE_HEADERS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_query_stream_retries_node_passive_and_cleans_trailers
-  LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_RETRIES_NODE_PASSIVE_AND_CLEANS_TRAILERS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_query_stream_rejects_invalid_index_seq
-  LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_REJECTS_INVALID_INDEX_SEQ
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_query_stream_rejects_invalid_trailer_index_seq
-  LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_REJECTS_INVALID_TRAILER_INDEX_SEQ
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_queue_nack_maps_enum_intents
-  LC_HTTPS_CASE_PUBLIC_QUEUE_NACK_MAPS_ENUM_INTENTS
-)
-lc_add_https_unit_test_case(
-  lc_unit_transport_https_public_queue_nack_rejects_invalid_intent
-  LC_HTTPS_CASE_PUBLIC_QUEUE_NACK_REJECTS_INVALID_INTENT
-)
+add_executable(lc_unit_transport_https
+  test_lc_transport_https.c ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+target_link_libraries(lc_unit_transport_https PRIVATE
+  ${lc_test_link_target} lc::cmocka lc::openssl_ssl_shared lc::openssl_crypto_shared Threads::Threads)
+target_include_directories(lc_unit_transport_https PRIVATE
+  ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
+target_link_options(lc_unit_transport_https PRIVATE
+  "LINKER:--wrap=lc_strdup_local" "LINKER:--wrap=lc_client_strdup")
+lc_configure_c_test_target(lc_unit_transport_https)
+if(LOCKDC_ENABLE_COVERAGE)
+  target_compile_options(lc_unit_transport_https PRIVATE
+    $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:--coverage -O0 -g>)
+  target_link_options(lc_unit_transport_https PRIVATE $<$<LINK_LANGUAGE:C>:--coverage>)
+endif()
+set(https_cases
+    test_client_open_accepts_memory_bundle_source
+    test_public_client_namespaced_load_rejects_empty_namespace
+    test_state_transport_paths_use_mtls
+    test_state_transport_parses_buffered_typed_json_response
+    test_queue_transport_paths_use_mtls
+    test_watch_stream_filters_events_and_finishes_trailing_event
+    test_public_lease_attach_retries_node_passive_and_cleans_parser_state
+    test_engine_request_deadline_bounds_node_passive_failover
+    test_public_attachment_get_preserves_i64_timestamp_headers
+    test_enqueue_from_checks_public_metadata_range
+    test_public_query_keys_streams_chunks_and_headers
+    test_public_query_keys_accepts_empty_results)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/test_lc_transport_https.c" https_source)
+foreach(https_case IN LISTS https_cases)
+  if(NOT https_source MATCHES "cmocka_unit_test\\([ \r\n]*${https_case}\\)")
+    message(FATAL_ERROR "Unknown cross-runtime HTTPS case: ${https_case}")
+  endif()
+endforeach()
+if(CMAKE_SYSTEM_PROCESSOR STREQUAL CMAKE_HOST_SYSTEM_PROCESSOR)
+  # Native GNU and musl run the entire table; QEMU keeps its existing subset.
+  set(https_cases)
+endif()
+add_test(NAME lc_unit_transport_https COMMAND lc_unit_transport_https ${https_cases})
+set_tests_properties(lc_unit_transport_https PROPERTIES
+  LABELS "unit;transport;cross-runtime" TIMEOUT 180)
+if(LOCKDC_C_TEST_ENVIRONMENT)
+  set_tests_properties(lc_unit_transport_https PROPERTIES ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+endif()
+set_property(GLOBAL APPEND PROPERTY LOCKDC_CROSS_RUNTIME_TEST_TARGETS lc_unit_transport_https)
 
-# Keep the QEMU build closure and CTest selection in lockstep. A test added
-# with the cross-runtime label outside the registration helpers must fail at
-# configure time instead of surfacing later as a missing executable in CTest.
+# Validate unit registration before the parent assembles the runtime build
+# closure shared with integration tests. Unit test names match their targets.
 get_property(lc_cross_runtime_test_targets GLOBAL PROPERTY
   LOCKDC_CROSS_RUNTIME_TEST_TARGETS)
 get_property(lc_registered_unit_tests DIRECTORY PROPERTY TESTS)
@@ -595,5 +314,4 @@ foreach(lc_registered_test IN LISTS lc_registered_unit_tests)
     endif()
   endif()
 endforeach()
-add_custom_target(lockdc_cross_runtime_tests DEPENDS
-  ${lc_cross_runtime_test_targets})
+lc_apply_test_defaults()

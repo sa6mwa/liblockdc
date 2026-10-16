@@ -5,6 +5,9 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 timed_bin="$script_dir/run_timed.sh"
 mode=${1:-all}
+e2e_preset=${LOCKDC_E2E_PRESET:-e2e}
+case "$e2e_preset" in debug|e2e) ;; *) echo 'LOCKDC_E2E_PRESET must be debug or e2e' >&2; exit 2 ;; esac
+e2e_build_dir="$repo_root/build/$e2e_preset"
 
 case "$mode" in
   all|examples)
@@ -167,7 +170,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-"$timed_bin" "e2e build" "$script_dir/build.sh" e2e "$e2e_build_target"
+"$timed_bin" "e2e build" "$script_dir/build.sh" "$e2e_preset" "$e2e_build_target"
 if ! "$script_dir/devenv.sh" running; then
   "$timed_bin" "e2e start" "$script_dir/devenv.sh" up
 fi
@@ -184,7 +187,7 @@ LOCKDC_E2E_DISK_ENDPOINT="$(select_active_disk_endpoint \
   "$LOCKDC_E2E_DISK_ENDPOINT" \
   "${LOCKDC_E2E_DISK_B_ENDPOINT:-https://localhost:$LOCKDC_DISK_B_PORT}" \
   "$LOCKDC_E2E_DISK_BUNDLE" \
-  "$repo_root/build/e2e/examples/lc_example_acquire_lease_lifecycle")"
+  "$e2e_build_dir/examples/lc_example_acquire_lease_lifecycle")"
 export LOCKDC_E2E_DISK_ENDPOINT
 export LOCKDC_E2E_DISK_A_ENDPOINT="$LOCKDC_E2E_DISK_ENDPOINT"
 export LOCKDC_E2E_DISK_A_BUNDLE="$LOCKDC_E2E_DISK_BUNDLE"
@@ -195,19 +198,19 @@ wait_for_lockd_probe \
   "$LOCKDC_E2E_DISK_ENDPOINT" \
   "$LOCKDC_E2E_DISK_BUNDLE" \
   "disk" \
-  "$repo_root/build/e2e/examples/lc_example_acquire_lease_lifecycle"
+  "$e2e_build_dir/examples/lc_example_acquire_lease_lifecycle"
 wait_for_lockd_probe \
   "$LOCKDC_E2E_S3_ENDPOINT" \
   "$LOCKDC_E2E_S3_BUNDLE" \
   "s3" \
-  "$repo_root/build/e2e/examples/lc_example_acquire_lease_lifecycle"
+  "$e2e_build_dir/examples/lc_example_acquire_lease_lifecycle"
 
 if [ "$mode" = "examples" ]; then
-  "$timed_bin" "e2e examples" ctest --preset e2e --output-on-failure --progress --stop-on-failure \
+  "$timed_bin" "e2e examples" ctest --test-dir "$e2e_build_dir" --output-on-failure --progress --stop-on-failure \
     --output-log "$repo_root/build/devenv/logs/ctest.log" \
-    --timeout "$ctest_timeout" --parallel "$ctest_parallel_level" -L examples
+    --timeout "$ctest_timeout" --parallel "$ctest_parallel_level" --no-tests=error -L examples
 else
-  "$timed_bin" "e2e ctest" ctest --preset e2e --output-on-failure --progress --stop-on-failure \
+  "$timed_bin" "e2e ctest" ctest --test-dir "$e2e_build_dir" --output-on-failure --progress --stop-on-failure \
     --output-log "$repo_root/build/devenv/logs/ctest.log" \
-    --timeout "$ctest_timeout" --parallel "$ctest_parallel_level"
+    --timeout "$ctest_timeout" --parallel "$ctest_parallel_level" --no-tests=error -L e2e
 fi

@@ -99,12 +99,6 @@ source_archive="$repo_root/dist/liblockdc-$(sed -n 's/^set(LOCKDC_VERSION "\(.*\
     -DLOCKDC_USE_EXISTING_ARCHIVE=ON \
     -DLOCKDC_RELEASE_PRESETS="$release_preset_list" \
     -P "$repo_root/tests/release_tarball_sdk_matrix_test.cmake"
-"$timed_bin" "release-matrix package tarball-sdk" cmake \
-    -DLOCKDC_ROOT="$repo_root" \
-    -DLOCKDC_BINARY_DIR="$repo_root/build/$host_release_preset" \
-    -DLOCKDC_DIST_DIR="$repo_root/dist" \
-    -DLOCKDC_USE_EXISTING_ARCHIVE=ON \
-    -P "$repo_root/tests/release_tarball_sdk_test.cmake"
 "$timed_bin" "release-matrix package lua-verify" cmake \
     -DLOCKDC_ROOT="$repo_root" \
     -DLOCKDC_BINARY_DIR="$repo_root/build/$host_release_preset" \

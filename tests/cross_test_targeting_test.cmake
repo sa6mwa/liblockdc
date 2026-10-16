@@ -6,6 +6,43 @@ if(NOT DEFINED LOCKDC_ROOT)
     message(FATAL_ERROR "LOCKDC_ROOT is required")
 endif()
 
+# Inspect the generated closure even when its outputs already exist. A script
+# mock alone cannot catch executables registered after the aggregate is made.
+if(DEFINED LOCKDC_NINJA)
+    execute_process(
+        COMMAND "${LOCKDC_NINJA}" -C "${LOCKDC_BINARY_DIR}" -t commands lockdc_cross_runtime_tests
+        RESULT_VARIABLE closure_result
+        OUTPUT_VARIABLE closure_commands
+        ERROR_VARIABLE closure_stderr)
+    if(NOT closure_result EQUAL 0)
+        message(FATAL_ERROR "cannot inspect cross-runtime build closure: ${closure_stderr}")
+    endif()
+    foreach(required_command "test_pouch_compaction_stack.c" "tests/integration/lc_pouch_compaction_stack_test"
+            "test_lc_allocator_exit.c" "tests/unit/lc_allocator_exit_probe"
+            "test_lc_allocator_public_exit.c" "tests/unit/lc_allocator_public_exit_probe"
+            "test_lc_transport_https.c" "tests/unit/lc_unit_transport_https")
+        string(FIND "${closure_commands}" "${required_command}" command_index)
+        if(command_index EQUAL -1)
+            message(FATAL_ERROR "cross-runtime build closure is missing ${required_command}")
+        endif()
+    endforeach()
+    string(REGEX MATCHALL " -c [^\n]*test_lc_transport_https.c" https_compiles "${closure_commands}")
+    list(LENGTH https_compiles https_compile_count)
+    if(NOT https_compile_count EQUAL 1)
+        message(FATAL_ERROR "HTTPS fixture must compile once, got ${https_compile_count}")
+    endif()
+    execute_process(COMMAND "${LOCKDC_NINJA}" -C "${LOCKDC_BINARY_DIR}" -t commands ${LOCKDC_LIBRARY_TARGETS}
+        RESULT_VARIABLE library_result OUTPUT_VARIABLE library_commands ERROR_VARIABLE library_error)
+    if(NOT library_result EQUAL 0)
+        message(FATAL_ERROR "cannot inspect library build closure: ${library_error}")
+    endif()
+    string(REGEX MATCHALL " -c [^\n]*/src/lc_api.c" core_compiles "${library_commands}")
+    list(LENGTH core_compiles core_compile_count)
+    if(NOT core_compile_count EQUAL 1)
+        message(FATAL_ERROR "Static/shared core must compile once, got ${core_compile_count}")
+    endif()
+endif()
+
 set(test_root "${LOCKDC_BINARY_DIR}/cross-test-targeting-test")
 set(script_dir "${test_root}/scripts")
 set(bin_dir "${test_root}/bin")

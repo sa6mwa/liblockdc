@@ -112,6 +112,21 @@ must support that execution context and must not enter a Lua state owned by
 another thread. The consumer callback's logger is borrowed and must not be
 destroyed by the handler.
 
+Native allocation tracking is off by default. Call
+`lockdc.allocator_tracking_configure(true)` (or `1`) once at process startup,
+before creating SDK objects or starting concurrent SDK use, to enable it. Pass
+`false` (or `0`) to explicitly keep it off. The setting is shared by all clients
+and Lua states using the native library; repeated configuration returns an error.
+The native C host can instead call `lc_allocator_tracking_configure()` before
+starting Lua. Custom allocators are excluded, and disabled allocation uses the
+plain callbacks without a tracking-flag check, header, or counter update.
+
+When enabled, ordinary process exit or native-library unload reports outstanding
+counts and bytes on stderr; a clean allocator shutdown is silent. Close SDK
+handles and close the Lua state before the host exits. This diagnostic covers
+the native allocator, not Lua's own heap, and does not run after abrupt
+termination.
+
 ## Public entrypoints
 
 The top-level module is:

@@ -3,6 +3,12 @@ local lonejson = require("lonejson")
 
 local M = {}
 
+-- Process-wide startup selection; call before creating any SDK objects.
+-- Custom allocator callbacks and Lua's own heap remain outside this tracker.
+function M.allocator_tracking_configure(enabled)
+  return core.allocator_tracking_configure(enabled)
+end
+
 local Client = {}
 Client.__index = Client
 

@@ -21,6 +21,7 @@ else
     lc_unit_mutate_stream
     # The unified Pouch target replaced the retired pouch-client test target.
     lc_unit_pouch
+    lc_unit_outbox
   )
 fi
 
@@ -52,8 +53,8 @@ if ! command -v "$valgrind_bin" >/dev/null 2>&1; then
   exit 2
 fi
 
-"$timed_bin" "valgrind configure" cmake --fresh --preset "$preset"
-"$timed_bin" "valgrind build" cmake --build --preset "$preset"
+"$timed_bin" "valgrind configure" cmake --preset "$preset"
+"$timed_bin" "valgrind build" cmake --build --preset "$preset" --target "${valgrind_tests[@]}"
 
 for test_name in "${valgrind_tests[@]}"; do
   test_path="$build_dir/tests/unit/$test_name"
@@ -71,10 +72,25 @@ for test_name in "${valgrind_tests[@]}"; do
     exit 2
   fi
 
-  "$timed_bin" "valgrind $test_name" env LOCKDC_UNDER_VALGRIND=1 "$valgrind_bin" \
-    --leak-check=full \
-    --show-leak-kinds=definite,indirect \
-    --track-origins=yes \
-    --error-exitcode=97 \
-    "$test_path"
+  test_cases=("${CMOCKA_TEST_FILTER:-*}")
+  if [ "$test_name" = lc_unit_outbox ] && [ -z "${CMOCKA_TEST_FILTER:-}" ]; then
+    # Native/QEMU suites own the full outbox inventory and timing contracts.
+    # Instrument the shutdown/ownership regressions without timing load cases.
+    test_cases=(
+      test_pouch_dispatcher_wait_includes_worker_release
+      test_pouch_reconciliation_preserves_allocator_domains
+      test_pouch_dispatcher_stop_retains_inflight_receiver
+      test_pouch_client_close_from_source_callback
+      test_pouch_dispatcher_stop_timeout_preserves_handed_out_job
+    )
+  fi
+  for test_case in "${test_cases[@]}"; do
+    "$timed_bin" "valgrind $test_name $test_case" env LOCKDC_UNDER_VALGRIND=1 \
+      CMOCKA_TEST_FILTER="$test_case" "$valgrind_bin" \
+      --leak-check=full \
+      --show-leak-kinds=definite,indirect \
+      --track-origins=yes \
+      --error-exitcode=97 \
+      "$test_path"
+  done
 done

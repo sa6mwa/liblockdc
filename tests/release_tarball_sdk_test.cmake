@@ -1,3 +1,4 @@
+cmake_minimum_required(VERSION 3.21)
 if(NOT DEFINED LOCKDC_BINARY_DIR)
     message(FATAL_ERROR "LOCKDC_BINARY_DIR is required")
 endif()
@@ -235,38 +236,41 @@ foreach(forbidden_pkgconfig_private_lib
     endif()
 endforeach()
 
-lockdc_assert_config_accepts_non_cpkt_curl(
-    "${release_prefix}"
-    "${LOCKDC_EXTERNAL_ROOT}"
-    "${test_root}")
-lockdc_assert_config_rejects_missing_curl_target(
-    "${release_prefix}"
-    "${LOCKDC_EXTERNAL_ROOT}"
-    "${test_root}")
-lockdc_assert_config_accepts_shared_only_dependency_targets(
-    "${release_prefix}"
-    "${LOCKDC_EXTERNAL_ROOT}"
-    "${test_root}")
-lockdc_assert_config_supports_repeated_required_discovery(
-    "${release_prefix}"
-    "${LOCKDC_EXTERNAL_ROOT}"
-    "${test_root}")
-lockdc_assert_config_rejects_static_component_without_static_dependency_targets(
-    "${release_prefix}"
-    "${LOCKDC_EXTERNAL_ROOT}"
-    "${test_root}")
-lockdc_assert_config_accepts_optional_static_component_without_static_dependency_targets(
-    "${release_prefix}"
-    "${LOCKDC_EXTERNAL_ROOT}"
-    "${test_root}")
-lockdc_assert_config_accepts_optional_shared_component_without_shared_library(
-    "${release_prefix}"
-    "${LOCKDC_EXTERNAL_ROOT}"
-    "${test_root}")
-lockdc_assert_config_supports_quiet_optional_discovery(
-    "${release_prefix}"
-    "${LOCKDC_EXTERNAL_ROOT}"
-    "${test_root}")
+file(SHA256 "${release_prefix}/lib/cmake/lockdc/lockdcConfig.cmake" config_digest)
+if(NOT config_digest IN_LIST LOCKDC_VERIFIED_CONFIG_DIGESTS)
+    lockdc_assert_config_accepts_non_cpkt_curl(
+        "${release_prefix}"
+        "${LOCKDC_EXTERNAL_ROOT}"
+        "${test_root}")
+    lockdc_assert_config_rejects_missing_curl_target(
+        "${release_prefix}"
+        "${LOCKDC_EXTERNAL_ROOT}"
+        "${test_root}")
+    lockdc_assert_config_accepts_shared_only_dependency_targets(
+        "${release_prefix}"
+        "${LOCKDC_EXTERNAL_ROOT}"
+        "${test_root}")
+    lockdc_assert_config_supports_repeated_required_discovery(
+        "${release_prefix}"
+        "${LOCKDC_EXTERNAL_ROOT}"
+        "${test_root}")
+    lockdc_assert_config_rejects_static_component_without_static_dependency_targets(
+        "${release_prefix}"
+        "${LOCKDC_EXTERNAL_ROOT}"
+        "${test_root}")
+    lockdc_assert_config_accepts_optional_static_component_without_static_dependency_targets(
+        "${release_prefix}"
+        "${LOCKDC_EXTERNAL_ROOT}"
+        "${test_root}")
+    lockdc_assert_config_accepts_optional_shared_component_without_shared_library(
+        "${release_prefix}"
+        "${LOCKDC_EXTERNAL_ROOT}"
+        "${test_root}")
+    lockdc_assert_config_supports_quiet_optional_discovery(
+        "${release_prefix}"
+        "${LOCKDC_EXTERNAL_ROOT}"
+        "${test_root}")
+endif()
 
 file(WRITE "${consumer_src_dir}/CMakeLists.txt" [=[
 cmake_minimum_required(VERSION 3.21)

@@ -943,7 +943,7 @@ static char *lc_pouch_namespace_config_key(const char *ns, lc_error *error) {
   char *key;
 
   (void)ns;
-  key = lc_strdup_local(LC_POUCH_NAMESPACE_CONFIG_KEY);
+  key = lc_strdup_with_allocator(NULL, LC_POUCH_NAMESPACE_CONFIG_KEY);
   if (key == NULL) {
     lc_error_set(error, LC_ERR_NOMEM, 0L,
                  "failed to allocate pouch namespace config key", NULL, NULL,
@@ -1087,7 +1087,7 @@ lc_pouch_namespace_config_read(lc_client_handle *client, const char *ns,
                                               record, error);
   }
   if (rc == LC_OK && read_result.found) {
-    record->etag = lc_strdup_local(read_result.etag);
+    record->etag = lc_strdup_with_allocator(NULL, read_result.etag);
     if (record->etag == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch namespace config etag", NULL,
@@ -1158,7 +1158,7 @@ static int lc_pouch_client_query_engine(lc_client_handle *client,
     lc_pouch_namespace_config_record_cleanup(&record);
     return LC_OK;
   }
-  *owned_engine = lc_strdup_local(record.preferred_engine);
+  *owned_engine = lc_strdup_with_allocator(NULL, record.preferred_engine);
   if (*owned_engine == NULL) {
     lc_pouch_namespace_config_record_cleanup(&record);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -3552,7 +3552,7 @@ static int lc_pouch_query_selector_json_alloc(lql *runtime,
       runtime->selector_write_json(runtime, selector, fp, &lql_error_value);
   if (status != LQL_STATUS_OK) {
     fclose(fp);
-    lc_free_with_allocator(NULL, json);
+    lc_free_local(json);
     return lc_pouch_query_lql_error(
         error, status, &lql_error_value,
         "failed to serialize pouch query selector for index planning");
@@ -3561,7 +3561,7 @@ static int lc_pouch_query_selector_json_alloc(lql *runtime,
     int saved_errno;
 
     saved_errno = errno;
-    lc_free_with_allocator(NULL, json);
+    lc_free_local(json);
     return lc_error_set(error, LC_ERR_PROTOCOL, (long)saved_errno,
                         "failed to finalize pouch query selector "
                         "serialization",
@@ -3601,7 +3601,7 @@ static int lc_pouch_query_collect_selector_scalars(
   }
   json_runtime = lc_thread_lonejson_runtime();
   if (json_runtime == NULL) {
-    lc_free_with_allocator(NULL, json);
+    lc_free_local(json);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to initialize pouch selector JSON runtime",
                         NULL, NULL, NULL);
@@ -3618,7 +3618,7 @@ static int lc_pouch_query_collect_selector_scalars(
   lonejson_error_init(&lj_error);
   status = lonejson_visit_path_value_cstr(json_runtime, json, &visitor, list,
                                           &lj_error);
-  lc_free_with_allocator(NULL, json);
+  lc_free_local(json);
   if (status != LONEJSON_STATUS_OK) {
     lc_pouch_query_selector_scalar_list_cleanup(list);
     return lc_error_set(
@@ -4339,7 +4339,7 @@ lc_pouch_query_index_key_set_add(lc_pouch_query_index_key_set *set,
     set->capacity = next_capacity;
   }
   set->keys[set->count] = *key;
-  set->keys[set->count].key = lc_strdup_local(key->key);
+  set->keys[set->count].key = lc_strdup_with_allocator(NULL, key->key);
   if (set->keys[set->count].key == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch query index key", NULL, NULL,
@@ -4413,7 +4413,7 @@ lc_pouch_query_page_mark_emitted(lc_pouch_query_scan_context *context,
                         "failed to allocate pouch query emitted cursor key",
                         NULL, NULL, NULL);
   }
-  lc_free_with_allocator(NULL, context->last_emitted_key);
+  lc_free_local(context->last_emitted_key);
   context->last_emitted_key = copy;
   return LC_OK;
 }
@@ -4507,7 +4507,7 @@ lc_pouch_query_scan_reset_page_state(lc_pouch_query_scan_context *context) {
     return;
   }
   context->candidate_key = NULL;
-  lc_free_with_allocator(NULL, context->last_emitted_key);
+  lc_free_local(context->last_emitted_key);
   context->last_emitted_key = NULL;
   context->seen = 0U;
   context->emitted = 0U;
@@ -5509,8 +5509,8 @@ static int lc_pouch_client_copy_state_metadata(
   etag = lc_strdup_local(read_result->etag);
   if ((read_result->content_type != NULL && content_type == NULL) ||
       (read_result->etag != NULL && etag == NULL)) {
-    lc_free_with_allocator(NULL, content_type);
-    lc_free_with_allocator(NULL, etag);
+    lc_free_local(content_type);
+    lc_free_local(etag);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch get metadata", NULL, NULL,
                         NULL);
@@ -5519,8 +5519,8 @@ static int lc_pouch_client_copy_state_metadata(
   out->etag = etag;
   if (lc_pouch_generation_to_version(read_result->version, &out->version,
                                      error) != LC_OK) {
-    lc_free_with_allocator(NULL, content_type);
-    lc_free_with_allocator(NULL, etag);
+    lc_free_local(content_type);
+    lc_free_local(etag);
     return error != NULL ? error->code : LC_ERR_INVALID;
   }
   out->no_content = !read_result->found;
@@ -5546,7 +5546,7 @@ static int lc_pouch_client_copy_update_metadata(
   }
   if (lc_pouch_generation_to_version(write_result->version, &out->new_version,
                                      error) != LC_OK) {
-    lc_free_with_allocator(NULL, etag);
+    lc_free_local(etag);
     return error != NULL ? error->code : LC_ERR_INVALID;
   }
   out->new_state_etag = etag;
@@ -5573,7 +5573,7 @@ static int lc_pouch_client_copy_mutate_metadata(
   }
   if (lc_pouch_generation_to_version(write_result->version, &out->new_version,
                                      error) != LC_OK) {
-    lc_free_with_allocator(NULL, etag);
+    lc_free_local(etag);
     return error != NULL ? error->code : LC_ERR_INVALID;
   }
   out->new_state_etag = etag;
@@ -5588,7 +5588,7 @@ static void lc_pouch_mutate_file_cleanup(lc_pouch_mutate_file *file) {
   if (file->fp != NULL) {
     fclose(file->fp);
   }
-  lc_free_with_allocator(NULL, file->etag);
+  lc_free_local(file->etag);
   memset(file, 0, sizeof(*file));
 }
 
@@ -5706,7 +5706,7 @@ static int lc_pouch_prepare_mutation_file_from_plan(
   etag = NULL;
 
 cleanup:
-  lc_free_with_allocator(NULL, etag);
+  lc_free_local(etag);
   if (final_fp != NULL) {
     fclose(final_fp);
   }
@@ -6144,7 +6144,7 @@ static char *lc_pouch_attachment_id_from_name(const char *name,
     return NULL;
   }
   length = strlen("pouch-att-") + strlen(name_hex) + 1U;
-  id = (char *)lc_alloc_with_allocator(NULL, length);
+  id = (char *)lc_realloc_local(NULL, length);
   if (id == NULL) {
     lc_free_with_allocator(NULL, name_hex);
     (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -6169,7 +6169,7 @@ lc_pouch_attachment_name_from_selector(const lc_attachment_selector *selector,
     return NULL;
   }
   if (selector->name != NULL && selector->name[0] != '\0') {
-    return lc_strdup_local(selector->name);
+    return lc_strdup_with_allocator(NULL, selector->name);
   }
   id_prefix = "pouch-att-";
   if (selector->id != NULL &&
@@ -6447,7 +6447,7 @@ static void lc_pouch_attachment_list_builder_cleanup(
   for (i = 0U; i < builder->key_count; ++i) {
     lc_free_with_allocator(NULL, builder->keys[i].key);
   }
-  lc_free_with_allocator(NULL, builder->items);
+  lc_free_local(builder->items);
   lc_free_with_allocator(NULL, builder->keys);
   lc_free_with_allocator(NULL, builder->prefix);
   memset(builder, 0, sizeof(*builder));
@@ -6473,7 +6473,7 @@ lc_pouch_attachment_append_key(lc_pouch_attachment_list_builder *builder,
     builder->keys = next;
     builder->key_capacity = capacity;
   }
-  copy = lc_strdup_local(key);
+  copy = lc_strdup_with_allocator(NULL, key);
   if (copy == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch attachment key", NULL, NULL,
@@ -6495,8 +6495,8 @@ static int lc_pouch_attachment_append_info(
 
   if (builder->count == builder->capacity) {
     capacity = builder->capacity == 0U ? 4U : builder->capacity * 2U;
-    next = (lc_attachment_info *)lc_realloc_with_allocator(
-        NULL, builder->items, capacity * sizeof(builder->items[0]));
+    next = (lc_attachment_info *)lc_realloc_local(
+        builder->items, capacity * sizeof(builder->items[0]));
     if (next == NULL) {
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate pouch attachment list", NULL,
@@ -6839,7 +6839,7 @@ static int lc_pouch_txn_key_list_append(lc_pouch_txn_key_list *list,
     list->keys = next;
     list->capacity = capacity;
   }
-  copy = lc_strdup_local(key);
+  copy = lc_strdup_with_allocator(NULL, key);
   if (copy == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to copy pouch transaction key", NULL, NULL,
@@ -6919,7 +6919,7 @@ static int lc_pouch_txn_record_replace_string(char **field, const char *value,
                                               lc_error *error) {
   char *copy;
 
-  copy = lc_strdup_local(value != NULL ? value : "");
+  copy = lc_strdup_with_allocator(NULL, value != NULL ? value : "");
   if (copy == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch transaction field", NULL,
@@ -7928,7 +7928,7 @@ static char *lc_pouch_queue_message_id(lc_pouch_unix_seconds *seconds_out,
                        NULL);
     return NULL;
   }
-  return lc_strdup_local(text);
+  return lc_strdup_with_allocator(NULL, text);
 }
 
 static int lc_pouch_queue_retryable_create_collision(lc_error *error) {
@@ -9297,8 +9297,8 @@ static int lc_pouch_queue_record_parse(
     }
   }
   if (rc == LC_OK) {
-    record->storage_key = lc_strdup_local(storage_key);
-    record->meta_etag = lc_strdup_local(read_result->etag);
+    record->storage_key = lc_strdup_with_allocator(NULL, storage_key);
+    record->meta_etag = lc_strdup_with_allocator(NULL, read_result->etag);
     record->version = read_result->version;
     if (record->storage_key == NULL || record->meta_etag == NULL) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -9815,7 +9815,7 @@ static int lc_pouch_queue_write_record(lc_client_handle *client,
   }
   if (rc == LC_OK) {
     lc_free_with_allocator(NULL, record->meta_etag);
-    record->meta_etag = lc_strdup_local(result.etag);
+    record->meta_etag = lc_strdup_with_allocator(NULL, result.etag);
     record->version = result.version;
     if (record->meta_etag == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -9859,7 +9859,7 @@ static int lc_pouch_queue_write_new_record(lc_client_handle *client,
   }
   if (rc == LC_OK) {
     lc_free_with_allocator(NULL, record->meta_etag);
-    record->meta_etag = lc_strdup_local(result.etag);
+    record->meta_etag = lc_strdup_with_allocator(NULL, result.etag);
     record->version = result.version;
     if (record->meta_etag == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -9966,7 +9966,7 @@ static int lc_pouch_queue_move_to_dlq(lc_client_handle *client,
                         "pouch queue DLQ move requires complete record", NULL,
                         NULL, NULL);
   }
-  original_meta_key = lc_strdup_local(record->storage_key);
+  original_meta_key = lc_strdup_with_allocator(NULL, record->storage_key);
   if (original_meta_key == NULL) {
     rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                       "failed to allocate pouch queue DLQ source key", NULL,
@@ -10021,7 +10021,7 @@ static int lc_pouch_queue_move_to_dlq(lc_client_handle *client,
   old_meta_etag = record->meta_etag;
   original_version = record->version;
   record->storage_key = dlq_meta_key;
-  record->meta_etag = lc_strdup_local("");
+  record->meta_etag = lc_strdup_with_allocator(NULL, "");
   record->version = 0UL;
   dlq_meta_key = NULL;
   if (record->meta_etag == NULL) {
@@ -10139,7 +10139,7 @@ static int lc_pouch_queue_delete_message_objects(lc_client_handle *client,
                         "pouch queue delete requires complete record", NULL,
                         NULL, NULL);
   }
-  metadata_key = lc_strdup_local(record->storage_key);
+  metadata_key = lc_strdup_with_allocator(NULL, record->storage_key);
   payload_key = NULL;
   if (metadata_key == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -10213,7 +10213,7 @@ static int lc_pouch_queue_replace_string(char **field, const char *value,
                                          lc_error *error) {
   char *copy;
 
-  copy = lc_strdup_local(value != NULL ? value : "");
+  copy = lc_strdup_with_allocator(NULL, value != NULL ? value : "");
   if (copy == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch queue record field", NULL,
@@ -10678,7 +10678,7 @@ static char *lc_pouch_txn_key(const char *txn_id, lc_error *error) {
   {
     char *key;
 
-    key = lc_strdup_local(txn_id);
+    key = lc_strdup_with_allocator(NULL, txn_id);
     if (key == NULL) {
       lc_error_set(error, LC_ERR_NOMEM, 0L,
                    "failed to allocate pouch transaction key", NULL, NULL,
@@ -10882,9 +10882,9 @@ lc_pouch_implicit_txn_leader_visit(const lc_pouch_state_visit_entry *entry,
       record.expires_at_unix > leader->now) {
     ++leader->count;
     if (leader->count == 1U) {
-      leader->ns = lc_strdup_local(record.ns);
-      leader->key = lc_strdup_local(record.key);
-      leader->lease_id = lc_strdup_local(record.lease_id);
+      leader->ns = lc_strdup_with_allocator(NULL, record.ns);
+      leader->key = lc_strdup_with_allocator(NULL, record.key);
+      leader->lease_id = lc_strdup_with_allocator(NULL, record.lease_id);
       leader->fencing_token = record.fencing_token;
       leader->expires_at_unix = record.expires_at_unix;
       if (leader->ns == NULL || leader->key == NULL ||
@@ -13163,7 +13163,7 @@ int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
                             "failed to allocate pouch staged describe etag",
                             NULL, NULL, "pouch");
       }
-      lc_free_with_allocator(NULL, out->state_etag);
+      lc_free_local(out->state_etag);
       out->state_etag = staged_etag;
       rc = lc_pouch_generation_to_version(staged_result.version, &out->version,
                                           error);
@@ -13604,8 +13604,8 @@ int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
   namespace_copy = lc_strdup_local(ns);
   key_copy = lc_strdup_local(req->lease.key);
   if (namespace_copy == NULL || key_copy == NULL) {
-    lc_free_with_allocator(NULL, namespace_copy);
-    lc_free_with_allocator(NULL, key_copy);
+    lc_free_local(namespace_copy);
+    lc_free_local(key_copy);
     lc_pouch_state_write_result_cleanup(&client->allocator, &result);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch metadata response", NULL,
@@ -13798,7 +13798,7 @@ int lc_pouch_client_keepalive_method(lc_client *self,
       /* A staged delete is the transaction-local absent-state view. Do not
        * leak its private generation into the lease: the public lease helpers
        * would turn it into a conditional update against the committed body. */
-      lc_free_with_allocator(NULL, state_etag);
+      lc_free_local(state_etag);
       state_etag = NULL;
       out->version = 0L;
     } else {
@@ -13812,7 +13812,7 @@ int lc_pouch_client_keepalive_method(lc_client *self,
                             "failed to allocate pouch staged state etag", NULL,
                             NULL, NULL);
         } else {
-          lc_free_with_allocator(NULL, state_etag);
+          lc_free_local(state_etag);
           state_etag = staged_etag;
         }
       }
@@ -13822,7 +13822,7 @@ int lc_pouch_client_keepalive_method(lc_client *self,
     out->state_etag = state_etag;
     state_etag = NULL;
   }
-  lc_free_with_allocator(NULL, state_etag);
+  lc_free_local(state_etag);
   lc_free_with_allocator(NULL, staged_key);
   lc_pouch_state_read_result_cleanup(&client->allocator, &staged_state);
   lc_pouch_lease_record_cleanup(&lease_record);
@@ -14866,7 +14866,7 @@ int lc_pouch_client_queue_ack_method(lc_client *self, const lc_ack_op *req,
   }
   if (rc == LC_OK && strcmp(record.status, "acked") != 0) {
     lc_free_with_allocator(NULL, record.status);
-    record.status = lc_strdup_local("acked");
+    record.status = lc_strdup_with_allocator(NULL, "acked");
     if (record.status == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch queue ack status", NULL, NULL,
@@ -14946,7 +14946,7 @@ int lc_pouch_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
   }
   if (rc == LC_OK && strcmp(record.status, "acked") != 0) {
     lc_free_with_allocator(NULL, record.status);
-    record.status = lc_strdup_local("available");
+    record.status = lc_strdup_with_allocator(NULL, "available");
     if (record.status == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch queue nack status", NULL,
@@ -14967,8 +14967,8 @@ int lc_pouch_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
         lc_free_with_allocator(NULL, record.status);
         record.status =
             record.expires_at_unix > 0L && record.expires_at_unix <= now
-                ? lc_strdup_local("expired")
-                : lc_strdup_local("dead");
+                ? lc_strdup_with_allocator(NULL, "expired")
+                : lc_strdup_with_allocator(NULL, "dead");
         if (record.status == NULL) {
           rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                             "failed to allocate pouch queue terminal status",
@@ -15113,15 +15113,15 @@ static int lc_pouch_client_enqueue_locked(lc_client_handle *client,
   payload_source = NULL;
   payload_key = NULL;
   if (rc == LC_OK) {
-    record.ns = lc_strdup_local(ns);
+    record.ns = lc_strdup_with_allocator(NULL, ns);
     record.queue = lc_pouch_queue_normalize_name(req->queue, error);
-    record.status = lc_strdup_local("available");
-    record.content_type = lc_strdup_local(req->content_type != NULL &&
-                                                  req->content_type[0] != '\0'
-                                              ? req->content_type
-                                              : "application/octet-stream");
-    record.lease_id = lc_strdup_local("");
-    record.lease_txn_id = lc_strdup_local("");
+    record.status = lc_strdup_with_allocator(NULL, "available");
+    record.content_type = lc_strdup_with_allocator(
+        NULL, req->content_type != NULL && req->content_type[0] != '\0'
+                  ? req->content_type
+                  : "application/octet-stream");
+    record.lease_id = lc_strdup_with_allocator(NULL, "");
+    record.lease_txn_id = lc_strdup_with_allocator(NULL, "");
     record.attempts = 0;
     record.max_attempts = req->max_attempts;
     record.failure_attempts = 0;
@@ -15525,10 +15525,10 @@ static int lc_pouch_client_dequeue_once(lc_client_handle *client,
     lc_free_with_allocator(NULL, record->status);
     lc_free_with_allocator(NULL, record->lease_id);
     lc_free_with_allocator(NULL, record->lease_txn_id);
-    record->status = lc_strdup_local("inflight");
-    record->lease_id = lc_strdup_local(lease_id);
+    record->status = lc_strdup_with_allocator(NULL, "inflight");
+    record->lease_id = lc_strdup_with_allocator(NULL, lease_id);
     record->lease_txn_id =
-        lc_strdup_local(req->txn_id != NULL ? req->txn_id : "");
+        lc_strdup_with_allocator(NULL, req->txn_id != NULL ? req->txn_id : "");
     record->lease_fencing_token = message_fencing_token;
     record->visibility_timeout_seconds = visibility_timeout;
     if (record->status == NULL || record->lease_id == NULL ||
@@ -15977,10 +15977,10 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
       lc_free_with_allocator(NULL, record->status);
       lc_free_with_allocator(NULL, record->lease_id);
       lc_free_with_allocator(NULL, record->lease_txn_id);
-      record->status = lc_strdup_local("inflight");
-      record->lease_id = lc_strdup_local(lease_id);
-      record->lease_txn_id =
-          lc_strdup_local(req->txn_id != NULL ? req->txn_id : "");
+      record->status = lc_strdup_with_allocator(NULL, "inflight");
+      record->lease_id = lc_strdup_with_allocator(NULL, lease_id);
+      record->lease_txn_id = lc_strdup_with_allocator(
+          NULL, req->txn_id != NULL ? req->txn_id : "");
       record->lease_fencing_token = message_fencing_token;
       record->visibility_timeout_seconds = visibility_timeout;
       if (record->status == NULL || record->lease_id == NULL ||
@@ -16036,8 +16036,8 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
           size_t next_capacity;
 
           next_capacity = capacity == 0U ? 4U : capacity * 2U;
-          next = (lc_message **)lc_realloc_with_allocator(
-              NULL, messages, next_capacity * sizeof(messages[0]));
+          next = (lc_message **)lc_realloc_local(
+              messages, next_capacity * sizeof(messages[0]));
           if (next == NULL) {
             rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                               "failed to allocate pouch dequeue batch", NULL,
@@ -16072,7 +16072,7 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
           messages[i]->close(messages[i]);
         }
       }
-      lc_free_with_allocator(NULL, messages);
+      lc_free_local(messages);
     }
     return rc;
   }
@@ -16089,8 +16089,8 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
       size_t next_capacity;
 
       next_capacity = capacity == 0U ? 4U : capacity * 2U;
-      next = (lc_message **)lc_realloc_with_allocator(
-          NULL, messages, next_capacity * sizeof(messages[0]));
+      next = (lc_message **)lc_realloc_local(messages, next_capacity *
+                                                           sizeof(messages[0]));
       if (next == NULL) {
         rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate pouch dequeue batch", NULL, NULL,
@@ -16126,7 +16126,7 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
         messages[i]->close(messages[i]);
       }
     }
-    lc_free_with_allocator(NULL, messages);
+    lc_free_local(messages);
   }
   return rc;
 }
@@ -16343,7 +16343,7 @@ static int lc_pouch_client_watch_queue_method_impl(
         lc_queue_stats_res_cleanup(&stats);
         break;
       }
-      lc_free_with_allocator(NULL, last_head_message_id);
+      lc_free_local(last_head_message_id);
       last_head_message_id = lc_strdup_local(stats.head_message_id);
       if (stats.head_message_id != NULL && last_head_message_id == NULL) {
         rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -16360,7 +16360,7 @@ static int lc_pouch_client_watch_queue_method_impl(
       lc_pouch_queue_watch_poll_delay((lc_client_handle *)self, req);
     }
   }
-  lc_free_with_allocator(NULL, last_head_message_id);
+  lc_free_local(last_head_message_id);
   return rc;
 }
 
@@ -16519,7 +16519,7 @@ static int lc_pouch_client_query_method_impl(lc_client *self,
   runtime->selector_destroy(runtime, selector);
   runtime->destroy(runtime);
   lc_free_with_allocator(NULL, owned_engine);
-  lc_free_with_allocator(NULL, scan.last_emitted_key);
+  lc_free_local(scan.last_emitted_key);
   return rc;
 }
 
@@ -16683,7 +16683,7 @@ lc_pouch_client_query_keys_method_impl(lc_client *self, const lc_query_req *req,
       }
     }
     lc_free_with_allocator(NULL, owned_engine);
-    lc_free_with_allocator(NULL, scan.last_emitted_key);
+    lc_free_local(scan.last_emitted_key);
     return rc;
   }
   runtime = NULL;
@@ -16741,7 +16741,7 @@ lc_pouch_client_query_keys_method_impl(lc_client *self, const lc_query_req *req,
   }
   runtime->destroy(runtime);
   lc_free_with_allocator(NULL, owned_engine);
-  lc_free_with_allocator(NULL, scan.last_emitted_key);
+  lc_free_local(scan.last_emitted_key);
   return rc;
 }
 
@@ -16875,7 +16875,7 @@ int lc_pouch_client_update_namespace_config_method(
   }
   if (rc == LC_OK) {
     lc_free_with_allocator(NULL, record.etag);
-    record.etag = lc_strdup_local(write_result.etag);
+    record.etag = lc_strdup_with_allocator(NULL, write_result.etag);
     if (record.etag == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch namespace config etag", NULL,
@@ -19046,7 +19046,7 @@ static char *lc_pouch_tc_endpoint_normalize(const char *endpoint,
                  NULL);
     return NULL;
   }
-  copy = (char *)lc_alloc_with_allocator(NULL, length + 1U);
+  copy = (char *)lc_realloc_local(NULL, length + 1U);
   if (copy == NULL) {
     lc_error_set(error, LC_ERR_NOMEM, 0L,
                  "failed to allocate pouch TC endpoint", NULL, NULL, NULL);
@@ -19117,7 +19117,7 @@ static int lc_pouch_tc_endpoint_list_append(lc_pouch_tc_endpoint_list *list,
   }
   for (index = 0U; index < list->count; ++index) {
     if (strcmp(list->items[index], normalized) == 0) {
-      lc_free_with_allocator(NULL, normalized);
+      lc_free_local(normalized);
       return LC_OK;
     }
   }
@@ -19125,10 +19125,10 @@ static int lc_pouch_tc_endpoint_list_append(lc_pouch_tc_endpoint_list *list,
     size_t next_capacity;
 
     next_capacity = list->capacity == 0U ? 4U : list->capacity * 2U;
-    items = (char **)lc_realloc_with_allocator(NULL, list->items,
-                                               next_capacity * sizeof(char *));
+    items =
+        (char **)lc_realloc_local(list->items, next_capacity * sizeof(char *));
     if (items == NULL) {
-      lc_free_with_allocator(NULL, normalized);
+      lc_free_local(normalized);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate pouch TC endpoint list", NULL,
                           NULL, NULL);
@@ -19154,14 +19154,14 @@ static int lc_pouch_tc_string_list_append_unique(lc_string_list *list,
   }
   for (index = 0U; index < list->count; ++index) {
     if (strcmp(list->items[index], normalized) == 0) {
-      lc_free_with_allocator(NULL, normalized);
+      lc_free_local(normalized);
       return LC_OK;
     }
   }
-  items = (char **)lc_realloc_with_allocator(
-      NULL, list->items, (list->count + 1U) * sizeof(char *));
+  items = (char **)lc_realloc_local(list->items,
+                                    (list->count + 1U) * sizeof(char *));
   if (items == NULL) {
-    lc_free_with_allocator(NULL, normalized);
+    lc_free_local(normalized);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch TC string list", NULL, NULL,
                         NULL);
@@ -19179,9 +19179,9 @@ static void lc_pouch_tc_endpoint_list_cleanup(lc_pouch_tc_endpoint_list *list) {
     return;
   }
   for (i = 0U; i < list->count; ++i) {
-    lc_free_with_allocator(NULL, list->items[i]);
+    lc_free_local(list->items[i]);
   }
-  lc_free_with_allocator(NULL, list->items);
+  lc_free_local(list->items);
   memset(list, 0, sizeof(*list));
 }
 
@@ -19384,7 +19384,7 @@ static int lc_pouch_tc_write_cluster_self(lc_client_handle *client,
     lc_source_close(source);
   }
   lc_pouch_txn_buffer_cleanup(&buffer);
-  lc_free_with_allocator(NULL, normalized);
+  lc_free_local(normalized);
   lc_pouch_state_write_result_cleanup(&client->allocator, &result);
   return rc;
 }
@@ -19463,7 +19463,7 @@ static void lc_pouch_tc_rm_registry_cleanup(lc_pouch_tc_rm_registry *registry) {
     return;
   }
   for (i = 0U; i < registry->backend_count; ++i) {
-    lc_free_with_allocator(NULL, registry->backends[i].backend_hash);
+    lc_free_local(registry->backends[i].backend_hash);
     lc_string_list_cleanup(&registry->backends[i].endpoints);
   }
   lc_free_with_allocator(NULL, registry->backends);
@@ -19740,7 +19740,7 @@ static int lc_pouch_tc_rm_registry_remove(lc_pouch_tc_rm_registry *registry,
     for (endpoint_index = 0U; endpoint_index < backend->endpoints.count;
          ++endpoint_index) {
       if (strcmp(backend->endpoints.items[endpoint_index], endpoint) == 0) {
-        lc_free_with_allocator(NULL, backend->endpoints.items[endpoint_index]);
+        lc_free_local(backend->endpoints.items[endpoint_index]);
         *changed = 1;
         continue;
       }
@@ -19757,8 +19757,8 @@ static int lc_pouch_tc_rm_registry_remove(lc_pouch_tc_rm_registry *registry,
       lc_pouch_tc_rm_registry_sort(registry);
       return LC_OK;
     }
-    lc_free_with_allocator(NULL, backend->backend_hash);
-    lc_free_with_allocator(NULL, backend->endpoints.items);
+    lc_free_local(backend->backend_hash);
+    lc_free_local(backend->endpoints.items);
     for (; backend_index + 1U < registry->backend_count; ++backend_index) {
       registry->backends[backend_index] =
           registry->backends[backend_index + 1U];
@@ -19789,8 +19789,8 @@ lc_pouch_tc_rm_registry_copy_list(const lc_pouch_tc_rm_registry *registry,
   if (registry->backend_count == 0U) {
     return LC_OK;
   }
-  out->backends = (lc_tc_rm_backend *)lc_calloc_with_allocator(
-      NULL, registry->backend_count, sizeof(lc_tc_rm_backend));
+  out->backends = (lc_tc_rm_backend *)lc_calloc_local(registry->backend_count,
+                                                      sizeof(lc_tc_rm_backend));
   if (out->backends == NULL) {
     lc_tc_rm_list_res_cleanup(out);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -20128,7 +20128,7 @@ int lc_pouch_client_tc_rm_register_method(lc_client *self,
                                               error);
   }
   lc_free_with_allocator(NULL, backend_hash);
-  lc_free_with_allocator(NULL, endpoint);
+  lc_free_local(endpoint);
   lc_pouch_tc_rm_registry_cleanup(&registry);
   return rc;
 }
@@ -20185,7 +20185,7 @@ int lc_pouch_client_tc_rm_unregister_method(lc_client *self,
                                               error);
   }
   lc_free_with_allocator(NULL, backend_hash);
-  lc_free_with_allocator(NULL, endpoint);
+  lc_free_local(endpoint);
   lc_pouch_tc_rm_registry_cleanup(&registry);
   return rc;
 }
@@ -21249,10 +21249,9 @@ int lc_pouch_lease_keepalive_method(lc_lease *self, const lc_keepalive_req *req,
                                       lc_pouch_lease_state_storage_key(lease),
                                       &read_result, error);
     if (rc == LC_OK) {
-      lc_free_with_allocator(NULL, res.state_etag);
-      res.state_etag = read_result.etag != NULL
-                           ? lc_strdup_with_allocator(NULL, read_result.etag)
-                           : NULL;
+      lc_free_local(res.state_etag);
+      res.state_etag =
+          read_result.etag != NULL ? lc_strdup_local(read_result.etag) : NULL;
       if (read_result.etag != NULL && res.state_etag == NULL) {
         rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate pouch keepalive state etag", NULL,

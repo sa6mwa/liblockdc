@@ -62,7 +62,8 @@ foreach(expected_step
     "\"$make_bin\" __build-release"
     "for preset in x86_64-linux-gnu-release x86_64-linux-musl-release"
     "ctest --preset \"$preset\""
-    "-LE lifecycle-host"
+    "-LE 'lifecycle-host|release-artifact'"
+    "--no-tests=error"
     "bash \"$script_dir/cross_test.sh\" release"
     "bash \"$script_dir/run_linux_package_matrix.sh\""
 )

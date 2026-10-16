@@ -1,5 +1,39 @@
 # Release notes
 
+## Unreleased
+
+## 0.20.0
+
+- Add opt-in process-wide runtime tracking for the built-in allocator, disabled
+  by default. Select plain or tracking callbacks once at startup; custom hooks
+  bypass tracking and disabled allocation has no tracking-flag check.
+- Track live built-in allocations and report remaining
+  counts and bytes at ordinary exit or shared-library unload. Use inline headers
+  and fixed counters without separate metadata allocations. Reclaim idle Pouch
+  process lock entries when closing a store.
+- Complete dispatcher worker ownership release before shutdown reports success,
+  preventing allocator use after the caller has closed its client.
+- Compile core objects once for static/shared libraries and the HTTPS fixture once
+  per configuration. Reuse the sanitizer build for E2E, build only selected fuzz
+  targets, and avoid repeating identical SDK configuration checks. Acknowledge
+  HTTPS fixture upload expectations immediately to eliminate fallback waits.
+- Fix background Pouch compaction exhausting musl thread stacks. Reuse a bounded
+  heap buffer for payload copying and candidate checksums, preserving large I/O
+  chunks and incremental CRC validation without per-record scratch allocation.
+- Let source-tree static consumers select the static libatomic archive instead
+  of inheriting an absolute shared-library dependency.
+- Include integration executables in the cross-runtime build target, so clean
+  cross-release builds produce both compaction regression tests before CTest.
+- Avoid repeated host fixtures and preliminary package checks during release.
+  Build and run native archive consumers together, and build only the selected
+  Valgrind test targets. Final artifact verification remains mandatory.
+- Stop native checks at the first failure and reject empty test selections.
+- Make the local E2E interrupt fixture deterministic during startup and verify
+  that interruption tears down the owned Podman stack.
+
+The core shared-library ABI remains **5**; the PostgreSQL provider ABI remains
+**0**. The Pouch storage format is unchanged.
+
 ## 0.19.0
 
 - Add managed XA coordination across local Pouch and PostgreSQL participants.

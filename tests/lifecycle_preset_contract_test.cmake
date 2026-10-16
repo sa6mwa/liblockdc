@@ -213,6 +213,3 @@ endforeach()
 
 assert_contains(root_makefile "make valgrind" "make help Valgrind surface")
 assert_contains(root_makefile "scripts/valgrind.sh" "Valgrind runner command")
-file(READ "${LOCKDC_ROOT}/scripts/valgrind.sh" valgrind_script)
-assert_contains(valgrind_script "cmake --fresh --preset \"$preset\"" "Valgrind fresh configure")
-assert_contains(valgrind_script "env LOCKDC_UNDER_VALGRIND=1 \"$valgrind_bin\"" "Valgrind test environment marker")

@@ -599,6 +599,8 @@ static void outbox_reset_allocation_failures(void) {
   lc_outbox_test_before_next_release_context = NULL;
   lc_outbox_test_after_dispatcher_core_retain_hook = NULL;
   lc_outbox_test_after_dispatcher_core_retain_context = NULL;
+  lc_outbox_test_before_worker_release_hook = NULL;
+  lc_outbox_test_before_worker_release_context = NULL;
   lc_outbox_test_before_dead_letter_export_open_hook = NULL;
   lc_outbox_test_before_dead_letter_export_open_context = NULL;
   lc_outbox_test_before_ledger_append_hook = NULL;
@@ -6135,6 +6137,7 @@ static void test_pouch_reconciliation_skips_disappeared_outbox(void **state) {
       lc_client_new_outbox(client, &outbox_config, &outbox, &error), LC_OK);
 
   seed_recovery_outbox(client, ns, outbox_key, &error);
+  seed_recovery_outbox(client, ns, "__lockdc_io/v1/outbox/zz-sentinel", &error);
   outbox_delete_outbox_hook_init(&hook, client, ns, outbox_key);
   lc_outbox_test_after_reconcile_query_hook =
       outbox_delete_outbox_after_reconcile;
@@ -6143,7 +6146,10 @@ static void test_pouch_reconciliation_skips_disappeared_outbox(void **state) {
   assert_int_equal(
       lc_outbox_next(outbox, outbox_claim_next_timeout_ms(), &job, &error),
       LC_OK);
-  assert_null(job);
+  assert_non_null(job);
+  assert_string_equal(job->outbox_key, "__lockdc_io/v1/outbox/zz-sentinel");
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  job = NULL;
   lc_outbox_test_after_reconcile_query_hook = NULL;
   lc_outbox_test_after_reconcile_query_context = NULL;
   outbox_delete_outbox_hook_assert(&hook);
@@ -6226,10 +6232,14 @@ static void test_pouch_handoff_skips_disappeared_outbox(void **state) {
   lc_outbox_test_before_outbox_handoff_reacquire_hook =
       outbox_delete_outbox_once;
   lc_outbox_test_before_outbox_handoff_reacquire_context = &hook;
+  seed_recovery_outbox(client, ns, "__lockdc_io/v1/outbox/zz-sentinel", &error);
   assert_int_equal(
       lc_outbox_next(outbox, outbox_claim_next_timeout_ms(), &job, &error),
       LC_OK);
-  assert_null(job);
+  assert_non_null(job);
+  assert_string_equal(job->outbox_key, "__lockdc_io/v1/outbox/zz-sentinel");
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  job = NULL;
   lc_outbox_test_before_outbox_handoff_reacquire_hook = NULL;
   lc_outbox_test_before_outbox_handoff_reacquire_context = NULL;
   outbox_delete_outbox_hook_assert(&hook);
@@ -7254,6 +7264,7 @@ static void test_pouch_reconciliation_pages_large_outbox(void **state) {
   lc_error error;
   struct timespec started;
   struct timespec finished;
+  long elapsed_ms;
   size_t index;
   int rc;
 
@@ -7302,14 +7313,15 @@ static void test_pouch_reconciliation_pages_large_outbox(void **state) {
     job = NULL;
   }
   assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &finished), 0);
-  assert_true(outbox_elapsed_milliseconds(&started, &finished) < 30000L);
+  elapsed_ms = outbox_elapsed_milliseconds(&started, &finished);
   fprintf(stderr, "outbox reconciliation: %lu records in %ld ms\n",
-          (unsigned long)OUTBOX_RECONCILIATION_RECORDS,
-          outbox_elapsed_milliseconds(&started, &finished));
+          (unsigned long)OUTBOX_RECONCILIATION_RECORDS, elapsed_ms);
   lc_outbox_close(outbox);
   lc_client_close(client);
   lc_error_cleanup(&error);
   lc_test_tmp_cleanup_path(root, OUTBOX_TMP_PREFIX);
+  /* Release workers before a timing failure can longjmp into the next test. */
+  assert_true(elapsed_ms < 30000L);
 }
 
 static void
@@ -7457,6 +7469,74 @@ test_pouch_reconciled_terminal_release_failure_is_retryable(void **state) {
   lc_outbox_close(outbox);
   lc_client_close(client);
   lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, OUTBOX_TMP_PREFIX);
+}
+
+static void outbox_worker_release_gate(void *context) {
+  pthread_barrier_t *gates = (pthread_barrier_t *)context;
+
+  (void)pthread_barrier_wait(&gates[0]);
+  (void)pthread_barrier_wait(&gates[1]);
+}
+
+static void test_pouch_dispatcher_wait_includes_worker_release(void **state) {
+  char root[256];
+  char template_path[] = OUTBOX_TMP_PREFIX "worker-release-XXXXXX";
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config config;
+  lc_outbox_config outbox_config;
+  outbox_tracking_allocator allocator;
+  lc_client *client;
+  lc_outbox *outbox;
+  lc_outbox_dispatcher *dispatcher;
+  lc_error error;
+  pthread_barrier_t gates[2];
+  int probe_rc;
+
+  (void)state;
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  OUTBOX_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  outbox_tracking_allocator_init(&allocator);
+  lc_error_init(&error);
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.allocator.malloc_fn = outbox_tracking_malloc;
+  config.allocator.realloc_fn = outbox_tracking_realloc;
+  config.allocator.free_fn = outbox_tracking_free;
+  config.allocator.context = &allocator;
+  assert_int_equal(lc_client_open(&config, &client, &error), LC_OK);
+  lc_outbox_config_init(&outbox_config);
+  outbox_config.ns = "worker-release";
+  assert_int_equal(
+      lc_client_new_outbox(client, &outbox_config, &outbox, &error), LC_OK);
+  assert_int_equal(
+      lc_outbox_dispatcher_get_or_start(outbox, &dispatcher, &error), LC_OK);
+  assert_int_equal(pthread_barrier_init(&gates[0], NULL, 2U), 0);
+  assert_int_equal(pthread_barrier_init(&gates[1], NULL, 2U), 0);
+  lc_outbox_test_before_worker_release_context = gates;
+  lc_outbox_test_before_worker_release_hook = outbox_worker_release_gate;
+  (void)lc_outbox_dispatcher_stop(dispatcher, 0L, &error);
+  (void)pthread_barrier_wait(&gates[0]);
+  /* The worker is deliberately paused while it still owns a reference. Stop
+   * must not report completion or let an embedding allocator go out of scope.
+   */
+  probe_rc = lc_outbox_dispatcher_wait(dispatcher, 0L, &error);
+  (void)pthread_barrier_wait(&gates[1]);
+  assert_int_equal(lc_outbox_dispatcher_wait(dispatcher, -1L, &error), LC_OK);
+  lc_outbox_dispatcher_close(dispatcher);
+  lc_outbox_close(outbox);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_outbox_test_before_worker_release_hook = NULL;
+  lc_outbox_test_before_worker_release_context = NULL;
+  pthread_barrier_destroy(&gates[0]);
+  pthread_barrier_destroy(&gates[1]);
+  assert_int_equal(probe_rc, LC_ERR_TIMEOUT);
+  outbox_tracking_allocator_destroy(&allocator);
   lc_test_tmp_cleanup_path(root, OUTBOX_TMP_PREFIX);
 }
 
@@ -11754,6 +11834,7 @@ int main(void) {
           test_pouch_reconciled_terminal_transport_failure_is_retryable),
       cmocka_unit_test(
           test_pouch_reconciled_terminal_release_failure_is_retryable),
+      cmocka_unit_test(test_pouch_dispatcher_wait_includes_worker_release),
       cmocka_unit_test(test_pouch_reconciliation_preserves_allocator_domains),
       cmocka_unit_test(test_pouch_dispatcher_is_passive_until_consumer_demand),
       cmocka_unit_test(
@@ -11795,5 +11876,9 @@ int main(void) {
       cmocka_unit_test(test_pouch_outbox_validates_durable_input_contracts),
       cmocka_unit_test(test_pouch_dispatcher_stop_retains_blocked_next),
   };
+  if (getenv("LOCKDC_TEST_ALLOCATOR_TRACKING") != NULL &&
+      strcmp(getenv("LOCKDC_TEST_ALLOCATOR_TRACKING"), "1") == 0 &&
+      lc_allocator_tracking_configure(1, NULL) != LC_OK)
+    return 1;
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

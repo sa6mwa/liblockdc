@@ -2422,6 +2422,29 @@ static int lcdc_open(lua_State *L) {
   return lcdc_push_client(L, client);
 }
 
+static int lcdc_allocator_tracking_configure(lua_State *L) {
+  lc_error error;
+  int enabled;
+  int rc;
+
+  if (lua_type(L, 1) == LUA_TBOOLEAN)
+    enabled = lua_toboolean(L, 1);
+  else if (lua_type(L, 1) == LUA_TNUMBER &&
+           (lua_tonumber(L, 1) == 0 || lua_tonumber(L, 1) == 1))
+    enabled = (int)lua_tonumber(L, 1);
+  else
+    return luaL_argerror(L, 1, "expected a boolean or 0/1");
+  lc_error_init(&error);
+  rc = lc_allocator_tracking_configure(enabled, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
 static int lcdc_version_string(lua_State *L) {
   lua_pushstring(L, lc_version_string());
   return 1;
@@ -8493,6 +8516,7 @@ static void lcdc_create_metatable(lua_State *L, const char *name,
 int luaopen_lockdc_core(lua_State *L) {
   static const luaL_Reg module_functions[] = {
       {"open", lcdc_open},
+      {"allocator_tracking_configure", lcdc_allocator_tracking_configure},
       {"version_string", lcdc_version_string},
       {"xid_new", lcdc_xid_new},
       {"pouch_crypto_generate_key", lcdc_pouch_crypto_generate_key},

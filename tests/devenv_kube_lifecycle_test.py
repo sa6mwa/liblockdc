@@ -317,8 +317,18 @@ exec "$(dirname "$0")/devenv-real.sh" "$@"
             ctest = self.bin / 'ctest'
             ctest.write_text('''#!/usr/bin/env bash
 echo "ctest $*" >> "$FAKE_PODMAN_LOG"
+if [ "${FAKE_CTEST_WAIT:-0}" = 1 ]; then
+  # Install handlers before readiness; keep the blocking wait in this shell.
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  mkfifo "$FAKE_PODMAN_LOG.wait"
+  exec 8<> "$FAKE_PODMAN_LOG.wait"
+  rm "$FAKE_PODMAN_LOG.wait"
+  touch "$FAKE_PODMAN_LOG.ctest"
+  read -r -t 30 -u 8 || :
+  exit 0
+fi
 touch "$FAKE_PODMAN_LOG.ctest"
-if [ "${FAKE_CTEST_WAIT:-0}" = 1 ]; then exec sleep 30; fi
 exit "${FAKE_CTEST_RC:-0}"
 ''')
             ctest.chmod(0o700)
@@ -421,6 +431,22 @@ exit "${FAKE_CTEST_RC:-0}"
             _, stderr = process.communicate(timeout=10)
             self.assertEqual(process.returncode, expected, stderr)
             self.assertIn('kube down', self.log.read_text())
+
+    def test_e2e_ctest_startup_interrupt_stops_stack(self):
+        self.prepare_e2e_runner(ready=True)
+        # Deliver INT to the mock CTest while its readiness command is still
+        # running, then let that command succeed. Without an installed trap,
+        # Bash can discard the interrupt and continue into the blocking wait.
+        touch = self.bin / 'touch'
+        touch.write_text(f'''#!/usr/bin/env bash
+"{shutil.which('touch')}" "$@"
+if [[ "$1" == *.ctest ]]; then kill -INT "$PPID"; fi
+''')
+        touch.chmod(0o700)
+        process = self.start_waiting_e2e()
+        _, stderr = process.communicate(timeout=10)
+        self.assertEqual(process.returncode, 130, stderr)
+        self.assertIn('kube down', self.log.read_text())
 
     def test_overlapping_e2e_is_rejected_without_tearing_down_active_stack(self):
         self.prepare_e2e_runner(ready=True)

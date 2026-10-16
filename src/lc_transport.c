@@ -2004,6 +2004,13 @@ int lc_engine_client_open(const lc_engine_client_config *config,
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
                                       "at least one endpoint is required");
   }
+  if ((config->allocator.malloc_fn == NULL) !=
+          (config->allocator.free_fn == NULL) ||
+      (config->allocator.realloc_fn != NULL &&
+       config->allocator.malloc_fn == NULL))
+    return lc_engine_set_client_error(
+        error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+        "custom allocators require matching malloc/free hooks");
   if (!config->disable_mtls && config->client_bundle_source == NULL &&
       (config->client_bundle_path == NULL ||
        config->client_bundle_path[0] == '\0')) {

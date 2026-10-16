@@ -748,11 +748,15 @@ int lc_xa_transaction_acquire_start(lc_xa_transaction *tx,
     rc = fail(error, LC_ERR_INVALID, "XA enrollment is sealed");
   else {
     op->acquire = *request;
-    op->acquire_ns = request->ns != NULL ? lc_strdup_local(request->ns) : NULL;
-    op->acquire_key =
-        request->key != NULL ? lc_strdup_local(request->key) : NULL;
-    op->acquire_owner =
-        request->owner != NULL ? lc_strdup_local(request->owner) : NULL;
+    op->acquire_ns = request->ns != NULL
+                         ? lc_strdup_with_allocator(NULL, request->ns)
+                         : NULL;
+    op->acquire_key = request->key != NULL
+                          ? lc_strdup_with_allocator(NULL, request->key)
+                          : NULL;
+    op->acquire_owner = request->owner != NULL
+                            ? lc_strdup_with_allocator(NULL, request->owner)
+                            : NULL;
     if ((request->ns != NULL && op->acquire_ns == NULL) ||
         (request->key != NULL && op->acquire_key == NULL) ||
         (request->owner != NULL && op->acquire_owner == NULL))

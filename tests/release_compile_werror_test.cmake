@@ -64,26 +64,20 @@ function(assert_output_has_werror output_regex label required c89_required)
 endfunction()
 
 assert_output_has_werror(
-    "CMakeFiles/lc_static.dir/src/lc_api.c.o"
-    "lc_static"
+    "CMakeFiles/lc_objects.dir/src/lc_api.c.o"
+    "static/shared core objects"
     TRUE
     TRUE
 )
 assert_output_has_werror(
-    "CMakeFiles/lc_shared.dir/src/lc_api.c.o"
-    "lc_shared"
-    TRUE
-    TRUE
-)
-assert_output_has_werror(
-    "CMakeFiles/lc_static.dir/src/lc_outbox.c.o"
+    "CMakeFiles/lc_objects.dir/src/lc_outbox.c.o"
     "outbox implementation"
     TRUE
     TRUE
 )
 if(LOCKDC_BUILD_TYPE STREQUAL "Release")
     string(REGEX MATCH
-        "\"command\": [^\n]*-O3[^\n]*\n  \"file\": [^\n]*\n  \"output\": \"[^\"]*CMakeFiles/lc_static.dir/src/lc_outbox.c.o\""
+        "\"command\": [^\n]*-O3[^\n]*\n  \"file\": [^\n]*\n  \"output\": \"[^\"]*CMakeFiles/lc_objects.dir/src/lc_outbox.c.o\""
         outbox_release_entry
         "${compile_commands_json}"
     )

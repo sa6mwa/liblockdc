@@ -113,6 +113,8 @@ void *lc_outbox_test_after_command_wait_pending_read_context = NULL;
 lc_outbox_test_hook_fn lc_outbox_test_before_next_release_hook = NULL;
 void *lc_outbox_test_before_next_release_context = NULL;
 lc_outbox_test_hook_fn lc_outbox_test_after_dispatcher_core_retain_hook = NULL;
+lc_outbox_test_hook_fn lc_outbox_test_before_worker_release_hook = NULL;
+void *lc_outbox_test_before_worker_release_context = NULL;
 void *lc_outbox_test_after_dispatcher_core_retain_context = NULL;
 lc_outbox_test_hook_fn lc_outbox_test_before_dead_letter_export_open_hook =
     NULL;
@@ -484,6 +486,11 @@ lc_outbox_dispatcher_retain(lc_outbox_dispatcher_handle *dispatcher);
 static void lc_outbox_dispatcher_close_method(lc_outbox_dispatcher *self);
 static int lc_outbox_dispatcher_wait_method(lc_outbox_dispatcher *self,
                                             long deadline_ms, lc_error *error);
+static int lc_outbox_dispatcher_wait_impl(lc_outbox_dispatcher *self,
+                                          long deadline_ms, lc_error *error,
+                                          int include_worker);
+static void
+lc_outbox_dispatcher_destroy(lc_outbox_dispatcher_handle *dispatcher);
 
 static void
 lc_outbox_replace_attached_dispatcher(lc_outbox_handle *outbox,
@@ -5424,31 +5431,38 @@ static void *lc_outbox_dispatcher_main(void *context) {
   if (dispatcher != NULL)
     lc_outbox_dispatcher_retain(dispatcher);
   pthread_mutex_lock(&outbox->notification_mutex);
+  /* The owner remains alive until it observes dispatcher_exited. Relinquish
+   * the worker's core reference before publishing that observation. */
+  --outbox->ref_count;
   outbox->dispatcher_exited = 1;
   if (outbox->dispatcher_cond_initialized)
     pthread_cond_broadcast(&outbox->dispatcher_cond);
   pthread_mutex_unlock(&outbox->notification_mutex);
-  /* A detached private thread owns one reference until it has stopped using
-   * the core.  The dispatcher owner or a direct construction failure releases
-   * the other reference after observing dispatcher_exited. */
-  lc_outbox_release(outbox);
   if (dispatcher != NULL) {
-    int finalize_client_close;
+    int destroy;
 
+#ifdef LOCKDC_TEST_BUILD
+    if (lc_outbox_test_before_worker_release_hook != NULL)
+      lc_outbox_test_before_worker_release_hook(
+          lc_outbox_test_before_worker_release_context);
+#endif
     pthread_mutex_lock(&dispatcher->lifecycle_mutex);
+    /* Callback close cannot join a worker waiting on its namespace lock.
+     * Finish that deferred cleanup here without waiting for our own exit. */
+    if (dispatcher->client_close_requested && !dispatcher->stop_complete) {
+      pthread_mutex_unlock(&dispatcher->lifecycle_mutex);
+      (void)lc_outbox_dispatcher_wait_impl(&dispatcher->pub, -1L, NULL, 0);
+      pthread_mutex_lock(&dispatcher->lifecycle_mutex);
+    }
+    /* A successful wait must also cover the last worker-owned allocation.
+     * Drop its reference atomically with publication of worker completion. */
+    --dispatcher->ref_count;
     dispatcher->worker_finished = 1;
-    finalize_client_close = dispatcher->client_close_requested;
+    destroy = dispatcher->ref_count == 0U && dispatcher->stop_complete;
     pthread_cond_broadcast(&dispatcher->lifecycle_cond);
     pthread_mutex_unlock(&dispatcher->lifecycle_mutex);
-    /* A client close issued from a Pouch callback cannot synchronously join
-     * this thread: recovery may be waiting for the callback's namespace lock.
-     * Once the callback has unwound and this worker exits, finish the deferred
-     * client-close cleanup here. The worker-finished flag makes this wait
-     * non-blocking and preserves the normal registry/refcount teardown. */
-    if (finalize_client_close) {
-      (void)lc_outbox_dispatcher_wait_method(&dispatcher->pub, -1L, NULL);
-    }
-    lc_outbox_dispatcher_close_method(&dispatcher->pub);
+    if (destroy)
+      lc_outbox_dispatcher_destroy(dispatcher);
   }
   return NULL;
 }
@@ -9314,6 +9328,12 @@ static int lc_outbox_dispatcher_stop_method(lc_outbox_dispatcher *self,
 
 static int lc_outbox_dispatcher_wait_method(lc_outbox_dispatcher *self,
                                             long deadline_ms, lc_error *error) {
+  return lc_outbox_dispatcher_wait_impl(self, deadline_ms, error, 1);
+}
+
+static int lc_outbox_dispatcher_wait_impl(lc_outbox_dispatcher *self,
+                                          long deadline_ms, lc_error *error,
+                                          int include_worker) {
   lc_outbox_dispatcher_handle *dispatcher = (lc_outbox_dispatcher_handle *)self;
   struct timespec deadline;
   lc_outbox_handle *core;
@@ -9439,7 +9459,7 @@ static int lc_outbox_dispatcher_wait_method(lc_outbox_dispatcher *self,
   if (core != NULL)
     lc_outbox_release(core);
   pthread_mutex_lock(&dispatcher->lifecycle_mutex);
-  while (!dispatcher->worker_finished) {
+  while (include_worker && !dispatcher->worker_finished) {
     if (deadline_ms == 0L) {
       pthread_mutex_unlock(&dispatcher->lifecycle_mutex);
       return lc_error_set(error, LC_ERR_TIMEOUT, 0L,
@@ -9499,6 +9519,15 @@ size_t lc_outbox_test_dispatcher_ref_count(lc_outbox_dispatcher *dispatcher) {
 }
 #endif
 
+static void
+lc_outbox_dispatcher_destroy(lc_outbox_dispatcher_handle *dispatcher) {
+  if (dispatcher->lifecycle_initialized) {
+    pthread_cond_destroy(&dispatcher->lifecycle_cond);
+    pthread_mutex_destroy(&dispatcher->lifecycle_mutex);
+  }
+  lc_free_with_allocator(&dispatcher->allocator, dispatcher);
+}
+
 static void lc_outbox_dispatcher_close_method(lc_outbox_dispatcher *self) {
   lc_outbox_dispatcher_handle *dispatcher = (lc_outbox_dispatcher_handle *)self;
   int destroy;
@@ -9511,18 +9540,14 @@ static void lc_outbox_dispatcher_close_method(lc_outbox_dispatcher *self) {
   destroy = dispatcher->ref_count == 0U && dispatcher->stopping &&
             dispatcher->stop_complete;
   pthread_mutex_unlock(&dispatcher->lifecycle_mutex);
-  if (destroy) {
-    if (dispatcher->lifecycle_initialized) {
-      pthread_cond_destroy(&dispatcher->lifecycle_cond);
-      pthread_mutex_destroy(&dispatcher->lifecycle_mutex);
-    }
-    lc_free_with_allocator(&dispatcher->allocator, dispatcher);
-  }
+  if (destroy)
+    lc_outbox_dispatcher_destroy(dispatcher);
 }
 
 void lc_outbox_dispatchers_stop_for_client(lc_client_handle *client) {
   lc_outbox_dispatcher_handle *dispatcher;
   lc_outbox_handle *core;
+  int worker_finished;
 
   if (client == NULL || !client->lifecycle_mutex_initialized)
     return;
@@ -9536,6 +9561,7 @@ void lc_outbox_dispatchers_stop_for_client(lc_client_handle *client) {
         dispatcher->client_close_requested = 1;
         dispatcher->detach_on_client_close = 1;
         dispatcher->stopping = 1;
+        worker_finished = dispatcher->worker_finished;
         lc_outbox_dispatcher_retain_locked(dispatcher);
         core = dispatcher->core;
         if (core != NULL)
@@ -9558,7 +9584,7 @@ void lc_outbox_dispatchers_stop_for_client(lc_client_handle *client) {
      * embedding runtime. A Pouch source/visitor callback can hold a namespace
      * lock that recovery is waiting for; joining from that callback would form
      * a cycle. The exiting worker completes that deferred close instead. */
-    if (client->pouch == NULL ||
+    if (worker_finished || client->pouch == NULL ||
         !lc_pouch_state_namespace_lock_held_by_current_thread(client->pouch)) {
       (void)lc_outbox_dispatcher_wait_method(&dispatcher->pub, -1L, NULL);
     }

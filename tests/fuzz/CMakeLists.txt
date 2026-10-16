@@ -42,6 +42,10 @@ if(LOCKDC_BUILD_FUZZERS)
   lc_add_afl_fuzz_target(lc_fuzz_mutate_apply fuzz_lc_mutate_apply.c)
   lc_add_afl_fuzz_target(lc_fuzz_pouch_record_header fuzz_lc_pouch_record_header.c)
   lc_add_afl_fuzz_target(lc_fuzz_pouch_index_primitives fuzz_lc_pouch_index_primitives.c)
+  add_custom_target(lockdc_fuzz_tests DEPENDS
+    lc_fuzz_streams lc_fuzz_bundle_open lc_fuzz_attachment_decode
+    lc_fuzz_queue_meta lc_fuzz_query_keys_stream lc_fuzz_mutate_parse
+    lc_fuzz_mutate_apply lc_fuzz_pouch_record_header lc_fuzz_pouch_index_primitives)
 
   set(LC_AFL_FUZZ_CORPUS_DIR "${CMAKE_CURRENT_BINARY_DIR}/corpus")
   file(REMOVE_RECURSE "${LC_AFL_FUZZ_CORPUS_DIR}")
@@ -90,6 +94,10 @@ if(LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS)
   add_executable(lc_pouch_integration_success_probe
     pouch_integration_success_probe.c)
   lc_configure_c_test_target(lc_pouch_integration_success_probe)
+  add_custom_target(lockdc_pouch_integration_tests DEPENDS
+    lc_pouch_integration_lql_plan lc_pouch_integration_lifecycle
+    lc_pouch_integration_outbox_dispatcher lc_pouch_integration_mutation_runner
+    lc_pouch_integration_hang_probe lc_pouch_integration_success_probe)
 
   add_test(NAME lc_pouch_integration_lql_plan_mutation_smoke
     COMMAND lc_pouch_integration_mutation_runner
@@ -119,4 +127,4 @@ if(LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS)
     PROPERTIES LABELS "fuzz;integration;offline" TIMEOUT 120 RUN_SERIAL TRUE)
 endif()
 
-lc_apply_default_test_timeouts()
+lc_apply_test_defaults()

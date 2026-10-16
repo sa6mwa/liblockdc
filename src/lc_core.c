@@ -1,4 +1,5 @@
 #include "lc/lc.h"
+#include "lc_allocation_tracking.h"
 #include "lc_engine_api.h"
 #include "lc_intcompat.h"
 #include "lc_log.h"
@@ -166,17 +167,13 @@ typedef struct lc_stream_source {
   lc_stream_pipe *pipe;
 } lc_stream_source;
 
-static void *lc_default_malloc(size_t size) { return malloc(size); }
-
-static void *lc_default_realloc(void *ptr, size_t size) {
-  return realloc(ptr, size);
-}
-
 void *lc_alloc_with_allocator(const lc_allocator *allocator, size_t size) {
   if (allocator != NULL && allocator->malloc_fn != NULL) {
+    if (allocator->realloc_fn == NULL)
+      return lc_sized_malloc(allocator->malloc_fn, allocator->context, size);
     return allocator->malloc_fn(allocator->context, size);
   }
-  return lc_default_malloc(size);
+  return lc_builtin_malloc(size);
 }
 
 void *lc_calloc_with_allocator(const lc_allocator *allocator, size_t count,
@@ -197,21 +194,27 @@ void *lc_calloc_with_allocator(const lc_allocator *allocator, size_t count,
 
 void *lc_realloc_with_allocator(const lc_allocator *allocator, void *ptr,
                                 size_t size) {
-  if (allocator != NULL && allocator->realloc_fn != NULL) {
-    return allocator->realloc_fn(allocator->context, ptr, size);
+  if (allocator != NULL) {
+    if (allocator->realloc_fn != NULL)
+      return allocator->realloc_fn(allocator->context, ptr, size);
+    if (allocator->malloc_fn != NULL)
+      return lc_sized_realloc(allocator->malloc_fn, allocator->free_fn,
+                              allocator->context, ptr, size);
   }
-  return lc_default_realloc(ptr, size);
+  return lc_builtin_realloc(ptr, size);
 }
 
 void lc_free_with_allocator(const lc_allocator *allocator, void *ptr) {
-  if (ptr == NULL) {
+  if (ptr == NULL)
     return;
-  }
   if (allocator != NULL && allocator->free_fn != NULL) {
-    allocator->free_fn(allocator->context, ptr);
+    if (allocator->malloc_fn != NULL && allocator->realloc_fn == NULL)
+      lc_sized_free(allocator->free_fn, allocator->context, ptr);
+    else
+      allocator->free_fn(allocator->context, ptr);
     return;
   }
-  free(ptr);
+  lc_builtin_free(ptr);
 }
 
 void lc_secret_wipe(void *ptr, size_t length) {
@@ -369,6 +372,8 @@ int lc_error_from_engine(lc_error *error, lc_engine_error *engine) {
 void *lc_calloc_local(size_t count, size_t size) { return calloc(count, size); }
 
 void *lc_realloc_local(void *ptr, size_t size) { return realloc(ptr, size); }
+
+void lc_free_local(void *ptr) { free(ptr); }
 
 char *lc_strdup_local(const char *value) {
   size_t length;
@@ -2356,6 +2361,14 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
                         "lc_client_open requires config and out", NULL, NULL,
                         NULL);
   }
+  if ((config->allocator.malloc_fn == NULL) !=
+          (config->allocator.free_fn == NULL) ||
+      (config->allocator.realloc_fn != NULL &&
+       config->allocator.malloc_fn == NULL)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "custom allocators require matching malloc/free hooks",
+                        NULL, NULL, NULL);
+  }
   lc_engine_error_init(&engine_error);
   memset(&bundle_capture, 0, sizeof(bundle_capture));
   memset(&pouch_endpoint_options, 0, sizeof(pouch_endpoint_options));
@@ -3047,6 +3060,8 @@ int lc_copy(lc_source *src, lc_sink *dst, size_t *written, lc_error *error) {
   }
 }
 
+/* Facade result metadata uses raw libc ownership, including buffers supplied
+ * by transport parsers and custom facade implementations. */
 void lc_describe_res_cleanup(lc_describe_res *response) {
   if (response == NULL) {
     return;

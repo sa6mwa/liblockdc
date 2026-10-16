@@ -130,7 +130,8 @@ test_engine_set_allocator_validates_and_uses_custom_hooks(void **state) {
   assert_int_equal(rc, LC_ENGINE_OK);
   assert_ptr_equal(observed.malloc_fn, tracked_engine_malloc);
   assert_ptr_equal(observed.free_fn, tracked_engine_free);
-  assert_non_null(observed.realloc_fn);
+  /* A missing custom hook must not be replaced with a different allocator. */
+  assert_null(observed.realloc_fn);
   assert_ptr_equal(observed.context, &alloc_state);
 
   allocator.realloc_fn = tracked_engine_realloc;
@@ -151,7 +152,9 @@ test_engine_set_allocator_validates_and_uses_custom_hooks(void **state) {
   copy = (char *)observed.realloc_fn(observed.context, NULL, 32U);
   assert_non_null(copy);
   assert_int_equal(alloc_state.realloc_calls, 1U);
-  lc_engine_client_free_alloc(client, copy);
+  /* Direct callback allocations remain in the caller's raw allocation domain.
+   */
+  observed.free_fn(observed.context, copy);
   assert_int_equal(alloc_state.free_calls, 2U);
 
   response.cursor = lc_engine_client_strdup(client, "cursor-1");

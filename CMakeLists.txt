@@ -301,9 +301,14 @@ function(lc_collect_development_runtime_targets directory)
     foreach(lockdc_directory_target IN LISTS lockdc_directory_targets)
         get_target_property(lockdc_target_type "${lockdc_directory_target}" TYPE)
         if(lockdc_target_type STREQUAL "EXECUTABLE")
-            set_property(GLOBAL APPEND PROPERTY
-                LOCKDC_DEVELOPMENT_RUNTIME_EXECUTABLE_TARGETS
-                "${lockdc_directory_target}")
+            get_target_property(lockdc_link_options "${lockdc_directory_target}" LINK_OPTIONS)
+            if("-static" IN_LIST lockdc_link_options)
+                set_property(GLOBAL APPEND PROPERTY
+                    LOCKDC_DEVELOPMENT_STATIC_EXECUTABLE_TARGETS "${lockdc_directory_target}")
+            else()
+                set_property(GLOBAL APPEND PROPERTY
+                    LOCKDC_DEVELOPMENT_RUNTIME_EXECUTABLE_TARGETS "${lockdc_directory_target}")
+            endif()
         elseif(lockdc_target_type STREQUAL "MODULE_LIBRARY")
             set_property(GLOBAL APPEND PROPERTY
                 LOCKDC_DEVELOPMENT_RUNTIME_MODULE_TARGETS
@@ -324,11 +329,14 @@ function(lc_write_development_runtime_contract_manifest)
 
     set_property(GLOBAL PROPERTY LOCKDC_DEVELOPMENT_RUNTIME_EXECUTABLE_TARGETS "")
     set_property(GLOBAL PROPERTY LOCKDC_DEVELOPMENT_RUNTIME_MODULE_TARGETS "")
+    set_property(GLOBAL PROPERTY LOCKDC_DEVELOPMENT_STATIC_EXECUTABLE_TARGETS "")
     lc_collect_development_runtime_targets("${CMAKE_CURRENT_SOURCE_DIR}")
     get_property(lockdc_development_runtime_executables GLOBAL PROPERTY
         LOCKDC_DEVELOPMENT_RUNTIME_EXECUTABLE_TARGETS)
     get_property(lockdc_development_runtime_modules GLOBAL PROPERTY
         LOCKDC_DEVELOPMENT_RUNTIME_MODULE_TARGETS)
+    get_property(lockdc_development_static_executables GLOBAL PROPERTY
+        LOCKDC_DEVELOPMENT_STATIC_EXECUTABLE_TARGETS)
     list(REMOVE_DUPLICATES lockdc_development_runtime_executables)
     list(REMOVE_DUPLICATES lockdc_development_runtime_modules)
 
@@ -343,6 +351,13 @@ function(lc_write_development_runtime_contract_manifest)
         "set(LOCKDC_DEVELOPMENT_RUNTIME_MODULES\n")
     foreach(lockdc_development_runtime_target
             IN LISTS lockdc_development_runtime_modules)
+        string(APPEND lockdc_development_runtime_manifest
+            "  \"$<TARGET_FILE:${lockdc_development_runtime_target}>\"\n")
+    endforeach()
+    string(APPEND lockdc_development_runtime_manifest ")\n")
+    string(APPEND lockdc_development_runtime_manifest
+        "set(LOCKDC_DEVELOPMENT_STATIC_EXECUTABLES\n")
+    foreach(lockdc_development_runtime_target IN LISTS lockdc_development_static_executables)
         string(APPEND lockdc_development_runtime_manifest
             "  \"$<TARGET_FILE:${lockdc_development_runtime_target}>\"\n")
     endforeach()
@@ -484,7 +499,8 @@ configure_file(
 )
 set(LOCKDC_SYSTEM_LIBRARIES Threads::Threads ${CMAKE_DL_LIBS})
 if(LOCKDC_ATOMIC_LIBRARY AND NOT LOCKDC_ATOMIC_LIBRARY MATCHES "-NOTFOUND$")
-    list(APPEND LOCKDC_SYSTEM_LIBRARIES "${LOCKDC_ATOMIC_LIBRARY}")
+    # Let the consumer's link mode choose libatomic.a or libatomic.so.
+    list(APPEND LOCKDC_SYSTEM_LIBRARIES atomic)
 endif()
 if(NOT LOCKDC_COVERAGE_RUNTIME_LIBRARY STREQUAL "")
     list(APPEND LOCKDC_SYSTEM_LIBRARIES "${LOCKDC_COVERAGE_RUNTIME_LIBRARY}")
@@ -600,7 +616,11 @@ if(LOCKDC_LIBLQL_INCLUDE_DIR STREQUAL "")
 endif()
 
 function(lc_configure_library_target target)
-    target_sources(${target} PRIVATE ${lc_sources})
+    if(target STREQUAL "lc_static" OR target STREQUAL "lc_shared")
+        target_sources(${target} PRIVATE $<TARGET_OBJECTS:lc_objects>)
+    else()
+        target_sources(${target} PRIVATE ${lc_sources})
+    endif()
     target_include_directories(${target}
         PUBLIC
             $<BUILD_INTERFACE:${lc_generated_include_dir}>
@@ -670,6 +690,22 @@ function(lc_add_build_tree_shared_dependency_lookup target)
         endif()
     endforeach()
 endfunction()
+
+if(LOCKDC_BUILD_STATIC OR LOCKDC_BUILD_SHARED)
+    # Both variants already require PIC and the same C89 implementation.
+    # Compile once; each library retains its own dependency/link contract.
+    add_library(lc_objects OBJECT)
+    lc_configure_library_target(lc_objects)
+    set_target_properties(lc_objects PROPERTIES C_VISIBILITY_PRESET hidden)
+    if(LOCKDC_BUILD_STATIC)
+        set(lc_object_dependency_variant static)
+    else()
+        set(lc_object_dependency_variant shared)
+    endif()
+    foreach(dependency curl openssl_ssl openssl_crypto nghttp2 pslog lonejson liblql)
+        target_link_libraries(lc_objects PRIVATE lc::${dependency}_${lc_object_dependency_variant})
+    endforeach()
+endif()
 
 if(LOCKDC_BUILD_STATIC)
     add_library(lc_static STATIC)
@@ -1030,9 +1066,16 @@ if(LOCKDC_BUILD_TESTS OR LOCKDC_BUILD_FUZZERS OR
     enable_testing()
 endif()
 
-macro(lc_apply_default_test_timeouts)
+macro(lc_apply_test_defaults)
     get_property(lockdc_registered_tests DIRECTORY PROPERTY TESTS)
     foreach(lockdc_registered_test IN LISTS lockdc_registered_tests)
+        # Exit diagnostics are failures even when a library consumer returns 0.
+        get_property(lockdc_failure_patterns TEST "${lockdc_registered_test}"
+            PROPERTY FAIL_REGULAR_EXPRESSION)
+        list(APPEND lockdc_failure_patterns "liblockdc allocator:")
+        list(REMOVE_DUPLICATES lockdc_failure_patterns)
+        set_property(TEST "${lockdc_registered_test}" PROPERTY
+            FAIL_REGULAR_EXPRESSION "${lockdc_failure_patterns}")
         get_property(lockdc_timeout_is_set
             TEST "${lockdc_registered_test}" PROPERTY TIMEOUT SET)
         if(NOT lockdc_timeout_is_set)
@@ -1097,7 +1140,8 @@ if(LOCKDC_BUILD_TESTS)
                 -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/release_tarball_sdk_test.cmake
         )
-        set_tests_properties(release_tarball_sdk_test PROPERTIES RUN_SERIAL TRUE)
+        set_tests_properties(release_tarball_sdk_test PROPERTIES
+            RUN_SERIAL TRUE LABELS "release-artifact")
 
         if(TARGET lockdc_lua_runner)
             add_test(NAME lua_release_package_test
@@ -1107,7 +1151,8 @@ if(LOCKDC_BUILD_TESTS)
                     -DLOCKDC_LUA_BIN=$<TARGET_FILE:lockdc_lua_runner>
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lua_release_package_test.cmake
             )
-            set_tests_properties(lua_release_package_test PROPERTIES RUN_SERIAL TRUE)
+            set_tests_properties(lua_release_package_test PROPERTIES
+                RUN_SERIAL TRUE LABELS "release-artifact")
         endif()
 
         add_test(NAME release_checksums_stability_test
@@ -1116,7 +1161,8 @@ if(LOCKDC_BUILD_TESTS)
                 -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/release_checksums_stability_test.cmake
         )
-        set_tests_properties(release_checksums_stability_test PROPERTIES RUN_SERIAL TRUE)
+        set_tests_properties(release_checksums_stability_test PROPERTIES
+            RUN_SERIAL TRUE LABELS "release-artifact")
     endif()
 
     add_test(NAME version_resolution_test
@@ -1195,6 +1241,11 @@ if(LOCKDC_BUILD_TESTS)
                 -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpkt_split_sdk_test.cmake)
         set_tests_properties(cpkt_split_sdk_test PROPERTIES RUN_SERIAL TRUE TIMEOUT 120)
+        # This fixture consumes only the dependency SDK, not liblockdc or its
+        # build flags. Debug owns the GNU SDK proof; musl uses a distinct SDK.
+        if(LOCKDC_TARGET_LIBC STREQUAL "gnu")
+            set_property(TEST cpkt_split_sdk_test APPEND PROPERTY LABELS lifecycle-host)
+        endif()
     endif()
 
     add_test(NAME deferred_vendored_install_manifest_test
@@ -1222,10 +1273,21 @@ if(LOCKDC_BUILD_TESTS)
     )
     set_tests_properties(arch_alias_configure_test PROPERTIES RUN_SERIAL TRUE)
 
+    set(lockdc_cross_closure_test_args)
+    if(TARGET lc_pouch_compaction_stack_test AND CMAKE_GENERATOR MATCHES "^Ninja")
+        set(lockdc_library_targets lc_static)
+        if(TARGET lc_shared)
+            list(APPEND lockdc_library_targets lc_shared)
+        endif()
+        list(APPEND lockdc_cross_closure_test_args
+            -DLOCKDC_NINJA=${CMAKE_MAKE_PROGRAM})
+    endif()
     add_test(NAME cross_test_targeting_test
         COMMAND ${CMAKE_COMMAND}
             -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            "-DLOCKDC_LIBRARY_TARGETS=${lockdc_library_targets}"
+            ${lockdc_cross_closure_test_args}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cross_test_targeting_test.cmake
     )
     set_tests_properties(cross_test_targeting_test PROPERTIES RUN_SERIAL TRUE)
@@ -1419,7 +1481,40 @@ if(LOCKDC_BUILD_TESTS)
         RUN_SERIAL TRUE
         TIMEOUT 10)
 
-    lc_apply_default_test_timeouts()
+    # These fixtures inspect source or create their own host configurations.
+    # Debug owns them during a release; target-dependent SDK/ABI tests stay in
+    # each target lane. Final-byte checks run in the packaging phase instead.
+    set_property(TEST
+        version_resolution_test
+        dist_dir_configure_test
+        cross_test_targeting_test
+        devenv_kube_lifecycle_test
+        pouch_boundary_test
+        pslog_dependency_download_name_test
+        host_dependency_root_layout_test
+        dependency_archive_cache_contract_test
+        clean_read_only_cache_test
+        generated_path_guard_test
+        dependency_prune_path_guard_test
+        source_manifest_boundary_test
+        APPEND PROPERTY LABELS lifecycle-host)
+
+    # These fixtures configure their own products. Their GNU inputs are
+    # identical in Debug and Release, so Debug owns that SDK-context proof.
+    if(LOCKDC_TARGET_LIBC STREQUAL "gnu")
+        set_property(TEST c_only_configure_test
+            cpp_public_header_test deferred_vendored_install_manifest_test
+            arch_alias_configure_test pslog_build_modes_test
+            APPEND PROPERTY LABELS lifecycle-host)
+        if(TEST optional_postgres_dependency_test)
+            set_property(TEST optional_postgres_dependency_test APPEND PROPERTY LABELS lifecycle-host)
+        endif()
+    endif()
+    # Installed-consumer contracts are exercised against the final extracted
+    # archives; retain this standalone entrypoint for targeted developer use.
+    set_property(TEST install_tree_sdk_test APPEND PROPERTY LABELS release-artifact)
+
+    lc_apply_test_defaults()
 
 endif()
 
@@ -1429,7 +1524,7 @@ endif()
 
 if(LOCKDC_BUILD_FUZZERS OR LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS)
     add_subdirectory(tests/fuzz)
-    lc_apply_default_test_timeouts()
+    lc_apply_test_defaults()
 endif()
 
 lc_write_development_runtime_contract_manifest()

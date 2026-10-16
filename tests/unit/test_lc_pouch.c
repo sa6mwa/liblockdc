@@ -215,6 +215,7 @@ typedef struct pouch_fail_allocator_state {
   size_t free_calls;
   size_t large_allocation_minimum;
   size_t large_allocations;
+  size_t fail_large_allocation_at;
 } pouch_fail_allocator_state;
 
 typedef struct pouch_acquire_poll_hook_state {
@@ -1539,6 +1540,9 @@ static void *pouch_fail_malloc(void *context, size_t size) {
   if (state->large_allocation_minimum > 0U &&
       size >= state->large_allocation_minimum) {
     state->large_allocations += 1U;
+    if (state->large_allocations == state->fail_large_allocation_at) {
+      return NULL;
+    }
   }
   if (state->fail_at != 0U && state->calls == state->fail_at) {
     return NULL;
@@ -10299,6 +10303,103 @@ static void open_pouch_client_endpoint(const char *endpoint, lc_client **out,
   assert_non_null(*out);
 }
 
+static void
+test_compaction_crash_before_publication_preserves_payloads(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  lc_pouch_state_write_result written;
+  lc_pouch_state_read_result read_result;
+  lc_pouch_maintenance_options maintenance;
+  lc_pouch_maintenance_result result;
+  lc_source *source;
+  lc_error error;
+  char root[512];
+  char *payload;
+  char *readback;
+  size_t length;
+  char signal;
+  int ready[2];
+  int resume[2];
+  int status;
+  pid_t child;
+
+  (void)state;
+  memset(&options, 0, sizeof(options));
+  memset(&written, 0, sizeof(written));
+  memset(&read_result, 0, sizeof(read_result));
+  memset(&maintenance, 0, sizeof(maintenance));
+  memset(&result, 0, sizeof(result));
+  lc_error_init(&error);
+  make_root("compaction-crash-before-publication", root, sizeof(root));
+  options.segment_target_bytes = 512U;
+  options.background_compaction_enabled_set = 1;
+  options.background_compaction_enabled = 0;
+  length = 40U * 1024U + 37U;
+  payload = (char *)malloc(length + 1U);
+  readback = (char *)malloc(length + 1U);
+  assert_non_null(payload);
+  assert_non_null(readback);
+  memset(payload, 'q', length);
+  payload[length] = '\0';
+  assert_int_equal(lc_pouch_open(root, NULL, &options, &pouch, &error), LC_OK);
+  assert_int_equal(lc_source_from_memory(payload, length, &source, &error),
+                   LC_OK);
+  assert_int_equal(lc_pouch_state_write(pouch, "default", "large", source, NULL,
+                                        &written, &error),
+                   LC_OK);
+  lc_source_close(source);
+  lc_pouch_state_write_result_cleanup(NULL, &written);
+  assert_int_equal(lc_source_from_memory("small", 5U, &source, &error), LC_OK);
+  assert_int_equal(lc_pouch_state_write(pouch, "default", "small", source, NULL,
+                                        &written, &error),
+                   LC_OK);
+  lc_source_close(source);
+  lc_pouch_state_write_result_cleanup(NULL, &written);
+  lc_pouch_close(pouch);
+
+  /* The existing hook stops the child after writing the snapshot, before its
+   * manifest publication. Killing there must leave authoritative spans live. */
+  assert_int_equal(pipe(ready), 0);
+  assert_int_equal(pipe(resume), 0);
+  child = pouch_test_spawn_shared_compaction(root, ready[1], resume[0]);
+  (void)close(ready[1]);
+  (void)close(resume[0]);
+  assert_int_equal(read(ready[0], &signal, 1U), 1);
+  (void)close(ready[0]);
+  assert_int_equal(kill(child, SIGKILL), 0);
+  (void)close(resume[1]);
+  assert_int_equal(waitpid(child, &status, 0), child);
+  assert_true(WIFSIGNALED(status));
+  assert_int_equal(WTERMSIG(status), SIGKILL);
+
+  assert_int_equal(lc_pouch_open(root, NULL, &options, &pouch, &error), LC_OK);
+  assert_int_equal(
+      lc_pouch_state_read(pouch, "default", "large", &read_result, &error),
+      LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, readback, length + 1U);
+  assert_memory_equal(readback, payload, length);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  assert_int_equal(
+      lc_pouch_state_read(pouch, "default", "small", &read_result, &error),
+      LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, readback, length + 1U);
+  assert_string_equal(readback, "small");
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  maintenance.ns = "default";
+  maintenance.force = 1;
+  assert_int_equal(
+      lc_pouch_maintenance_run(pouch, &maintenance, &result, &error), LC_OK);
+  assert_true(result.compacted);
+  lc_pouch_maintenance_result_cleanup(NULL, &result);
+  lc_pouch_close(pouch);
+  free(readback);
+  free(payload);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void open_pouch_client_crypto(const char *root, const char *crypto_key,
                                      lc_client **out, lc_error *error) {
   char endpoint[1024];
@@ -14497,7 +14598,7 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
   assert_int_equal(rc, LC_ERR_INVALID);
 
   lc_error_cleanup(&error);
-  lc_free_with_allocator(NULL, first_config_etag);
+  free(first_config_etag);
   if (source != NULL) {
     source->close(source);
   }
@@ -15395,7 +15496,7 @@ test_crypto_compressed_source_authenticates_terminal_frame(void **state) {
     stored_length = 0U;
     stored_crc = 0UL;
     rc = lc_pouch_crypto_transform_memory(
-        crypto, "crypto-compressed-terminal", payload, payload_length, 1,
+        NULL, crypto, "crypto-compressed-terminal", payload, payload_length, 1,
         &stored, &stored_length, &stored_crc, &descriptor, &error);
     assert_int_equal(rc, LC_OK);
     if (stored_length == target_stored_bytes) {
@@ -15487,11 +15588,11 @@ test_pouch_crypto_derives_unique_payload_keys_for_same_nonce(void **state) {
 
   lc_pouch_crypto_test_set_random_material(material, sizeof(material));
   first_rc = lc_pouch_crypto_transform_memory(
-      crypto, "same-context", plain, sizeof(plain) - 1U, 0, &first_stored,
+      NULL, crypto, "same-context", plain, sizeof(plain) - 1U, 0, &first_stored,
       &first_length, &first_crc, &first_descriptor, &error);
   second_rc = lc_pouch_crypto_transform_memory(
-      crypto, "same-context", plain, sizeof(plain) - 1U, 0, &second_stored,
-      &second_length, &second_crc, &second_descriptor, &error);
+      NULL, crypto, "same-context", plain, sizeof(plain) - 1U, 0,
+      &second_stored, &second_length, &second_crc, &second_descriptor, &error);
   lc_pouch_crypto_test_set_random_material(NULL, 0U);
 
   assert_int_equal(first_rc, LC_OK);
@@ -15580,7 +15681,7 @@ test_pouch_crypto_authenticates_record_and_transform_metadata(void **state) {
   rc = lc_pouch_crypto_open(NULL, &crypto_options, &crypto, NULL, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_crypto_transform_memory(
-      crypto, first_context, plain, sizeof(plain) - 1U, 0, &stored,
+      NULL, crypto, first_context, plain, sizeof(plain) - 1U, 0, &stored,
       &stored_length, &stored_crc, &descriptor, &error);
   assert_int_equal(rc, LC_OK);
 
@@ -16115,6 +16216,8 @@ test_exclusive_streaming_write_releases_projection_for_independent_key(
   lc_error error;
   char root[512];
   char payload[8192];
+  long minimum_stack_bytes;
+  size_t thread_stack_bytes;
   int first_started;
   int second_started;
   int stream_entered;
@@ -16143,7 +16246,14 @@ test_exclusive_streaming_write_releases_projection_for_independent_key(
   overlap.second_rc = LC_ERR_INVALID;
   thread_attr_initialized = pthread_attr_init(&thread_attr) == 0;
   assert_true(thread_attr_initialized);
-  assert_int_equal(pthread_attr_setstacksize(&thread_attr, 128U * 1024U), 0);
+  minimum_stack_bytes = sysconf(_SC_THREAD_STACK_MIN);
+  assert_true(minimum_stack_bytes > 0L);
+  thread_stack_bytes = 128U * 1024U;
+  if ((size_t)minimum_stack_bytes > thread_stack_bytes) {
+    thread_stack_bytes = (size_t)minimum_stack_bytes;
+  }
+  assert_int_equal(pthread_attr_setstacksize(&thread_attr, thread_stack_bytes),
+                   0);
   first_started =
       pthread_create(&first_thread, &thread_attr,
                      pouch_stream_overlap_first_write, &overlap) == 0;
@@ -18466,6 +18576,99 @@ static void test_maintenance_force_installs_snapshot(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_compaction_scratch_reuse_and_allocation_failure(void **state) {
+  lc_allocator allocator;
+  pouch_fail_allocator_state alloc_state;
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  lc_pouch_maintenance_options maintenance;
+  lc_pouch_maintenance_result result;
+  lc_pouch_state_write_result written;
+  lc_pouch_state_read_result read_result;
+  lc_source *source;
+  lc_error error;
+  char root[512];
+  char key[64];
+  char bytes[64];
+  size_t failure;
+  unsigned int index;
+
+  (void)state;
+  for (failure = 1U; failure <= 2U; ++failure) {
+    memset(&alloc_state, 0, sizeof(alloc_state));
+    pouch_fail_allocator_init(&allocator, &alloc_state);
+    memset(&options, 0, sizeof(options));
+    memset(&maintenance, 0, sizeof(maintenance));
+    memset(&result, 0, sizeof(result));
+    memset(&written, 0, sizeof(written));
+    memset(&read_result, 0, sizeof(read_result));
+    lc_error_init(&error);
+    make_root("compaction-scratch-oom", root, sizeof(root));
+    options.segment_target_bytes = 1U;
+    options.background_compaction_enabled_set = 1;
+    options.background_compaction_enabled = 0;
+    options.query_indexing_enabled_set = 1;
+    options.query_indexing_enabled = 0;
+    assert_int_equal(lc_pouch_open(root, &allocator, &options, &pouch, &error),
+                     LC_OK);
+    for (index = 0U; index < 32U; ++index) {
+      snprintf(key, sizeof(key), "state/%u", index);
+      assert_int_equal(lc_source_from_memory(key, strlen(key), &source, &error),
+                       LC_OK);
+      assert_int_equal(lc_pouch_state_write(pouch, "default", key, source, NULL,
+                                            &written, &error),
+                       LC_OK);
+      lc_source_close(source);
+      lc_pouch_state_write_result_cleanup(&allocator, &written);
+    }
+    /* Exercise OOM in both the preliminary candidate scan and the snapshot
+     * capture. Neither may publish a partial snapshot or lose live records. */
+    alloc_state.large_allocation_minimum = 128U * 1024U;
+    alloc_state.fail_large_allocation_at = failure;
+    maintenance.ns = "default";
+    maintenance.force = 1;
+    assert_int_equal(
+        lc_pouch_maintenance_run(pouch, &maintenance, &result, &error),
+        LC_ERR_NOMEM);
+    assert_int_equal(alloc_state.large_allocations, failure);
+    assert_true(result.aborted);
+    assert_false(result.compacted);
+    assert_string_equal(result.diagnostic, failure == 1U
+                                               ? "candidate-read-aborted"
+                                               : "validation-read-aborted");
+    alloc_state.large_allocation_minimum = 0U;
+    lc_pouch_maintenance_result_cleanup(&allocator, &result);
+    lc_pouch_close(pouch);
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+    assert_int_equal(lc_pouch_open(root, &allocator, &options, &pouch, &error),
+                     LC_OK);
+    for (index = 0U; index < 32U; ++index) {
+      snprintf(key, sizeof(key), "state/%u", index);
+      assert_int_equal(
+          lc_pouch_state_read(pouch, "default", key, &read_result, &error),
+          LC_OK);
+      assert_true(read_result.found);
+      read_source_to_string(read_result.body, bytes, sizeof(bytes));
+      assert_string_equal(bytes, key);
+      lc_pouch_state_read_result_cleanup(&allocator, &read_result);
+    }
+    alloc_state.large_allocations = 0U;
+    alloc_state.fail_large_allocation_at = 0U;
+    alloc_state.large_allocation_minimum = 128U * 1024U;
+    assert_int_equal(
+        lc_pouch_maintenance_run(pouch, &maintenance, &result, &error), LC_OK);
+    assert_true(result.compacted);
+    /* One bounded buffer per capture, reused across all 32 records, all
+     * candidate files, and their validation scans. */
+    assert_int_equal(alloc_state.large_allocations, 2U);
+    lc_pouch_maintenance_result_cleanup(&allocator, &result);
+    lc_pouch_close(pouch);
+    cleanup_root(root);
+    lc_error_cleanup(&error);
+  }
+}
+
 static void test_manifest_open_ignores_unmanifested_snapshot(void **state) {
   lc_pouch *pouch;
   lc_source *body;
@@ -18993,8 +19196,8 @@ static void test_compaction_reclaims_expired_obsolete_files(void **state) {
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_state_write_result_cleanup(NULL, &first);
   lc_pouch_state_write_result_cleanup(NULL, &second);
-  lc_free_with_allocator(NULL, segment_one_path);
-  lc_free_with_allocator(NULL, segment_two_path);
+  free(segment_one_path);
+  free(segment_two_path);
   lc_free_with_allocator(NULL, stale_snapshot_path);
   lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
@@ -36843,6 +37046,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_maintenance_creates_namespace_without_prior_writes),
       cmocka_unit_test(test_maintenance_reports_threshold_skip),
       cmocka_unit_test(test_maintenance_force_installs_snapshot),
+      cmocka_unit_test(test_compaction_scratch_reuse_and_allocation_failure),
       cmocka_unit_test(test_manifest_open_ignores_unmanifested_snapshot),
       cmocka_unit_test(test_maintenance_aborts_on_validation_drift),
       cmocka_unit_test(test_maintenance_aborts_on_same_size_segment_drift),
@@ -37058,6 +37262,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_shared_process_queue_delivers_once),
       cmocka_unit_test(test_shared_process_transaction_stages_and_commits),
       cmocka_unit_test(test_shared_process_maintenance_serializes_writer),
+      cmocka_unit_test(
+          test_compaction_crash_before_publication_preserves_payloads),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
       cmocka_unit_test(test_lease_describe_preserves_staged_state_metadata),
       cmocka_unit_test(test_lease_private_reads_reject_stale_handle),
@@ -37195,6 +37401,10 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_acquire_for_update_rollback_removes_new_state),
   };
 
+  if (getenv("LOCKDC_TEST_ALLOCATOR_TRACKING") != NULL &&
+      strcmp(getenv("LOCKDC_TEST_ALLOCATOR_TRACKING"), "1") == 0 &&
+      lc_allocator_tracking_configure(1, NULL) != LC_OK)
+    return 1;
   pouch_test_executable = argc > 0 ? argv[0] : NULL;
   pouch_test_configure_child_exec();
   if (argc > 1 && strcmp(argv[1], "--pouch-child") == 0) {

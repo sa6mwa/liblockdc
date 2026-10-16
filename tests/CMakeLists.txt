@@ -103,6 +103,14 @@ add_test(NAME run_timed_log_test
     -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
     -P "${CMAKE_SOURCE_DIR}/tests/run_timed_log_test.cmake"
 )
+foreach(contract release_test_selection valgrind_targeting)
+  add_test(NAME ${contract}_test COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR} -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+    -DLOCKDC_TARGET_LIBC=${LOCKDC_TARGET_LIBC}
+    -P "${CMAKE_SOURCE_DIR}/tests/${contract}_test.cmake")
+  set_tests_properties(${contract}_test PROPERTIES
+    LABELS "unit;local;lifecycle-host" RUN_SERIAL TRUE TIMEOUT 20)
+endforeach()
 set_tests_properties(run_timed_log_test PROPERTIES
   LABELS "unit;local"
   TIMEOUT 10
@@ -315,6 +323,10 @@ if(TARGET lockdc_lua_core AND LOCKDC_LUA_RUNNABLE)
   set_tests_properties(lua_binding_core_smoke_test PROPERTIES
     ENVIRONMENT "${lockdc_lua_core_smoke_env}"
   )
+  add_test(NAME lua_binding_core_tracking_smoke_test
+    COMMAND "${LOCKDC_LUA_BIN}" "${CMAKE_SOURCE_DIR}/tests/lua/test_lockdc_core_smoke.lua")
+  set_tests_properties(lua_binding_core_tracking_smoke_test PROPERTIES
+    ENVIRONMENT "${lockdc_lua_core_smoke_env};LOCKDC_TEST_ALLOCATOR_TRACKING=1")
 endif()
 
 add_subdirectory(unit)
@@ -343,7 +355,35 @@ if(TARGET lockdc_pouch_replay_probe
       WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
   endforeach()
 endif()
+set_property(TEST
+  public_api_boundary
+  example_receiver_style
+  pouch_liblql_storage_boundary
+  release_fuzz_targeting_test
+  benchmark_go_timeout_contract_test
+  run_timed_log_test
+  lua_outbox_numeric_contract_test
+  release_package_matrix_targeting_test
+  release_targeting_test
+  release_werror_contract_test
+  release_privacy_recursive_test
+  darwin_macho_lifecycle_contract_test
+  bootlin_toolchain_contract_test
+  pouch_storage_allocator_contract_test
+  packaging_portability_source_test
+  package_source_dist_dir_test
+  coverage_pkgconfig_metadata_test
+  lonejson_upload_rewind_transport_test
+  APPEND PROPERTY LABELS lifecycle-host)
+
 if(LOCKDC_BUILD_E2E_TESTS)
   add_subdirectory(e2e)
 endif()
-lc_apply_default_test_timeouts()
+
+# Freeze the runtime build closure only after all test subdirectories have
+# registered their executables, including integration tests with modal cases.
+get_property(lc_cross_runtime_test_targets GLOBAL PROPERTY
+  LOCKDC_CROSS_RUNTIME_TEST_TARGETS)
+add_custom_target(lockdc_cross_runtime_tests DEPENDS
+  ${lc_cross_runtime_test_targets})
+lc_apply_test_defaults()

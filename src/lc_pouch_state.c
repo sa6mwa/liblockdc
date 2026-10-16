@@ -50,6 +50,10 @@
 #define LC_POUCH_STATE_HIGH_WATER_KEY ".lockd/high-water"
 #define LC_POUCH_STATE_INDEX_TRAILER_BYTES 12U
 #define LC_POUCH_STATE_INDEX_TRAILER_MAGIC 0x4c435349UL
+/* A capture owns one heap buffer for candidate checksums and payload copying.
+ * Keep large I/O chunks without consuming default musl thread stacks or
+ * allocating scratch space per record. Never materialize a whole payload. */
+#define LC_POUCH_STATE_FILE_CHUNK_BYTES (128U * 1024U)
 /* Snapshot records retain their per-key query freshness by retaining the
  * legacy trailer and appending a second, distinct trailer. Normal log records
  * keep the compact legacy form and derive freshness as they are applied. */
@@ -156,6 +160,7 @@ struct lc_pouch_state_shared_mutation_guard {
   uint64_t root_inode;
   int fd;
   unsigned long depth;
+  unsigned long refcount;
   struct lc_pouch_state_shared_mutation_guard *next;
 };
 
@@ -1364,10 +1369,14 @@ static int lc_pouch_state_shared_mutation_acquire(
     entry = created;
     identity = NULL;
   }
+  ++entry->refcount;
   pthread_mutex_unlock(&lc_pouch_state_shared_mutation_registry);
   lc_free_with_allocator(NULL, identity);
   pthread_rc = pthread_mutex_lock(&entry->mutex);
   if (pthread_rc != 0) {
+    pthread_mutex_lock(&lc_pouch_state_shared_mutation_registry);
+    --entry->refcount;
+    pthread_mutex_unlock(&lc_pouch_state_shared_mutation_registry);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to lock pouch shared mutation guard",
                         strerror(pthread_rc), NULL, "pouch");
@@ -1377,6 +1386,9 @@ static int lc_pouch_state_shared_mutation_acquire(
                                    "pouch.mutation.lock");
     if (lock_path == NULL) {
       pthread_mutex_unlock(&entry->mutex);
+      pthread_mutex_lock(&lc_pouch_state_shared_mutation_registry);
+      --entry->refcount;
+      pthread_mutex_unlock(&lc_pouch_state_shared_mutation_registry);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate pouch shared mutation path", NULL,
                           NULL, "pouch");
@@ -1385,6 +1397,9 @@ static int lc_pouch_state_shared_mutation_acquire(
     lc_free_with_allocator(&pouch->allocator, lock_path);
     if (entry->fd < 0) {
       pthread_mutex_unlock(&entry->mutex);
+      pthread_mutex_lock(&lc_pouch_state_shared_mutation_registry);
+      --entry->refcount;
+      pthread_mutex_unlock(&lc_pouch_state_shared_mutation_registry);
       return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                           "failed to open pouch shared mutation lock",
                           strerror(errno), NULL, "pouch");
@@ -1399,6 +1414,9 @@ static int lc_pouch_state_shared_mutation_acquire(
       close(entry->fd);
       entry->fd = -1;
       pthread_mutex_unlock(&entry->mutex);
+      pthread_mutex_lock(&lc_pouch_state_shared_mutation_registry);
+      --entry->refcount;
+      pthread_mutex_unlock(&lc_pouch_state_shared_mutation_registry);
       return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                           "failed to lock pouch shared mutation file",
                           strerror(errno), NULL, "pouch");
@@ -1458,6 +1476,9 @@ static void lc_pouch_state_shared_mutation_release(
     }
   }
   (void)pthread_mutex_unlock(&entry->mutex);
+  pthread_mutex_lock(&lc_pouch_state_shared_mutation_registry);
+  --entry->refcount;
+  pthread_mutex_unlock(&lc_pouch_state_shared_mutation_registry);
 }
 
 int lc_pouch_state_shared_mutation_enter(
@@ -3236,6 +3257,7 @@ static int lc_pouch_state_record_ref_copy(
 
 typedef struct lc_pouch_state_compaction_capture {
   char *manifest_text;
+  unsigned char *io_buffer;
   char **candidate_leaves;
   int *candidate_snapshots;
   uint64_t *candidate_sizes;
@@ -4403,6 +4425,69 @@ static int lc_pouch_state_read_many_snapshot_from_entry(
   return LC_OK;
 }
 
+static void lc_pouch_state_process_registry_cleanup(lc_pouch *pouch) {
+  char prefix[35];
+  lc_pouch_state_process_namespace_mutex **mutex_link;
+  lc_pouch_state_process_namespace_guard **guard_link;
+  lc_pouch_state_shared_mutation_guard **mutation_link;
+
+  if (!pouch->root_identity_initialized ||
+      lc_u64_format_base16_padded((lc_u64)pouch->root_device, 16U, prefix,
+                                  17U) < 0 ||
+      lc_u64_format_base16_padded((lc_u64)pouch->root_inode, 16U, prefix + 17U,
+                                  17U) < 0)
+    return;
+  prefix[16] = ':';
+  prefix[33] = '\n';
+  prefix[34] = '\0';
+  /* Registry references include holders and waiters from every open handle.
+   * Closing one handle can reclaim idle entries without disturbing a sibling
+   * handle's current mutation, recursive callback, reader or compaction. */
+  pthread_mutex_lock(&lc_pouch_state_process_mutex_registry);
+  mutex_link = &lc_pouch_state_process_mutexes;
+  while (*mutex_link != NULL) {
+    lc_pouch_state_process_namespace_mutex *entry = *mutex_link;
+    if (entry->refcount == 0UL && strncmp(entry->identity, prefix, 34U) == 0) {
+      *mutex_link = entry->next;
+      pthread_mutex_destroy(&entry->mutex);
+      lc_free_with_allocator(NULL, entry->identity);
+      lc_free_with_allocator(NULL, entry);
+    } else {
+      mutex_link = &entry->next;
+    }
+  }
+  pthread_mutex_unlock(&lc_pouch_state_process_mutex_registry);
+  pthread_mutex_lock(&lc_pouch_state_process_guard_registry);
+  guard_link = &lc_pouch_state_process_guards;
+  while (*guard_link != NULL) {
+    lc_pouch_state_process_namespace_guard *entry = *guard_link;
+    if (entry->refcount == 0UL && strncmp(entry->identity, prefix, 34U) == 0) {
+      *guard_link = entry->next;
+      pthread_rwlock_destroy(&entry->lock);
+      pthread_mutex_destroy(&entry->writer_mutex);
+      lc_free_with_allocator(NULL, entry->identity);
+      lc_free_with_allocator(NULL, entry);
+    } else {
+      guard_link = &entry->next;
+    }
+  }
+  pthread_mutex_unlock(&lc_pouch_state_process_guard_registry);
+  pthread_mutex_lock(&lc_pouch_state_shared_mutation_registry);
+  mutation_link = &lc_pouch_state_shared_mutation_guards;
+  while (*mutation_link != NULL) {
+    lc_pouch_state_shared_mutation_guard *entry = *mutation_link;
+    if (entry->refcount == 0UL && strncmp(entry->identity, prefix, 34U) == 0) {
+      *mutation_link = entry->next;
+      pthread_mutex_destroy(&entry->mutex);
+      lc_free_with_allocator(NULL, entry->identity);
+      lc_free_with_allocator(NULL, entry);
+    } else {
+      mutation_link = &entry->next;
+    }
+  }
+  pthread_mutex_unlock(&lc_pouch_state_shared_mutation_registry);
+}
+
 void lc_pouch_state_cache_cleanup(lc_pouch *pouch) {
   lc_pouch_namespace_logstore *ns;
 
@@ -4425,6 +4510,7 @@ void lc_pouch_state_cache_cleanup(lc_pouch *pouch) {
   pouch->namespace_logstores = NULL;
   memset(pouch->namespace_logstore_buckets, 0,
          sizeof(pouch->namespace_logstore_buckets));
+  lc_pouch_state_process_registry_cleanup(pouch);
 }
 
 /* A clean checkpoint is only a cold-start hint. State and public-query
@@ -5576,16 +5662,15 @@ static int lc_pouch_state_compaction_throttle(lc_pouch *pouch, size_t bytes,
 
 static int lc_pouch_state_copy_file_span_to_fd_crc(
     lc_pouch *pouch, const char *path, uint64_t offset, uint64_t length, int fd,
-    unsigned long *stored_crc, lc_error *error) {
-  unsigned char buffer[128U * 1024U];
+    unsigned char *buffer, unsigned long *stored_crc, lc_error *error) {
   uint64_t remaining;
   int in_fd;
   int rc;
 
-  if (path == NULL || stored_crc == NULL) {
+  if (path == NULL || buffer == NULL || stored_crc == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch span copy requires path and crc output", NULL,
-                        NULL, "pouch");
+                        "pouch span copy requires path, buffer and crc output",
+                        NULL, NULL, "pouch");
   }
   if ((off_t)offset < 0 || (uint64_t)(off_t)offset != offset) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -5612,8 +5697,9 @@ static int lc_pouch_state_copy_file_span_to_fd_crc(
     size_t want;
     ssize_t got;
 
-    want = remaining < (uint64_t)sizeof(buffer) ? (size_t)remaining
-                                                : sizeof(buffer);
+    want = remaining < (uint64_t)LC_POUCH_STATE_FILE_CHUNK_BYTES
+               ? (size_t)remaining
+               : LC_POUCH_STATE_FILE_CHUNK_BYTES;
     got = read(in_fd, buffer, want);
     if (got < 0) {
       if (errno == EINTR) {
@@ -6072,19 +6158,19 @@ static int lc_pouch_state_file_size(const char *path, uint64_t *size,
 
 static int lc_pouch_state_file_checksum(const char *path,
                                         uint64_t expected_size,
+                                        unsigned char *buffer,
                                         unsigned long *checksum,
                                         lc_error *error) {
-  unsigned char buffer[65536];
   struct stat st;
   uint64_t read_total;
   unsigned long value;
   ssize_t got;
   int fd;
 
-  if (path == NULL || checksum == NULL) {
+  if (path == NULL || buffer == NULL || checksum == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch state checksum requires path and output", NULL,
-                        NULL, NULL);
+                        "pouch state checksum requires path, buffer and output",
+                        NULL, NULL, NULL);
   }
   fd = open(path, O_RDONLY);
   if (fd < 0) {
@@ -6102,7 +6188,7 @@ static int lc_pouch_state_file_checksum(const char *path,
   value = (unsigned long)crc32(0L, Z_NULL, 0);
   read_total = 0U;
   for (;;) {
-    got = read(fd, buffer, sizeof(buffer));
+    got = read(fd, buffer, LC_POUCH_STATE_FILE_CHUNK_BYTES);
     if (got < 0) {
       int saved_errno;
 
@@ -9617,7 +9703,8 @@ static int lc_pouch_state_read_result_from_cache_record(
 static int lc_pouch_state_snapshot_write_record(
     lc_pouch *pouch, const char *ns,
     const lc_pouch_namespace_manifest *manifest, const char *snapshot_leaf,
-    int fd, const lc_pouch_state_cache_record *record, lc_error *error) {
+    int fd, const lc_pouch_state_cache_record *record, unsigned char *io_buffer,
+    lc_error *error) {
   char *old_path;
   lc_pouch_state_payload_span snapshot_span;
   unsigned char *meta;
@@ -9638,6 +9725,7 @@ static int lc_pouch_state_snapshot_write_record(
   meta = NULL;
   final_meta = NULL;
   record_start = 0U;
+  stored_crc = 0UL;
   put_record_type = record->record_type == LC_POUCH_STATE_RECORD_OBJECT_PUT
                         ? LC_POUCH_STATE_RECORD_OBJECT_PUT
                         : LC_POUCH_STATE_RECORD_STATE_PUT;
@@ -9729,7 +9817,8 @@ static int lc_pouch_state_snapshot_write_record(
     if (rc == LC_OK) {
       rc = lc_pouch_state_copy_file_span_to_fd_crc(
           pouch, old_path, record->payload_span.payload_offset,
-          record->payload_span.payload_length, fd, &stored_crc, error);
+          record->payload_span.payload_length, fd, io_buffer, &stored_crc,
+          error);
     }
     cipher_bytes = record->payload_span.payload_length;
     if (rc == LC_OK) {
@@ -9955,8 +10044,9 @@ static int lc_pouch_state_write_snapshot(
       break;
     }
     rc = capture != NULL
-             ? lc_pouch_state_snapshot_write_record(
-                   pouch, cache->ns, manifest, snapshot_leaf, fd, record, error)
+             ? lc_pouch_state_snapshot_write_record(pouch, cache->ns, manifest,
+                                                    snapshot_leaf, fd, record,
+                                                    capture->io_buffer, error)
              : lc_pouch_state_clean_projection_write_record(pouch, record, fd,
                                                             error);
   }
@@ -10088,6 +10178,7 @@ static void lc_pouch_state_compaction_capture_cleanup(
     return;
   }
   lc_free_with_allocator(&pouch->allocator, capture->manifest_text);
+  lc_free_with_allocator(&pouch->allocator, capture->io_buffer);
   for (index = 0U; index < capture->candidate_count; ++index) {
     lc_free_with_allocator(&pouch->allocator, capture->candidate_leaves[index]);
   }
@@ -10237,8 +10328,8 @@ static int lc_pouch_state_compaction_candidate_add(
   rc = lc_pouch_state_file_size(path, &size, error);
   if (rc == LC_OK) {
     rc = lc_pouch_state_file_checksum(
-        path, size, &capture->candidate_checksums[capture->candidate_count],
-        error);
+        path, size, capture->io_buffer,
+        &capture->candidate_checksums[capture->candidate_count], error);
   }
   lc_free_with_allocator(&pouch->allocator, path);
   if (rc != LC_OK) {
@@ -10493,6 +10584,14 @@ static int lc_pouch_state_compaction_capture_now(
   if (rc != LC_OK) {
     return rc;
   }
+  capture->io_buffer = (unsigned char *)lc_alloc_with_allocator(
+      &pouch->allocator, LC_POUCH_STATE_FILE_CHUNK_BYTES);
+  if (capture->io_buffer == NULL) {
+    lc_pouch_state_compaction_capture_cleanup(pouch, capture);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch compaction I/O buffer", NULL,
+                        NULL, "pouch");
+  }
   rc = lc_pouch_state_compaction_build_candidates(pouch, manifest, capture,
                                                   error);
   if (rc != LC_OK) {
@@ -10528,7 +10627,7 @@ static int lc_pouch_state_compaction_validate_candidates(
     }
     checksum = 0UL;
     rc = lc_pouch_state_file_checksum(path, capture->candidate_sizes[index],
-                                      &checksum, error);
+                                      capture->io_buffer, &checksum, error);
     lc_free_with_allocator(&pouch->allocator, path);
     if (rc != LC_OK) {
       return rc;
@@ -12596,7 +12695,7 @@ static int lc_pouch_state_write_resolved_locked(
     stored_crc = (unsigned long)crc32(0L, Z_NULL, 0);
     lc_pouch_state_projection_mutex_unlock(pouch, ns);
     rc = lc_pouch_crypto_transform_memory(
-        pouch->crypto, payload_context, materialized_plain,
+        &pouch->allocator, pouch->crypto, payload_context, materialized_plain,
         materialized_plain_len,
         options == NULL || !options->disable_compression, &materialized_stored,
         &materialized_stored_len, &stored_crc, &descriptor, error);
@@ -12840,7 +12939,7 @@ static int lc_pouch_state_write_resolved_locked(
       cipher_bytes = 0UL;
       stored_crc = (unsigned long)crc32(0L, Z_NULL, 0);
       rc = lc_pouch_crypto_transform_memory(
-          pouch->crypto, payload_context, materialized_plain,
+          &pouch->allocator, pouch->crypto, payload_context, materialized_plain,
           materialized_plain_len,
           options == NULL || !options->disable_compression,
           &materialized_stored, &materialized_stored_len, &stored_crc,

@@ -8,6 +8,18 @@ package.cpath = table.concat({
 
 local core = require("lockdc.core")
 
+-- Rejected input must not configure the process. Exercise boolean false and
+-- numeric 1 in separate CTest processes before creating native SDK objects.
+for _, value in ipairs({ 2, -1, 0.5, "1", {} }) do
+  assert(not pcall(core.allocator_tracking_configure, value))
+end
+assert(not pcall(core.allocator_tracking_configure))
+local tracking = os.getenv("LOCKDC_TEST_ALLOCATOR_TRACKING") == "1" and 1 or false
+assert(core.allocator_tracking_configure(tracking))
+local configured, config_error, config_status = core.allocator_tracking_configure(false)
+assert(configured == nil and config_status == core.ERR_INVALID)
+assert(type(config_error) == "table" and type(config_error.message) == "string")
+
 assert(type(core.version_string()) == "string")
 assert(core.ERR_PENDING == 7)
 local xid = assert(core.xid_new())

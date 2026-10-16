@@ -62,13 +62,13 @@ int lc_pouch_crypto_stream_to_fd_crc_with_compression(
     uint64_t *plain_bytes, uint64_t *cipher_bytes, unsigned long *stored_crc,
     char **descriptor_out, int allow_compression, lc_error *error);
 /* Transforms a bounded, already-materialized payload without touching a
- * source. Callers retain ownership of `plain`; `stored_out` uses Pouch's
- * allocator and must be released with lc_free_with_allocator(). */
+ * source. Callers retain ownership of `plain`; both outputs use the explicit
+ * allocator, including when crypto is NULL, and require matching cleanup. */
 int lc_pouch_crypto_transform_memory(
-    lc_pouch_crypto *crypto, const char *context, const unsigned char *plain,
-    size_t plain_length, int allow_compression, unsigned char **stored_out,
-    size_t *stored_length_out, unsigned long *stored_crc_out,
-    char **descriptor_out, lc_error *error);
+    const lc_allocator *allocator, lc_pouch_crypto *crypto, const char *context,
+    const unsigned char *plain, size_t plain_length, int allow_compression,
+    unsigned char **stored_out, size_t *stored_length_out,
+    unsigned long *stored_crc_out, char **descriptor_out, lc_error *error);
 int lc_pouch_crypto_rebind_descriptor(lc_pouch_crypto *crypto,
                                       const char *descriptor,
                                       const char *old_binding_context,

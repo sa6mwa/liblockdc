@@ -344,7 +344,7 @@ generated state with the candidate version and intended optional capabilities:
 
 ```bash
 make clean
-LOCKDC_VERSION_OVERRIDE=0.19.0 LOCKDC_BUILD_POSTGRES=ON \
+LOCKDC_VERSION_OVERRIDE=0.20.0 LOCKDC_BUILD_POSTGRES=ON \
   make prerelease release-matrix
 ```
 
@@ -375,6 +375,24 @@ longer performance, churn, and compaction campaigns remain the explicit
 `make prerelease-hardening` layer. Use
 `make release-matrix` when you explicitly want to reuse existing build and
 dependency caches for a faster release matrix/package rerun.
+
+During a full release, Debug owns the `lifecycle-host` source and host-fixture
+checks. GNU/musl Release lanes retain configuration-dependent runtime, SDK and
+ABI checks. The cpkt compatibility fixture consumes the same GNU dependency
+SDK in Debug and Release, so Debug owns it; the distinct musl SDK is checked
+in its Release lane. The `release-artifact` checks have standalone CTest
+entrypoints; the release pipeline verifies those contracts against the final
+archives and checksum inventory during packaging. Native archive consumers build and run
+in one pass per target, while cross consumers retain target-specific link
+checks. Valgrind builds only its selected test targets and their prerequisites.
+It runs the full Pouch suite and five focused outbox shutdown/allocator cases;
+the complete outbox inventory and timing assertions run in native and QEMU
+suites. `CMOCKA_TEST_FILTER` can select another case for Valgrind diagnosis.
+`make test-all` reuses the Debug sanitizer build for E2E; standalone
+`make test-e2e` retains its own preset. Static and shared core libraries share
+compiled implementation objects. SDK configuration permutations run once per
+distinct extracted package configuration within the packaging invocation;
+every target still builds its own consumers against its final archives.
 
 Create only the `x86_64-linux-gnu` package:
 
@@ -585,6 +603,30 @@ lc_source_close(client_bundle);
 `client_bundle_path` remains available for existing C callers, but new code
 should prefer `client_bundle_source` so PEM bundles can come from files, memory,
 file descriptors, or callback-backed sources.
+
+Allocation tracking is **off by default**. To enable it for the process-wide
+built-in allocator, call `lc_allocator_tracking_configure(1, &error)` once at
+startup, before creating SDK objects or starting concurrent SDK use. Pass `0`
+to explicitly keep it off; omitting the call has the same default. Successful
+configuration cannot be repeated or changed. Custom allocators never participate
+in tracking. Provide malloc/free hooks together; realloc is optional. A full
+custom hook set is called directly with the requested sizes and original
+pointers. Without a realloc hook, the SDK retains size-only metadata to emulate
+resizing through your malloc/free pair.
+
+The setting selects plain libc or tracking callbacks once. Disabled built-in
+allocation has no tracking-flag test, header, counter update, lock, or lazy
+initialization. When enabled, after closing all handles and cleaning up errors,
+ordinary process exit is silent. Unreleased allocations produce a count and byte
+total on stderr, for example `liblockdc allocator: 1 live allocations (37 bytes)
+at exit`. Shared-library unload also reports outstanding allocations. This covers
+the built-in allocator interfaces, excluding raw facade metadata and allocations
+made directly by your application or dependencies; abrupt termination does not
+run the report. Tracking uses an aligned header inside each allocation and a
+fixed table of counters, with no separate metadata allocations or pointer
+registry. Reported bytes count only the requested payload. Each tracked
+operation updates counters; include this overhead when measuring
+allocation-heavy workloads.
 
 Acquire a lease and update JSON state:
 

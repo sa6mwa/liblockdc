@@ -17,7 +17,7 @@ esac
 
 unset LD_LIBRARY_PATH
 
-"$timed_bin" "pouch integration fuzz build" "$script_dir/build.sh" pouch-integration-fuzz
+"$timed_bin" "pouch integration fuzz build" "$script_dir/build.sh" pouch-integration-fuzz lockdc_pouch_integration_tests
 "$timed_bin" "pouch integration fuzz runner regression" \
   ctest --preset pouch-integration-fuzz \
   -R '^lc_pouch_integration_mutation_runner_regression$'

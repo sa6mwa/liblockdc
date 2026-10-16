@@ -381,7 +381,7 @@ test-debug:
 
 __test-debug:
 	$(TIMED) 'test-debug build' $(MAKE_RECURSE) __build-debug
-	$(TIMED) 'test-debug ctest' $(CTEST) --preset $(DEBUG_PRESET) --parallel $(LOCKDC_CTEST_PARALLEL_LEVEL)
+	$(TIMED) 'test-debug ctest' $(CTEST) --preset $(DEBUG_PRESET) --stop-on-failure --no-tests=error --parallel $(LOCKDC_CTEST_PARALLEL_LEVEL)
 
 test-pouch-outbox-preflight:
 	$(TIMED) test-pouch-outbox-preflight $(MAKE_RECURSE) __test-pouch-outbox-preflight
@@ -434,7 +434,8 @@ test-all:
 # `test-all` proves complete native behavior, including the local-service E2E
 # surface.  Release-only toolchains and diagnostics stay out of the edit loop:
 # `make release` invokes the GNU/musl, QEMU, Valgrind, and fuzz gates once.
-__test-all: __test-debug __test-e2e
+__test-all: __test-debug
+	LOCKDC_E2E_PRESET=debug bash ./scripts/test-e2e.sh
 
 dev-up:
 	$(TIMED) dev-up $(MAKE_RECURSE) __dev-up

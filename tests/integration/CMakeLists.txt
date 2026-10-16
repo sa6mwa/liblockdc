@@ -30,6 +30,28 @@ function(lc_add_integration_test target_name)
   endif()
 endfunction()
 
+if(TARGET lc_static AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(lc_pouch_compaction_stack_test test_pouch_compaction_stack.c
+    ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+  target_link_libraries(lc_pouch_compaction_stack_test PRIVATE lc_static)
+  target_include_directories(lc_pouch_compaction_stack_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  lc_configure_c_test_target(lc_pouch_compaction_stack_test)
+  if(LOCKDC_TARGET_LIBC STREQUAL "musl")
+    target_link_options(lc_pouch_compaction_stack_test PRIVATE -static)
+  endif()
+  foreach(mode background small-stack)
+    add_test(NAME pouch_compaction_${mode}_test COMMAND lc_pouch_compaction_stack_test ${mode})
+    set_tests_properties(pouch_compaction_${mode}_test PROPERTIES
+      LABELS "integration;offline;pouch;cross-runtime" RUN_SERIAL TRUE TIMEOUT 60)
+    if(LOCKDC_C_TEST_ENVIRONMENT)
+      set_tests_properties(pouch_compaction_${mode}_test PROPERTIES
+        ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+    endif()
+  endforeach()
+  set_property(GLOBAL APPEND PROPERTY LOCKDC_CROSS_RUNTIME_TEST_TARGETS
+    lc_pouch_compaction_stack_test)
+endif()
+
 if(LOCKDC_BUILD_POSTGRES AND LOCKDC_TARGET_ID STREQUAL "x86_64-linux-gnu"
    AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(postgres_xa_executables)
@@ -108,3 +130,5 @@ if(LOCKDC_BUILD_POSTGRES AND LOCKDC_TARGET_ID STREQUAL "x86_64-linux-gnu"
       LABELS "integration;postgres;podman" RUN_SERIAL TRUE TIMEOUT 240)
   endforeach()
 endif()
+
+lc_apply_test_defaults()

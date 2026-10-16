@@ -2616,11 +2616,10 @@ int lc_pouch_crypto_stream_to_fd_crc_with_compression(
 }
 
 int lc_pouch_crypto_transform_memory(
-    lc_pouch_crypto *crypto, const char *context, const unsigned char *plain,
-    size_t plain_length, int allow_compression, unsigned char **stored_out,
-    size_t *stored_length_out, unsigned long *stored_crc_out,
-    char **descriptor_out, lc_error *error) {
-  const lc_allocator *allocator;
+    const lc_allocator *allocator, lc_pouch_crypto *crypto, const char *context,
+    const unsigned char *plain, size_t plain_length, int allow_compression,
+    unsigned char **stored_out, size_t *stored_length_out,
+    unsigned long *stored_crc_out, char **descriptor_out, lc_error *error) {
   const unsigned char empty_plain = 0U;
   const unsigned char *working;
   unsigned char payload_key[LC_POUCH_DEK_BYTES];
@@ -2656,7 +2655,6 @@ int lc_pouch_crypto_transform_memory(
   *stored_length_out = 0U;
   *stored_crc_out = (unsigned long)crc32(0L, Z_NULL, 0);
   *descriptor_out = NULL;
-  allocator = crypto != NULL ? &crypto->allocator : NULL;
   encrypted = crypto != NULL && crypto->encryption_enabled;
   compressed =
       allow_compression && crypto != NULL && crypto->compression_enabled;

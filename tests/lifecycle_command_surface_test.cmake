@@ -126,7 +126,7 @@ assert_contains(root_makefile "LOCKDC_CTEST_PARALLEL_LEVEL ?= 4" "bounded CTest 
 assert_contains(root_makefile "__test-all: __test-debug" "fast functional test-all graph")
 assert_not_contains(root_makefile "__test-all: __test-debug __test-host" "release matrix work in test-all graph")
 assert_contains(root_makefile "test: test-debug" "fast native test alias")
-assert_contains(root_makefile "__test-all: __test-debug __test-e2e" "complete native test-all graph")
+assert_contains(root_makefile "LOCKDC_E2E_PRESET=debug bash ./scripts/test-e2e.sh" "shared sanitizer E2E build")
 assert_contains(root_makefile "$(TIMED) 'prerelease format' $(MAKE_RECURSE) __format" "ordinary prerelease format timing")
 assert_contains(root_makefile "$(TIMED) 'prerelease test-all' $(MAKE_RECURSE) __test-all" "ordinary prerelease native test timing")
 assert_contains(root_makefile "$(TIMED) 'prerelease valgrind' $(MAKE_RECURSE) __valgrind" "ordinary prerelease Valgrind timing")
@@ -137,7 +137,7 @@ assert_contains(root_makefile "$(TIMED) 'bench-gate benchmarks' $(MAKE_RECURSE) 
 assert_contains(root_makefile "$(TIMED) 'bench-gate perf-gate' $(MAKE_RECURSE) __perf-gate" "performance gate timing")
 assert_contains(root_makefile "$(TIMED) 'perf-gate pouch-go-parity' $(MAKE_RECURSE) __benchmark-pouch-go-parity-gate" "default parity benchmark timing")
 assert_contains(root_makefile "$(TIMED) 'perf-gate pouch-go-durable-parity' $(MAKE_RECURSE) __benchmark-pouch-go-durable-gate" "durable parity benchmark timing")
-assert_contains(valgrind_script "\"$timed_bin\" \"valgrind $test_name\"" "per-test Valgrind timing")
+assert_contains(valgrind_script "\"$timed_bin\" \"valgrind $test_name $test_case\"" "per-case Valgrind timing")
 assert_contains(fuzz_script "\"$timed_bin\" \"fuzz $name\"" "per-target fuzz timing")
 assert_contains(linux_build_matrix_script "\"$timed_bin\" \"release-matrix build $preset\"" "per-preset release build timing")
 assert_contains(linux_build_matrix_script "lockdc_release_artifacts" "release artifact-only build target")
@@ -205,7 +205,7 @@ endif()
 assert_contains(release_matrix_script "\"$make_bin\" __build-release" "standard release matrix build step")
 assert_contains(release_matrix_script "\"$script_dir/build.sh\" \"$preset\"" "native release test build step")
 assert_contains(release_matrix_script "x86_64-linux-gnu-release x86_64-linux-musl-release" "standard release matrix x86 test targets")
-assert_contains(release_matrix_script "-LE lifecycle-host" "release matrix lifecycle-test exclusion")
+assert_contains(release_matrix_script "-LE 'lifecycle-host|release-artifact'" "release matrix lifecycle/artifact-test exclusion")
 assert_contains(source_smoke_script "host_target_id=x86_64-linux-gnu" "Bootlin source-smoke target")
 assert_contains(source_smoke_script "-DCMAKE_TOOLCHAIN_FILE=\"$toolchain_file\"" "Bootlin source-smoke toolchain")
 assert_contains(source_smoke_script "--target lc_unit_contracts" "bounded source-archive build target")
@@ -226,6 +226,40 @@ assert_contains(e2e_cmake "add_custom_target(lockdc_e2e_tests" "E2E build closur
 assert_contains(format_script "cmp -s" "content-preserving format check")
 assert_contains(format_script "mktemp -d" "isolated format staging directory")
 assert_contains(root_cmake "add_custom_target(lockdc_release_artifacts" "artifact-only release build target")
+
+# Exercise the real Make recipe with tiny CTest inventories: passing tests run
+# to completion; a failure stops later tests; an empty inventory is an error.
+find_program(ctest_bin NAMES ctest REQUIRED)
+set(native_gate_root "${LOCKDC_BINARY_DIR}/lifecycle-native-gate-test")
+file(REMOVE_RECURSE "${native_gate_root}")
+foreach(outcome pass fail empty)
+    set(fixture "${native_gate_root}/${outcome}")
+    set(marker "${fixture}/second-ran")
+    file(MAKE_DIRECTORY "${fixture}")
+    file(WRITE "${fixture}/CTestTestfile.cmake" "")
+    if(NOT outcome STREQUAL "empty")
+        set(first false)
+        if(outcome STREQUAL "pass")
+            set(first true)
+        endif()
+        file(WRITE "${fixture}/CTestTestfile.cmake"
+            "add_test(first \"${CMAKE_COMMAND}\" -E ${first})\n"
+            "add_test(second \"${CMAKE_COMMAND}\" -E touch \"${marker}\")\n")
+    endif()
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E env
+        "LOCKDC_TIMING_LOG=${fixture}/timings.tsv"
+        make -s __test-debug MAKE_RECURSE=:
+        "CTEST=${ctest_bin} --test-dir ${fixture}" LOCKDC_CTEST_PARALLEL_LEVEL=1
+        WORKING_DIRECTORY "${LOCKDC_ROOT}"
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    if(outcome STREQUAL "pass")
+        if(NOT result EQUAL 0 OR NOT EXISTS "${marker}")
+            message(FATAL_ERROR "Native passing inventory failed: ${output}\n${error}")
+        endif()
+    elseif(result EQUAL 0 OR EXISTS "${marker}")
+        message(FATAL_ERROR "Native ${outcome} inventory did not stop the gate: ${output}\n${error}")
+    endif()
+endforeach()
 
 set(lua_env_test_dir "${LOCKDC_BINARY_DIR}/lifecycle-lua-env-test")
 set(lua_env_metadata "${lua_env_test_dir}/package-metadata.cmake")

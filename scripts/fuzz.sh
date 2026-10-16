@@ -28,7 +28,7 @@ prepare_corpus() {
     printf '%s\n' "$dst_dir"
 }
 
-"$timed_bin" "fuzz build" "$script_dir/build.sh" fuzz
+"$timed_bin" "fuzz build" "$script_dir/build.sh" fuzz lockdc_fuzz_tests
 "$timed_bin" "fuzz ctest" ctest --preset fuzz
 
 afl_fuzz=$("$script_dir/cpkt-aflpp.sh" discover | sed -n 's/^afl_fuzz=//p')
