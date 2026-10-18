@@ -174,26 +174,26 @@ pslog_version=$(resolve_cmake_cache_string LOCKDC_PSLOG_VERSION "${LOCKDC_PSLOG_
 cpkt_asset_name="cpkt-$cpkt_version-${preset#deps-}.tar.gz"
 cpkt_download_url="https://github.com/c89systems/cpkt/releases/download/v$cpkt_version/$cpkt_asset_name"
 case "$cpkt_asset_name" in
-  cpkt-0.3.0-x86_64-linux-gnu.tar.gz)
-    cpkt_asset_hash=7b59ac702da1aab906c48c33a67954954c074f591d714085f3e4bd7a23619a66
+  cpkt-0.5.0-x86_64-linux-gnu.tar.gz)
+    cpkt_asset_hash=d58e7fff2fd4232c43687f466db4ec9a9dfdc94c0a7c016896de204d2e760846
     ;;
-  cpkt-0.3.0-x86_64-linux-musl.tar.gz)
-    cpkt_asset_hash=61c6e657cefd916b5f500374917ccc7e039d27b2ef1353a45a8f6f22d91c75ed
+  cpkt-0.5.0-x86_64-linux-musl.tar.gz)
+    cpkt_asset_hash=c36a236039701fe5d6d89c572c7a8d906880fcb33787659c213fdfa3181a15c2
     ;;
-  cpkt-0.3.0-aarch64-linux-gnu.tar.gz)
-    cpkt_asset_hash=4f1f964e5e54f191162d42871815a74afd9da02c77adce304a52dd03397d4740
+  cpkt-0.5.0-aarch64-linux-gnu.tar.gz)
+    cpkt_asset_hash=29aa58f4e68e8aa00ed5f652017018f003afdc10c8455be26030217bd3288d93
     ;;
-  cpkt-0.3.0-aarch64-linux-musl.tar.gz)
-    cpkt_asset_hash=7e25be64d73bc7140f01659c0c0e11e066990c88587fce2ca49ba8bf874a31aa
+  cpkt-0.5.0-aarch64-linux-musl.tar.gz)
+    cpkt_asset_hash=a9f7f021a7430a3dbc7290b6cebd667800bb26d546bd73c157b764aa73f17996
     ;;
-  cpkt-0.3.0-armhf-linux-gnu.tar.gz)
-    cpkt_asset_hash=2b57c7090186ed06a1df2525407e0cc222d6be1b40e3d7ff09c62e25354bee42
+  cpkt-0.5.0-armhf-linux-gnu.tar.gz)
+    cpkt_asset_hash=343fefa462c559a14ed6d53b3ef2c05b2f4700f36c86ab6b3186e185254430d4
     ;;
-  cpkt-0.3.0-armhf-linux-musl.tar.gz)
-    cpkt_asset_hash=dcc7d29a6536382ce05fc1351917bb7118b8db13a4fb52e3cb96d4a91ff977f5
+  cpkt-0.5.0-armhf-linux-musl.tar.gz)
+    cpkt_asset_hash=ac767725d3ab63eeb38677925516aece2e95986d53b77a124bf9679d76117672
     ;;
-  cpkt-0.3.0-arm64-apple-darwin.tar.gz)
-    cpkt_asset_hash=5bf571b6dfeb19a8dc796cb584fd8e770eb1a10a3d2b98ab46269d7c8e895fce
+  cpkt-0.5.0-arm64-apple-darwin.tar.gz)
+    cpkt_asset_hash=46d20a8f471f48532134fa293d50003b63a5a20019f80486b6452b67cb611cdb
     ;;
   *)
     printf 'unsupported cpkt release asset: %s\n' "$cpkt_asset_name" >&2

@@ -1,6 +1,27 @@
 # Release notes
 
-## Unreleased
+## 0.21.0
+
+- Upgrade cpkt to 0.5.0 with OpenSSL 3.6.5 initialization-failure and
+  static-plugin pthread-key cleanup fixes; keep cpktdb at 0.3.0. Cover failed
+  TLS-key creation and repeated encrypted-Pouch static-plugin unload with
+  key-capacity checks and Valgrind.
+- Reject Pouch mutations when required thread-local tracking keys cannot be
+  initialized. Preserve application-owned thread-local data and unwind locks
+  safely across repeated failures in shared and single-writer modes.
+- Give Lua stateful-outbox fixtures at least a full second for checkpoint I/O
+  while retaining short expiry-recovery coverage across wall-clock boundaries.
+  Keep auxiliary Pouch stores inside the cleared test root for repeatable runs.
+- Release the disabled fallback logger on SDK unload or process exit, and avoid
+  creating it while checking ownership of an application-supplied logger.
+- Reclaim thread JSON runtimes and Pouch TLS keys on unload. Report outstanding
+  tracked allocations after library-owned lifetime cleanup.
+- Enable allocation tracking throughout C/Lua E2E and PostgreSQL integration
+  tests. Fail on captured leak diagnostics and cover library unload/reload,
+  borrowed logger ownership, failed opens, and static shutdown with Valgrind.
+
+The core shared-library ABI remains **5**; the PostgreSQL provider ABI remains
+**0**. The Pouch storage format is unchanged.
 
 ## 0.20.0
 

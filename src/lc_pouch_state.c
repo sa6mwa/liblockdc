@@ -177,24 +177,43 @@ static lc_pouch_state_shared_mutation_guard
 static pthread_once_t lc_pouch_state_shared_mutation_key_once =
     PTHREAD_ONCE_INIT;
 static pthread_key_t lc_pouch_state_shared_mutation_key;
-static int lc_pouch_state_shared_mutation_key_status;
+static int lc_pouch_state_shared_mutation_key_status = -1;
 static pthread_once_t lc_pouch_state_commit_group_key_once = PTHREAD_ONCE_INIT;
 static pthread_key_t lc_pouch_state_commit_group_key;
+static int lc_pouch_state_commit_group_key_status = -1;
 static pthread_once_t lc_pouch_state_namespace_lock_key_once =
     PTHREAD_ONCE_INIT;
 static pthread_key_t lc_pouch_state_namespace_lock_key;
-static int lc_pouch_state_namespace_lock_key_status;
+static int lc_pouch_state_namespace_lock_key_status = -1;
 static pthread_once_t lc_pouch_state_projection_lock_key_once =
     PTHREAD_ONCE_INIT;
 static pthread_key_t lc_pouch_state_projection_lock_key;
-static int lc_pouch_state_projection_lock_key_status;
+static int lc_pouch_state_projection_lock_key_status = -1;
 static pthread_once_t lc_pouch_state_append_lock_key_once = PTHREAD_ONCE_INIT;
 static pthread_key_t lc_pouch_state_append_lock_key;
-static int lc_pouch_state_append_lock_key_status;
+static int lc_pouch_state_append_lock_key_status = -1;
 static pthread_once_t lc_pouch_state_body_append_worker_key_once =
     PTHREAD_ONCE_INIT;
 static pthread_key_t lc_pouch_state_body_append_worker_key;
-static int lc_pouch_state_body_append_worker_key_status;
+static int lc_pouch_state_body_append_worker_key_status = -1;
+
+/* These keys only borrow active operation frames. All operations/workers are
+ * closed before unload; return the key slots as well as their heap owners. */
+static void lc_pouch_state_cleanup_keys(void) __attribute__((destructor));
+static void lc_pouch_state_cleanup_keys(void) {
+  if (lc_pouch_state_shared_mutation_key_status == 0)
+    (void)pthread_key_delete(lc_pouch_state_shared_mutation_key);
+  if (lc_pouch_state_commit_group_key_status == 0)
+    (void)pthread_key_delete(lc_pouch_state_commit_group_key);
+  if (lc_pouch_state_namespace_lock_key_status == 0)
+    (void)pthread_key_delete(lc_pouch_state_namespace_lock_key);
+  if (lc_pouch_state_projection_lock_key_status == 0)
+    (void)pthread_key_delete(lc_pouch_state_projection_lock_key);
+  if (lc_pouch_state_append_lock_key_status == 0)
+    (void)pthread_key_delete(lc_pouch_state_append_lock_key);
+  if (lc_pouch_state_body_append_worker_key_status == 0)
+    (void)pthread_key_delete(lc_pouch_state_body_append_worker_key);
+}
 
 typedef struct lc_pouch_state_entry lc_pouch_state_entry;
 
@@ -303,7 +322,8 @@ static int lc_pouch_state_exclusive_append_gate_lock(lc_pouch *pouch,
 static void lc_pouch_state_exclusive_append_gate_unlock(pthread_mutex_t **gate);
 
 static void lc_pouch_state_commit_group_key_init(void) {
-  (void)pthread_key_create(&lc_pouch_state_commit_group_key, NULL);
+  lc_pouch_state_commit_group_key_status =
+      pthread_key_create(&lc_pouch_state_commit_group_key, NULL);
 }
 
 static void lc_pouch_state_namespace_lock_key_init(void) {
@@ -570,6 +590,11 @@ static void lc_pouch_state_body_append_worker_set_active(int active) {
 static lc_pouch_state_commit_group *lc_pouch_state_commit_group_current(void) {
   pthread_once(&lc_pouch_state_commit_group_key_once,
                lc_pouch_state_commit_group_key_init);
+  /* Failed key creation leaves no owned slot: key zero may belong to the
+   * application. Never interpret that thread-local value as a group. */
+  if (lc_pouch_state_commit_group_key_status != 0) {
+    return NULL;
+  }
   return (lc_pouch_state_commit_group *)pthread_getspecific(
       lc_pouch_state_commit_group_key);
 }
@@ -578,7 +603,9 @@ static void
 lc_pouch_state_commit_group_set(lc_pouch_state_commit_group *group) {
   pthread_once(&lc_pouch_state_commit_group_key_once,
                lc_pouch_state_commit_group_key_init);
-  (void)pthread_setspecific(lc_pouch_state_commit_group_key, group);
+  if (lc_pouch_state_commit_group_key_status == 0) {
+    (void)pthread_setspecific(lc_pouch_state_commit_group_key, group);
+  }
 }
 
 static int lc_pouch_state_commit_group_begin(lc_pouch *pouch,
@@ -598,6 +625,12 @@ static int lc_pouch_state_commit_group_begin(lc_pouch *pouch,
                         "pouch");
   }
   current = lc_pouch_state_commit_group_current();
+  if (lc_pouch_state_commit_group_key_status != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch commit group tracking",
+                        strerror(lc_pouch_state_commit_group_key_status), NULL,
+                        "pouch");
+  }
   if (current != NULL && current->pouch == pouch) {
     *out = current;
     *owned = 0;
@@ -1325,6 +1358,14 @@ static int lc_pouch_state_shared_mutation_acquire(
                         NULL, "pouch");
   }
   *out = NULL;
+  pthread_once(&lc_pouch_state_shared_mutation_key_once,
+               lc_pouch_state_shared_mutation_key_init);
+  if (lc_pouch_state_shared_mutation_key_status != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch shared mutation tracking",
+                        strerror(lc_pouch_state_shared_mutation_key_status),
+                        NULL, "pouch");
+  }
   rc = lc_pouch_state_process_mutex_identity(pouch, ".pouch-shared-mutation",
                                              &identity, error);
   if (rc != LC_OK) {
@@ -1423,11 +1464,7 @@ static int lc_pouch_state_shared_mutation_acquire(
     }
   }
   entry->depth += 1UL;
-  pthread_once(&lc_pouch_state_shared_mutation_key_once,
-               lc_pouch_state_shared_mutation_key_init);
-  if (lc_pouch_state_shared_mutation_key_status == 0) {
-    (void)pthread_setspecific(lc_pouch_state_shared_mutation_key, entry);
-  }
+  (void)pthread_setspecific(lc_pouch_state_shared_mutation_key, entry);
   *out = entry;
   return LC_OK;
 }

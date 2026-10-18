@@ -6,6 +6,16 @@
 static pthread_once_t lc_log_noop_once = PTHREAD_ONCE_INIT;
 static pslog_logger *lc_log_noop = NULL;
 
+/* Clients and workers must be closed before unloading the SDK. The fallback
+ * belongs to this loaded copy, including in a statically linked executable. */
+static void lc_log_cleanup_noop(void) __attribute__((destructor));
+static void lc_log_cleanup_noop(void) {
+  if (lc_log_noop != NULL) {
+    lc_log_noop->destroy(lc_log_noop);
+    lc_log_noop = NULL;
+  }
+}
+
 static void lc_log_init_noop(void) {
   pslog_config config;
 

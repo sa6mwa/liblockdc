@@ -174,7 +174,7 @@ That command provisions the pinned Linux host MIG helper in the shared toolchain
 cache, without obtaining Apple content. Darwin configure requires both tools;
 MIG is build tooling and is excluded from SDK packages.
 
-The pinned `cpkt` 0.3.0 GNU SDKs require glibc 2.43 or newer at
+The pinned `cpkt` 0.5.0 GNU SDKs require glibc 2.43 or newer at
 deployment. This does not change the `liblockdc` public ABI, but deployments
 using the shared GNU SDK must upgrade their runtime accordingly. Development
 executables, tests, examples, Lua module checks, and SDK consumer probes run
@@ -185,7 +185,7 @@ The separately pinned dependencies are:
 
 | Dependency | Version | Use |
 | --- | --- | --- |
-| [cpkt](https://github.com/c89systems/cpkt) | 0.3.0 | Core SDK dependencies and Lua runtime |
+| [cpkt](https://github.com/c89systems/cpkt) | 0.5.0 | Core SDK dependencies and Lua runtime |
 | [cpktdb](https://github.com/c89systems/cpktdb) | 0.3.0 | Optional PostgreSQL C89 facade and database SDK |
 | lonejson | 0.45.0 (ABI 26) | JSON parsing, mapping, and streaming |
 | libpslog | 0.12.0 | SDK diagnostics |
@@ -199,8 +199,8 @@ Core and database SDKs remain in separate `cpkt/install` and `cpktdb/install`
 prefixes under each target's dependency root. cpktdb records its exact core build
 pin as provenance and requests a compatible minimum core through CMake. Core's
 declared compatibility floor governs independent upgrades; matching major/minor
-versions alone do not establish compatibility. cpkt 0.3.0 accepts baselines from
-0.2.0 through 0.3.0; cpktdb 0.3.0 requires at least 0.3.0. Target and payload
+versions alone do not establish compatibility. cpkt 0.5.0 accepts baselines from
+0.2.0 through 0.5.0; cpktdb 0.3.0 requires at least 0.3.0. Target and payload
 integrity checks remain enforced. `scripts/deps.sh` pins each provider release and
 checksum independently; cpktdb is acquired/discovered only when PostgreSQL is
 enabled. Consumers use the official imported targets. pkg-config consumers must
@@ -627,6 +627,15 @@ fixed table of counters, with no separate metadata allocations or pointer
 registry. Reported bytes count only the requested payload. Each tracked
 operation updates counters; include this overhead when measuring
 allocation-heavy workloads.
+
+E2E enables this tracker for C tests/examples and Lua consumers, including the
+PostgreSQL integration tests. A leak diagnostic fails the test even when its
+consumer exits successfully. Dependency allocations made outside the built-in
+allocator require the separate Valgrind lifetime checks: these exercise logger
+ownership, failed opens, encrypted Pouch, repeated library unload/reload, idle
+application threads, and static process shutdown. Close all SDK handles and
+finish concurrent SDK calls before unloading the library. Library-owned fallback
+loggers and thread runtimes are released before the allocator exit report.
 
 Acquire a lease and update JSON state:
 

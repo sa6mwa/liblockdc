@@ -284,7 +284,9 @@ execute_process(
     OUTPUT_VARIABLE run_stdout
     ERROR_VARIABLE run_stderr
 )
-if(NOT run_result EQUAL 0)
+if(NOT run_result EQUAL 0 OR
+   run_stdout MATCHES "liblockdc allocator:" OR
+   run_stderr MATCHES "liblockdc allocator:")
     message(FATAL_ERROR
         "LuaRocks validation failed for ${LOCKDC_TEST_NAME}\n"
         "stdout:\n${run_stdout}\n"

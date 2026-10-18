@@ -38,7 +38,9 @@ execute_process(
   OUTPUT_VARIABLE producer_stdout
   ERROR_VARIABLE producer_stderr
 )
-if(NOT producer_result EQUAL 0)
+if(NOT producer_result EQUAL 0 OR
+   producer_stdout MATCHES "liblockdc allocator:" OR
+   producer_stderr MATCHES "liblockdc allocator:")
   message(FATAL_ERROR
     "outbox producer example failed\nstdout:\n${producer_stdout}\nstderr:\n${producer_stderr}")
 endif()

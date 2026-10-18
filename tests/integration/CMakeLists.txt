@@ -30,6 +30,207 @@ function(lc_add_integration_test target_name)
   endif()
 endfunction()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(lc_openssl_key_failure_test test_openssl_key_failure.c)
+  target_link_libraries(lc_openssl_key_failure_test PRIVATE
+    lc::openssl_crypto_static Threads::Threads)
+  target_link_options(lc_openssl_key_failure_test PRIVATE
+    "LINKER:--wrap=pthread_key_create")
+  lc_configure_c_test_target(lc_openssl_key_failure_test)
+  if(LOCKDC_TARGET_ID STREQUAL "x86_64-linux-gnu" AND NOT LOCKDC_SANITIZER_INSTRUMENTED)
+    find_program(LOCKDC_VALGRIND_BIN valgrind)
+  endif()
+  foreach(cleanup auto cleanup)
+    foreach(failure RANGE 0 5)
+      add_test(NAME openssl_key_failure_${cleanup}_${failure}_test
+        COMMAND lc_openssl_key_failure_test ${failure} ${cleanup})
+      set_tests_properties(openssl_key_failure_${cleanup}_${failure}_test PROPERTIES
+        LABELS "integration;offline;memory;cross-runtime;e2e;examples" TIMEOUT 10)
+      if(LOCKDC_C_TEST_ENVIRONMENT)
+        set_tests_properties(openssl_key_failure_${cleanup}_${failure}_test PROPERTIES
+          ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+      endif()
+      if(LOCKDC_VALGRIND_BIN AND NOT LOCKDC_SANITIZER_INSTRUMENTED
+         AND LOCKDC_TARGET_ID STREQUAL "x86_64-linux-gnu")
+        add_test(NAME openssl_key_failure_${cleanup}_${failure}_valgrind_test
+          COMMAND ${LOCKDC_VALGRIND_BIN} --leak-check=full --show-leak-kinds=all
+            --errors-for-leak-kinds=all --error-exitcode=97
+            $<TARGET_FILE:lc_openssl_key_failure_test> ${failure} ${cleanup})
+        set_tests_properties(openssl_key_failure_${cleanup}_${failure}_valgrind_test PROPERTIES
+          LABELS "integration;offline;memory" TIMEOUT 30)
+      endif()
+    endforeach()
+  endforeach()
+  set_property(GLOBAL APPEND PROPERTY LOCKDC_CROSS_RUNTIME_TEST_TARGETS
+    lc_openssl_key_failure_test)
+endif()
+
+if(TARGET lc_static AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(lc_pouch_key_failure_test test_pouch_key_failure.c
+    ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+  target_link_libraries(lc_pouch_key_failure_test PRIVATE lc_static lc::openssl_crypto_static)
+  target_link_options(lc_pouch_key_failure_test PRIVATE
+    "LINKER:--wrap=pthread_key_create" "LINKER:--wrap=pthread_key_delete")
+  lc_configure_c_test_target(lc_pouch_key_failure_test)
+  foreach(mode shared single)
+    foreach(failure RANGE 0 5)
+      add_test(NAME pouch_key_failure_${mode}_${failure}_test
+        COMMAND lc_pouch_key_failure_test ${failure} ${mode})
+      set_tests_properties(pouch_key_failure_${mode}_${failure}_test PROPERTIES
+        LABELS "integration;offline;memory;cross-runtime;e2e;examples" TIMEOUT 10)
+      if(LOCKDC_C_TEST_ENVIRONMENT)
+        set_tests_properties(pouch_key_failure_${mode}_${failure}_test PROPERTIES
+          ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+      endif()
+      if(LOCKDC_VALGRIND_BIN AND NOT LOCKDC_SANITIZER_INSTRUMENTED
+         AND LOCKDC_TARGET_ID STREQUAL "x86_64-linux-gnu")
+        add_test(NAME pouch_key_failure_${mode}_${failure}_valgrind_test
+          COMMAND ${LOCKDC_VALGRIND_BIN} --leak-check=full --show-leak-kinds=all
+            --errors-for-leak-kinds=all --error-exitcode=97
+            $<TARGET_FILE:lc_pouch_key_failure_test> ${failure} ${mode})
+        set_tests_properties(pouch_key_failure_${mode}_${failure}_valgrind_test PROPERTIES
+          LABELS "integration;offline;memory" TIMEOUT 30)
+      endif()
+    endforeach()
+  endforeach()
+  set_property(GLOBAL APPEND PROPERTY LOCKDC_CROSS_RUNTIME_TEST_TARGETS
+    lc_pouch_key_failure_test)
+
+  add_executable(lc_static_exit_test test_client_unload_module.c
+    ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+  target_compile_definitions(lc_static_exit_test PRIVATE
+    LC_TEST_INTERNAL_RUNTIME=1 LC_TEST_STATIC_EXIT=1)
+  target_link_libraries(lc_static_exit_test PRIVATE lc_static)
+  lc_configure_c_test_target(lc_static_exit_test)
+  add_test(NAME static_exit_test COMMAND lc_static_exit_test)
+  set_tests_properties(static_exit_test PROPERTIES
+    LABELS "integration;offline;memory;cross-runtime;e2e;examples" TIMEOUT 30)
+  if(LOCKDC_C_TEST_ENVIRONMENT)
+    set_tests_properties(static_exit_test PROPERTIES
+      ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+  endif()
+  set_property(GLOBAL APPEND PROPERTY LOCKDC_CROSS_RUNTIME_TEST_TARGETS lc_static_exit_test)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LOCKDC_TARGET_ID STREQUAL "x86_64-linux-gnu")
+  add_executable(lc_tracking_gate_probe test_tracking_gate.c
+    ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tracking.c)
+  target_link_libraries(lc_tracking_gate_probe PRIVATE ${lc_test_link_target})
+  lc_configure_c_test_target(lc_tracking_gate_probe)
+  add_test(NAME e2e_tracking_gate_test COMMAND ${CMAKE_COMMAND}
+    -DBINARY_DIR=${CMAKE_BINARY_DIR} -DPROBE=$<TARGET_FILE:lc_tracking_gate_probe>
+    -P ${CMAKE_SOURCE_DIR}/tests/tracking_gate_test.cmake)
+  set_tests_properties(e2e_tracking_gate_test PROPERTIES
+    LABELS "integration;offline;allocator;e2e;examples" TIMEOUT 30)
+  add_library(lc_log_unload_module MODULE test_log_unload_module.c
+    ${CMAKE_SOURCE_DIR}/src/lc_log.c)
+  target_include_directories(lc_log_unload_module PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_BINARY_DIR}/generated/include ${LOCKDC_LONEJSON_INCLUDE_DIR})
+  target_link_libraries(lc_log_unload_module PRIVATE lc::pslog_shared)
+  lc_configure_c_test_target(lc_log_unload_module)
+  lc_configure_development_module_runtime(lc_log_unload_module)
+  add_executable(lc_library_unload_test test_library_unload.c)
+  target_link_libraries(lc_library_unload_test PRIVATE ${CMAKE_DL_LIBS})
+  lc_configure_c_test_target(lc_library_unload_test)
+  add_dependencies(lc_library_unload_test lc_log_unload_module)
+  if(TARGET lc_static)
+    add_library(lc_static_unload_module MODULE test_client_unload_module.c
+      ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+    target_link_libraries(lc_static_unload_module PRIVATE lc_static)
+    target_link_options(lc_static_unload_module PRIVATE
+      "LINKER:--exclude-libs,ALL")
+    target_compile_definitions(lc_static_unload_module PRIVATE LC_TEST_INTERNAL_RUNTIME=1)
+    lc_configure_c_test_target(lc_static_unload_module)
+    lc_configure_development_module_runtime(lc_static_unload_module)
+    add_dependencies(lc_library_unload_test lc_static_unload_module lc_static_exit_test)
+    add_test(NAME runtime_unload_test COMMAND lc_library_unload_test
+      $<TARGET_FILE:lc_static_unload_module> runtime-only
+      $<TARGET_FILE:lc_static_unload_module>)
+    add_test(NAME static_client_unload_test COMMAND lc_library_unload_test
+      $<TARGET_FILE:lc_static_unload_module> pouch-encrypted-supplied
+      $<TARGET_FILE:lc_static_unload_module>)
+    set_tests_properties(runtime_unload_test static_client_unload_test PROPERTIES
+      LABELS "integration;offline;memory;e2e;examples" TIMEOUT 30)
+    if(LOCKDC_C_TEST_ENVIRONMENT)
+      set_tests_properties(runtime_unload_test static_client_unload_test PROPERTIES
+        ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+    endif()
+  endif()
+  if(TARGET lc_shared)
+    add_library(lc_client_unload_module MODULE test_client_unload_module.c
+      ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+    target_link_libraries(lc_client_unload_module PRIVATE lc_shared
+      lc::pslog_shared lc::lonejson_shared lc::liblql_shared lc::curl_shared
+      lc::openssl_ssl_shared lc::openssl_crypto_shared lc::nghttp2_shared
+      lc::libssh2_shared lc::zlib_shared)
+    target_link_options(lc_client_unload_module PRIVATE "LINKER:--no-as-needed")
+    lc_configure_c_test_target(lc_client_unload_module)
+    lc_configure_development_module_runtime(lc_client_unload_module)
+    add_dependencies(lc_library_unload_test lc_client_unload_module)
+    add_test(NAME client_unload_test COMMAND lc_library_unload_test
+      $<TARGET_FILE:lc_client_unload_module> pouch-encrypted $<TARGET_FILE:lc_shared>)
+    set_tests_properties(client_unload_test PROPERTIES
+      LABELS "integration;offline;memory;e2e;examples" TIMEOUT 30)
+    if(LOCKDC_C_TEST_ENVIRONMENT)
+      set_tests_properties(client_unload_test PROPERTIES
+        ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+    endif()
+  endif()
+  add_test(NAME logger_unload_test COMMAND lc_library_unload_test
+    $<TARGET_FILE:lc_log_unload_module>)
+  set_tests_properties(logger_unload_test PROPERTIES
+    LABELS "integration;offline;memory;e2e;examples" TIMEOUT 30)
+  if(LOCKDC_C_TEST_ENVIRONMENT)
+    set_tests_properties(logger_unload_test PROPERTIES
+      ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+  endif()
+  find_program(LOCKDC_VALGRIND_BIN valgrind)
+  if(LOCKDC_VALGRIND_BIN AND NOT LOCKDC_SANITIZER_INSTRUMENTED)
+    if(TARGET lc_static_unload_module)
+      add_test(NAME static_unload_test COMMAND ${LOCKDC_VALGRIND_BIN}
+        --keep-debuginfo=yes --leak-check=full --show-leak-kinds=all
+        --errors-for-leak-kinds=definite,indirect,possible --error-exitcode=97
+        $<TARGET_FILE:lc_library_unload_test> $<TARGET_FILE:lc_static_unload_module>
+        runtime-only $<TARGET_FILE:lc_static_unload_module>)
+      add_test(NAME static_exit_valgrind_test COMMAND ${LOCKDC_VALGRIND_BIN}
+        --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=all
+        --error-exitcode=97 $<TARGET_FILE:lc_static_exit_test>)
+      add_test(NAME static_client_unload_valgrind_test COMMAND ${LOCKDC_VALGRIND_BIN}
+        --keep-debuginfo=yes --leak-check=full --show-leak-kinds=all
+        --errors-for-leak-kinds=all --error-exitcode=97
+        $<TARGET_FILE:lc_library_unload_test> $<TARGET_FILE:lc_static_unload_module>
+        pouch-encrypted-supplied $<TARGET_FILE:lc_static_unload_module>)
+      add_test(NAME runtime_key_failure_test COMMAND ${LOCKDC_VALGRIND_BIN}
+        --keep-debuginfo=yes --leak-check=full --show-leak-kinds=all
+        --errors-for-leak-kinds=all --error-exitcode=97
+        $<TARGET_FILE:lc_library_unload_test> $<TARGET_FILE:lc_static_unload_module>
+        key-failure $<TARGET_FILE:lc_static_unload_module>)
+      set_tests_properties(static_unload_test static_client_unload_valgrind_test
+        static_exit_valgrind_test runtime_key_failure_test PROPERTIES
+        LABELS "integration;offline;memory" TIMEOUT 30)
+    endif()
+    add_test(NAME logger_unload_valgrind_test COMMAND ${LOCKDC_VALGRIND_BIN}
+      --keep-debuginfo=yes --leak-check=full --show-leak-kinds=all
+      --errors-for-leak-kinds=all --error-exitcode=97
+      $<TARGET_FILE:lc_library_unload_test> $<TARGET_FILE:lc_log_unload_module>)
+    set_tests_properties(logger_unload_valgrind_test PROPERTIES
+      LABELS "integration;offline;memory" TIMEOUT 30)
+    if(TARGET lc_client_unload_module)
+      foreach(mode pouch-default pouch-supplied pouch-supplied-borrowed pouch-failure pouch-failure-supplied
+                   pouch-encrypted remote-default remote-supplied remote-supplied-borrowed)
+        add_test(NAME client_unload_${mode}_test COMMAND ${LOCKDC_VALGRIND_BIN}
+          --keep-debuginfo=yes --leak-check=full --show-leak-kinds=all
+          --errors-for-leak-kinds=definite,indirect,possible --error-exitcode=97
+          $<TARGET_FILE:lc_library_unload_test> $<TARGET_FILE:lc_client_unload_module> ${mode}
+          $<TARGET_FILE:lc_shared>)
+        set_tests_properties(client_unload_${mode}_test PROPERTIES
+          LABELS "integration;offline;memory" TIMEOUT 30)
+      endforeach()
+    endif()
+  endif()
+endif()
+
 if(TARGET lc_static AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_executable(lc_pouch_compaction_stack_test test_pouch_compaction_stack.c
     ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
@@ -60,6 +261,8 @@ if(LOCKDC_BUILD_POSTGRES AND LOCKDC_TARGET_ID STREQUAL "x86_64-linux-gnu"
       continue()
     endif()
     add_executable(lc_integration_postgres_${variant} test_postgres_xa.c)
+    target_sources(lc_integration_postgres_${variant} PRIVATE
+      ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tracking.c)
     target_link_libraries(lc_integration_postgres_${variant} PRIVATE lc_postgres_${variant})
     lc_configure_c_test_target(lc_integration_postgres_${variant})
     if(variant STREQUAL "static")
@@ -113,6 +316,8 @@ if(LOCKDC_BUILD_POSTGRES AND LOCKDC_TARGET_ID STREQUAL "x86_64-linux-gnu"
         add_dependencies(${lua_target} lockdc_lua_core lockdc_lua_postgres)
       endif()
       lc_configure_c_test_target(${lua_target})
+      target_sources(${lua_target} PRIVATE
+        ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tracking.c)
       set_target_properties(${lua_target} PROPERTIES
         C_STANDARD 90 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
       list(APPEND postgres_xa_executables "$<TARGET_FILE:${lua_target}>")
@@ -121,13 +326,15 @@ if(LOCKDC_BUILD_POSTGRES AND LOCKDC_TARGET_ID STREQUAL "x86_64-linux-gnu"
   add_test(NAME postgres_xa_native_test
     COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/test-postgres-xa.sh" ${postgres_xa_executables})
   set_tests_properties(postgres_xa_native_test PROPERTIES
-    LABELS "integration;postgres;podman" RUN_SERIAL TRUE TIMEOUT 240)
+    LABELS "integration;postgres;podman" RUN_SERIAL TRUE TIMEOUT 240
+    ENVIRONMENT "LOCKDC_TEST_ALLOCATOR_TRACKING=1")
   foreach(server_version 15 16 17 18)
     add_test(NAME postgres_xa_pg${server_version}_test
       COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/test-postgres-xa.sh"
         --server-version ${server_version} ${postgres_xa_executables})
     set_tests_properties(postgres_xa_pg${server_version}_test PROPERTIES
-      LABELS "integration;postgres;podman" RUN_SERIAL TRUE TIMEOUT 240)
+      LABELS "integration;postgres;podman" RUN_SERIAL TRUE TIMEOUT 240
+      ENVIRONMENT "LOCKDC_TEST_ALLOCATOR_TRACKING=1")
   endforeach()
 endif()
 

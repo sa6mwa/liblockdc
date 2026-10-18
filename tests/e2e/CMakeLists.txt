@@ -190,6 +190,14 @@ if(TARGET lc_example_startconsumer)
 endif()
 
 find_program(LOCKDC_LUAROCKS_BIN NAMES luarocks)
+if(TARGET lockdc_lua_core AND LOCKDC_LUA_RUNNABLE AND LOCKDC_LUAROCKS_BIN)
+  add_test(NAME lc_e2e_lua_allocator_gate COMMAND ${CMAKE_COMMAND}
+    -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR} -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -DLOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}
+    -P ${CMAKE_SOURCE_DIR}/tests/lua_allocator_gate_test.cmake)
+  set_tests_properties(lc_e2e_lua_allocator_gate PROPERTIES
+    LABELS "e2e;lua;allocator" RUN_SERIAL TRUE TIMEOUT 120)
+endif()
 
 lc_add_lua_e2e_test(
   lc_e2e_lua_example_acquire_update_json
@@ -313,6 +321,19 @@ foreach(lockdc_e2e_example_target IN LISTS lockdc_e2e_example_candidates)
   endif()
 endforeach()
 list(APPEND lockdc_e2e_test_targets ${lockdc_e2e_example_targets})
+foreach(tracked_target IN LISTS lockdc_e2e_test_targets)
+  target_sources(${tracked_target} PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tracking.c)
+endforeach()
+# Lifetime probes are service-free E2E sentinels. Build them for standalone E2E
+# too, so a dependency/global unload leak cannot hide behind passing behavior.
+foreach(lifetime_target lc_library_unload_test lc_static_exit_test lc_tracking_gate_probe
+                        lc_openssl_key_failure_test lc_pouch_key_failure_test)
+  if(TARGET ${lifetime_target})
+    list(APPEND lockdc_e2e_test_targets ${lifetime_target})
+    list(APPEND lockdc_e2e_example_targets ${lifetime_target})
+  endif()
+endforeach()
 if(LOCKDC_LUA_RUNNABLE AND LOCKDC_LUAROCKS_BIN)
   list(APPEND lockdc_e2e_test_targets lockdc_lua_runner)
   list(APPEND lockdc_e2e_example_targets lockdc_lua_runner)
@@ -326,4 +347,7 @@ if(LOCKDC_LUA_RUNNABLE AND LOCKDC_LUAROCKS_BIN)
 endif()
 add_custom_target(lockdc_e2e_tests DEPENDS ${lockdc_e2e_test_targets})
 add_custom_target(lockdc_e2e_example_tests DEPENDS ${lockdc_e2e_example_targets})
+get_property(e2e_tests DIRECTORY PROPERTY TESTS)
+set_property(TEST ${e2e_tests} APPEND PROPERTY ENVIRONMENT
+  "LOCKDC_TEST_ALLOCATOR_TRACKING=1")
 lc_apply_test_defaults()

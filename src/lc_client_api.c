@@ -3114,8 +3114,7 @@ void lc_client_handle_release(lc_client_handle *client) {
   if (client->engine != NULL) {
     lc_engine_client_close(client->engine);
   }
-  if (client->owns_logger && client->logger != NULL &&
-      client->logger != lc_log_noop_logger()) {
+  if (client->owns_logger && client->logger != NULL) {
     client->logger->destroy(client->logger);
   }
   if (client->endpoints != NULL) {

@@ -2079,10 +2079,7 @@ int lc_engine_client_open(const lc_engine_client_config *config,
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to initialize client logger");
   }
-  client->owns_logger = (client->logger != client->base_logger &&
-                         client->logger != lc_log_noop_logger())
-                            ? 1
-                            : 0;
+  client->owns_logger = client->logger != client->base_logger;
   if (lc_engine_open_lonejson_runtime(client, error) != LC_ENGINE_OK) {
     lc_engine_client_close(client);
     return error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
@@ -2144,8 +2141,7 @@ void lc_engine_client_close(lc_engine_client *client) {
   if (client->lonejson != NULL) {
     client->lonejson->free(client->lonejson);
   }
-  if (client->owns_logger && client->logger != NULL &&
-      client->logger != lc_log_noop_logger()) {
+  if (client->owns_logger && client->logger != NULL) {
     client->logger->destroy(client->logger);
   }
   free(client);

@@ -4880,10 +4880,7 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                         "failed to initialize pouch logger", NULL, NULL,
                         "pouch");
   }
-  pouch->owns_logger = (pouch->logger != pouch->base_logger &&
-                        pouch->logger != lc_log_noop_logger())
-                           ? 1
-                           : 0;
+  pouch->owns_logger = pouch->logger != pouch->base_logger;
   if (pouch->query_engine == NULL || pouch->query_fallback_engine == NULL ||
       pouch->compression == NULL) {
     lc_pouch_close(pouch);
@@ -5060,8 +5057,7 @@ void lc_pouch_close(lc_pouch *pouch) {
   lc_free_with_allocator(&allocator, pouch->query_fallback_engine);
   lc_free_with_allocator(&allocator, pouch->query_engine);
   lc_free_with_allocator(&allocator, pouch->root_path);
-  if (pouch->owns_logger && pouch->logger != NULL &&
-      pouch->logger != lc_log_noop_logger()) {
+  if (pouch->owns_logger && pouch->logger != NULL) {
     pouch->logger->destroy(pouch->logger);
   }
   if (pouch->writer_presence_cond_initialized) {

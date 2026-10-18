@@ -127,6 +127,12 @@ handles and close the Lua state before the host exits. This diagnostic covers
 the native allocator, not Lua's own heap, and does not run after abrupt
 termination.
 
+The E2E harness enables native tracking before running Lua examples and fails on
+native leak diagnostics, including diagnostics captured by package validation.
+Dependency heaps require the separate Valgrind lifetime regressions; native
+tracking does not replace those checks. Close Lua states and all SDK handles,
+and finish SDK calls on other threads, before unloading the native library.
+
 ## Public entrypoints
 
 The top-level module is:

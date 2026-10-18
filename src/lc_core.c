@@ -2460,10 +2460,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
                           "failed to initialize client logger", NULL, NULL,
                           NULL);
     }
-    client->owns_logger = (client->logger != client->base_logger &&
-                           client->logger != lc_log_noop_logger())
-                              ? 1
-                              : 0;
+    client->owns_logger = client->logger != client->base_logger;
   }
   if (!is_pouch) {
     rc = lc_engine_client_open(&engine_config, &client->engine, &engine_error);

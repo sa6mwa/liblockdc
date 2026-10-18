@@ -1062,10 +1062,8 @@ static int lc_consumer_copy_base_config(lc_consumer_service_handle *service,
   service->logger = lc_log_client_logger(service->base_logger,
                                          service->disable_logger_sys_field);
   service->owns_logger =
-      (service->logger != NULL && service->logger != service->base_logger &&
-       service->logger != lc_log_noop_logger())
-          ? 1
-          : 0;
+      (service->logger != NULL && service->logger != service->base_logger) ? 1
+                                                                           : 0;
   if (service->logger == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate consumer service logger", NULL,
@@ -2403,8 +2401,7 @@ void lc_consumer_service_close_method(lc_consumer_service *self) {
   lc_error_cleanup(&service->fatal_error);
   pthread_cond_destroy(&service->cond);
   pthread_mutex_destroy(&service->mutex);
-  if (service->owns_logger && service->logger != NULL &&
-      service->logger != lc_log_noop_logger()) {
+  if (service->owns_logger && service->logger != NULL) {
     service->logger->destroy(service->logger);
   }
   lc_free_with_allocator(&service->allocator, service);

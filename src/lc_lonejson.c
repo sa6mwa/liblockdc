@@ -11,8 +11,22 @@
 
 static pthread_once_t lc_lonejson_thread_runtime_once = PTHREAD_ONCE_INIT;
 static pthread_key_t lc_lonejson_thread_runtime_key;
+static int lc_lonejson_thread_runtime_key_status = -1;
+typedef struct lc_lonejson_thread_runtime {
+  lonejson *runtime;
+  struct lc_lonejson_thread_runtime *next;
+} lc_lonejson_thread_runtime;
+static lc_lonejson_thread_runtime *lc_lonejson_thread_runtimes;
+static pthread_mutex_t lc_lonejson_runtime_mutex = PTHREAD_MUTEX_INITIALIZER;
+static void lc_lonejson_runtime_lock(void) {
+  (void)pthread_mutex_lock(&lc_lonejson_runtime_mutex);
+}
+static void lc_lonejson_runtime_unlock(void) {
+  (void)pthread_mutex_unlock(&lc_lonejson_runtime_mutex);
+}
 #ifdef LOCKDC_TEST_BUILD
 static pthread_key_t lc_lonejson_test_fail_thread_runtime_key;
+static int lc_lonejson_test_fail_thread_runtime_key_status = -1;
 static const char lc_lonejson_test_fail_thread_runtime_marker;
 #endif
 
@@ -65,19 +79,53 @@ void lc_lonejson_config_init(lonejson_config *config, size_t limit) {
 }
 
 static void lc_lonejson_thread_runtime_destroy(void *ptr) {
-  lonejson *runtime;
-
-  runtime = (lonejson *)ptr;
-  if (runtime != NULL) {
-    runtime->free(runtime);
+  lc_lonejson_thread_runtime *entry = ptr;
+  lc_lonejson_thread_runtime **link;
+  if (entry == NULL)
+    return;
+  lc_lonejson_runtime_lock();
+  for (link = &lc_lonejson_thread_runtimes; *link != NULL;
+       link = &(*link)->next) {
+    if (*link == entry) {
+      *link = entry->next;
+      break;
+    }
   }
+  lc_lonejson_runtime_unlock();
+  entry->runtime->free(entry->runtime);
+  lc_free_with_allocator(NULL, entry);
 }
 
 static void lc_lonejson_thread_runtime_key_init(void) {
-  (void)pthread_key_create(&lc_lonejson_thread_runtime_key,
-                           lc_lonejson_thread_runtime_destroy);
+  lc_lonejson_thread_runtime_key_status = pthread_key_create(
+      &lc_lonejson_thread_runtime_key, lc_lonejson_thread_runtime_destroy);
+  if (lc_lonejson_thread_runtime_key_status == 0 &&
+      pthread_atfork(lc_lonejson_runtime_lock, lc_lonejson_runtime_unlock,
+                     lc_lonejson_runtime_unlock) != 0) {
+    (void)pthread_key_delete(lc_lonejson_thread_runtime_key);
+    lc_lonejson_thread_runtime_key_status = -1;
+  }
 #ifdef LOCKDC_TEST_BUILD
-  (void)pthread_key_create(&lc_lonejson_test_fail_thread_runtime_key, NULL);
+  lc_lonejson_test_fail_thread_runtime_key_status =
+      pthread_key_create(&lc_lonejson_test_fail_thread_runtime_key, NULL);
+#endif
+}
+
+/* pthread key destructors do not run for the main thread at ordinary exit,
+ * nor when a DSO unloads while otherwise idle application threads survive.
+ * No thread may execute SDK code during unload. Delete the callback key and
+ * release every remaining runtime before its code/dependencies disappear. */
+static void lc_lonejson_cleanup_thread_runtimes(void)
+    __attribute__((destructor));
+static void lc_lonejson_cleanup_thread_runtimes(void) {
+  if (lc_lonejson_thread_runtime_key_status == 0) {
+    (void)pthread_key_delete(lc_lonejson_thread_runtime_key);
+    while (lc_lonejson_thread_runtimes != NULL)
+      lc_lonejson_thread_runtime_destroy(lc_lonejson_thread_runtimes);
+  }
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_lonejson_test_fail_thread_runtime_key_status == 0)
+    (void)pthread_key_delete(lc_lonejson_test_fail_thread_runtime_key);
 #endif
 }
 
@@ -91,6 +139,7 @@ lonejson *lc_engine_lonejson_runtime(lc_engine_client *client) {
 }
 
 lonejson *lc_thread_lonejson_runtime(void) {
+  lc_lonejson_thread_runtime *entry;
   lonejson *runtime;
   lonejson_config config;
   lonejson_error error;
@@ -98,12 +147,14 @@ lonejson *lc_thread_lonejson_runtime(void) {
 
   (void)pthread_once(&lc_lonejson_thread_runtime_once,
                      lc_lonejson_thread_runtime_key_init);
-  runtime = (lonejson *)pthread_getspecific(lc_lonejson_thread_runtime_key);
-  if (runtime != NULL) {
-    return runtime;
-  }
+  if (lc_lonejson_thread_runtime_key_status != 0)
+    return NULL;
+  entry = pthread_getspecific(lc_lonejson_thread_runtime_key);
+  if (entry != NULL)
+    return entry->runtime;
 #ifdef LOCKDC_TEST_BUILD
-  if (pthread_getspecific(lc_lonejson_test_fail_thread_runtime_key) != NULL) {
+  if (lc_lonejson_test_fail_thread_runtime_key_status == 0 &&
+      pthread_getspecific(lc_lonejson_test_fail_thread_runtime_key) != NULL) {
     (void)pthread_setspecific(lc_lonejson_test_fail_thread_runtime_key, NULL);
     return NULL;
   }
@@ -115,7 +166,21 @@ lonejson *lc_thread_lonejson_runtime(void) {
   if (runtime == NULL) {
     return NULL;
   }
-  (void)pthread_setspecific(lc_lonejson_thread_runtime_key, runtime);
+  entry = lc_alloc_with_allocator(NULL, sizeof(*entry));
+  if (entry == NULL) {
+    runtime->free(runtime);
+    return NULL;
+  }
+  entry->runtime = runtime;
+  if (pthread_setspecific(lc_lonejson_thread_runtime_key, entry) != 0) {
+    runtime->free(runtime);
+    lc_free_with_allocator(NULL, entry);
+    return NULL;
+  }
+  lc_lonejson_runtime_lock();
+  entry->next = lc_lonejson_thread_runtimes;
+  lc_lonejson_thread_runtimes = entry;
+  lc_lonejson_runtime_unlock();
   return runtime;
 }
 
@@ -123,8 +188,9 @@ lonejson *lc_thread_lonejson_runtime(void) {
 void lc_lonejson_test_fail_thread_runtime_once(void) {
   (void)pthread_once(&lc_lonejson_thread_runtime_once,
                      lc_lonejson_thread_runtime_key_init);
-  (void)pthread_setspecific(lc_lonejson_test_fail_thread_runtime_key,
-                            &lc_lonejson_test_fail_thread_runtime_marker);
+  if (lc_lonejson_test_fail_thread_runtime_key_status == 0)
+    (void)pthread_setspecific(lc_lonejson_test_fail_thread_runtime_key,
+                              &lc_lonejson_test_fail_thread_runtime_marker);
 }
 #endif
 

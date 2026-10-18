@@ -79,7 +79,7 @@ option(LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS
 option(LOCKDC_ENABLE_COVERAGE "Build test targets with gcov coverage instrumentation." OFF)
 option(LOCKDC_INSTALL "Enable install rules." ON)
 
-set(LOCKDC_OPENSSL_VERSION "3.6.4" CACHE STRING "Pinned OpenSSL release supplied by cpkt.")
+set(LOCKDC_OPENSSL_VERSION "3.6.5" CACHE STRING "Pinned OpenSSL release supplied by cpkt." FORCE)
 set(LOCKDC_ZLIB_VERSION "1.3.2" CACHE STRING "Pinned zlib release supplied by cpkt.")
 set(LOCKDC_CURL_VERSION "8.22.0" CACHE STRING "Pinned curl release supplied by cpkt.")
 set(LOCKDC_NGHTTP2_VERSION "1.70.0" CACHE STRING "Pinned nghttp2 release supplied by cpkt.")
@@ -90,7 +90,7 @@ set(LOCKDC_LIBLQL_VERSION "0.3.0" CACHE STRING "Pinned liblql release used for p
 set(LOCKDC_LIBLQL_ABI_VERSION "0" CACHE STRING "Pinned liblql shared-library ABI/SOVERSION." FORCE)
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
 set(LOCKDC_PSLOG_VERSION "0.12.0" CACHE STRING "Pinned libpslog release used for SDK logging." FORCE)
-set(LOCKDC_CPKT_VERSION "0.3.0" CACHE STRING "Pinned cpkt dependency bundle version." FORCE)
+set(LOCKDC_CPKT_VERSION "0.5.0" CACHE STRING "Pinned cpkt dependency bundle version." FORCE)
 set(LOCKDC_CPKTDB_VERSION "0.3.0" CACHE STRING "Pinned cpktdb database bundle version." FORCE)
 set(LOCKDC_MIN_ABI_VERSION "5")
 set(LOCKDC_ABI_VERSION "${LOCKDC_MIN_ABI_VERSION}" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc.")

@@ -144,4 +144,9 @@ if [ "$run_lua_smoke" = "0" ] || [ "$run_lua_smoke" = "OFF" ] || [ "$run_lua_smo
   exit 0
 fi
 
-"$lua_bin" "$lua_script"
+if [ "${LOCKDC_TEST_ALLOCATOR_TRACKING:-0}" = 1 ]; then
+  LOCKDC_TRACKED_LUA_SCRIPT="$lua_script" "$lua_bin" -e \
+    'assert(require("lockdc").allocator_tracking_configure(true)); dofile(os.getenv("LOCKDC_TRACKED_LUA_SCRIPT")); collectgarbage("collect")'
+else
+  "$lua_bin" "$lua_script"
+fi

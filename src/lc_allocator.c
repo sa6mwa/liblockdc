@@ -80,7 +80,8 @@ static lc_allocation_counter *lc_allocation_counter_for_thread(void) {
 }
 /* Counters outlive worker threads. Retaining no payload pointers also leaves
  * leaked blocks visible to external reachability-based memory checkers. */
-static void lc_allocation_report(void) __attribute__((destructor));
+/* Report after SDK global/thread-runtime owners have released their state. */
+static void lc_allocation_report(void) __attribute__((destructor(101)));
 static void lc_allocation_report(void) {
   size_t i;
   size_t count = 0;

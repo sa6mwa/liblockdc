@@ -3803,7 +3803,8 @@ void lc_allocator_init(lc_allocator *allocator);
  * Selects allocation tracking for the process-wide built-in allocator.
  *
  * Tracking defaults to 0 (off); pass 1 to enable exact live allocation counts
- * and requested payload bytes at ordinary exit or shared-library unload. A
+ * and requested payload bytes at ordinary exit or shared-library unload, after
+ * library-owned global resources have been released. A
  * clean tracked shutdown is silent. Custom allocator hooks, raw facade result
  * metadata, and allocations made by the host or dependencies are excluded.
  *

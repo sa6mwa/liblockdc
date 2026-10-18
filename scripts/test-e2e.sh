@@ -29,6 +29,7 @@ ctest_parallel_level=${LOCKDC_CTEST_PARALLEL_LEVEL:-4}
 
 # E2E links and loads against the configured lifecycle dependency roots only.
 unset LD_LIBRARY_PATH
+export LOCKDC_TEST_ALLOCATOR_TRACKING=1
 
 wait_for_file() {
   path=$1
@@ -75,16 +76,22 @@ wait_for_tcp() {
 }
 
 probe_lockd_endpoint() {
+  local probe_output probe_status=0
   endpoint=$1
   bundle=$2
   example_bin=$3
 
-  env \
+  probe_output=$(env \
     LOCKDC_URL="$endpoint" \
     LOCKDC_CLIENT_PEM="$bundle" \
     LOCKDC_KEY="e2e-readiness-$$-$(date +%s)" \
     LOCKDC_OWNER="e2e-readiness" \
-    "$example_bin" >/dev/null 2>&1
+    "$example_bin" 2>&1) || probe_status=$?
+  if [[ "$probe_output" == *"liblockdc allocator:"* ]]; then
+    printf '%s\n' "$probe_output" >&2
+    exit 1
+  fi
+  return "$probe_status"
 }
 
 wait_for_lockd_probe() {

@@ -1,6 +1,7 @@
 local lockdc = require("lockdc")
 
 local root = assert(os.getenv("LOCKDC_POUCH_ROOT"), "LOCKDC_POUCH_ROOT is required")
+-- Keep auxiliary stores below the scratch root cleared before every test run.
 local client, open_err = lockdc.open({
   endpoints = { "pouch://" .. root },
   default_namespace = "lua-outbox-domain",
@@ -216,7 +217,7 @@ end
 -- their close callback just as they do from read callbacks.
 do
   local source_client = assert_ok(lockdc.open({
-    endpoints = { "pouch://" .. root .. "-source-close-client" },
+    endpoints = { "pouch://" .. root .. "/source-close-client" },
     default_namespace = "lua-source-close-client",
   }), nil, "Lua source-close client creation")
   local source_lease = assert_ok(source_client:acquire({
@@ -280,7 +281,7 @@ do
     })
   end
   local preparation_client = assert_ok(lockdc.open({
-    endpoints = { "pouch://" .. root .. "-source-prepare-client" },
+    endpoints = { "pouch://" .. root .. "/source-prepare-client" },
     default_namespace = "lua-source-prepare-client",
   }), nil, "Lua source-prepare client creation")
   local preparation_lease = assert_ok(preparation_client:acquire({
@@ -298,7 +299,7 @@ do
   preparation_lease:close()
 
   local message_client = assert_ok(lockdc.open({
-    endpoints = { "pouch://" .. root .. "-message-client-close" },
+    endpoints = { "pouch://" .. root .. "/message-client-close" },
     default_namespace = "lua-message-client-close",
   }), nil, "Lua message client-close creation")
   assert_ok(message_client:enqueue({
@@ -394,7 +395,7 @@ do
   end
 
   local closing_constructor_client, closing_constructor_client_err = lockdc.open({
-    endpoints = { "pouch://" .. root .. "-request-close-client" },
+    endpoints = { "pouch://" .. root .. "/request-close-client" },
   })
   closing_constructor_client = assert_ok(closing_constructor_client,
                                          closing_constructor_client_err,
@@ -416,7 +417,7 @@ do
   end
 
   local rooted_config_client, rooted_config_client_err = lockdc.open({
-    endpoints = { "pouch://" .. root .. "-request-rooted-config" },
+    endpoints = { "pouch://" .. root .. "/request-rooted-config" },
   })
   rooted_config_client = assert_ok(rooted_config_client, rooted_config_client_err,
                                    "Lua rooted-config client creation")
@@ -441,7 +442,7 @@ do
   rooted_config_client:close()
 
   local closing_history_client, closing_history_client_err = lockdc.open({
-    endpoints = { "pouch://" .. root .. "-request-close-history" },
+    endpoints = { "pouch://" .. root .. "/request-close-history" },
   })
   closing_history_client = assert_ok(closing_history_client,
                                     closing_history_client_err,
@@ -679,7 +680,7 @@ do
   end
 
   local closing_batch_client, closing_batch_client_err = lockdc.open({
-    endpoints = { "pouch://" .. root .. "-request-close-batch" },
+    endpoints = { "pouch://" .. root .. "/request-close-batch" },
   })
   closing_batch_client = assert_ok(closing_batch_client, closing_batch_client_err,
                                    "Lua request-close batch client creation")
@@ -701,7 +702,7 @@ do
   end
 
   local closing_acquire_client, closing_acquire_client_err = lockdc.open({
-    endpoints = { "pouch://" .. root .. "-request-close-acquire" },
+    endpoints = { "pouch://" .. root .. "/request-close-acquire" },
   })
   closing_acquire_client = assert_ok(closing_acquire_client,
                                      closing_acquire_client_err,
@@ -1237,7 +1238,8 @@ do
 local stateful_outbox = assert_ok(client:new_outbox({
   namespace = "lua-outbox-stateful",
   owner = "lua-outbox-stateful-worker",
-  claim_ttl_seconds = 1,
+  -- Whole-second expiry must leave at least a full second for checkpoint I/O.
+  claim_ttl_seconds = 2,
   recovery_interval_seconds = 0,
 }), nil, "Lua stateful outbox creation")
 local stateful_txn = assert_ok(stateful_outbox:append({
@@ -1252,8 +1254,9 @@ assert_ok(stateful_txn:commit(), nil, "Lua stateful outbox commit")
 stateful_txn:close()
 local stateful_dispatcher = assert_ok(stateful_outbox:dispatcher(), nil,
                                       "Lua stateful dispatcher creation")
-local stateful_job = assert_ok(stateful_dispatcher:next_with_state(3000), nil,
-                                "Lua stateful dispatcher next")
+local stateful_job, stateful_job_err = stateful_dispatcher:next_with_state(3000)
+stateful_job = assert_ok(stateful_job, stateful_job_err,
+                         "Lua stateful dispatcher next")
 local stateful_key = stateful_job:info().outbox_key
 local stateful_lease = stateful_job:state()
 if stateful_lease == nil then
@@ -1274,9 +1277,9 @@ if #stateful_attachments.items ~= 1 or
     stateful_attachments.items[1].name ~= "checkpoint.txt" then
   error("Lua stateful checkpoint attachment was not listed")
 end
-assert_ok(stateful_job:renew(1), nil, "Lua stateful checkpoint renewal")
+assert_ok(stateful_job:renew(2), nil, "Lua stateful checkpoint renewal")
 -- Closing a claimed job models a handler process stopping before it publishes
--- a terminal outcome. The next pull waits for the known one-second claim
+-- a terminal outcome. The next pull waits for the known two-second claim
 -- expiry, then must receive the committed checkpoint rather than repeat the
 -- foreign action blindly.
 stateful_job:close()
@@ -2628,7 +2631,7 @@ end
 close_dispatcher_outbox:close()
 
 local close_query_client, close_query_open_err = lockdc.open({
-  endpoints = { "pouch://" .. root .. "-reentrant-query-client" },
+  endpoints = { "pouch://" .. root .. "/reentrant-query-client" },
   default_namespace = "lua-outbox-reentrant-query-close",
 })
 close_query_client = assert_ok(close_query_client, close_query_open_err,
@@ -2784,7 +2787,7 @@ restart_outbox:close()
 -- Closing a client is a native dispatcher stop too. Once every Lua wrapper is
 -- closed, that shutdown must release the binding's registry-held handler map.
 local binding_client = assert_ok(lockdc.open({
-  endpoints = { "pouch://" .. root .. "-binding-close" },
+  endpoints = { "pouch://" .. root .. "/binding-close" },
 }), nil, "Lua binding-close client creation")
 local binding_outbox = assert_ok(binding_client:new_outbox({
   namespace = "lua-outbox-binding-close",
@@ -2821,7 +2824,7 @@ end
 local weak_clients = setmetatable({}, { __mode = "v" })
 do
   local collected_client = assert_ok(lockdc.open({
-    endpoints = { "pouch://" .. root .. "-binding-gc" },
+    endpoints = { "pouch://" .. root .. "/binding-gc" },
   }), nil, "Lua binding-gc client creation")
   weak_clients[1] = collected_client
   local collected_outbox = assert_ok(collected_client:new_outbox({
@@ -2845,7 +2848,7 @@ end
 local captured_clients = setmetatable({}, { __mode = "v" })
 do
   local captured_client = assert_ok(lockdc.open({
-    endpoints = { "pouch://" .. root .. "-binding-captured-client" },
+    endpoints = { "pouch://" .. root .. "/binding-captured-client" },
   }), nil, "Lua captured-client binding creation")
   captured_clients[1] = captured_client
   local captured_outbox = assert_ok(captured_client:new_outbox({
@@ -2874,7 +2877,7 @@ end
 local captured_dispatchers = setmetatable({}, { __mode = "v" })
 do
   local captured_dispatcher_client = assert_ok(lockdc.open({
-    endpoints = { "pouch://" .. root .. "-binding-captured-dispatcher" },
+    endpoints = { "pouch://" .. root .. "/binding-captured-dispatcher" },
   }), nil, "Lua captured-dispatcher client creation")
   local captured_dispatcher_outbox = assert_ok(captured_dispatcher_client:new_outbox({
     namespace = "lua-outbox-binding-captured-dispatcher",
@@ -2901,7 +2904,7 @@ end
 -- coroutine-owned binding and its handler map.
 local coroutine_handlers = setmetatable({}, { __mode = "v" })
 local coroutine_client = assert_ok(lockdc.open({
-  endpoints = { "pouch://" .. root .. "-binding-coroutine" },
+  endpoints = { "pouch://" .. root .. "/binding-coroutine" },
 }), nil, "Lua coroutine binding client creation")
 local coroutine_ok, coroutine_dispatcher = coroutine.resume(coroutine.create(function()
   local coroutine_outbox = assert_ok(coroutine_client:new_outbox({
@@ -2933,7 +2936,7 @@ end
 -- its own reference until the Pouch scan and Lua callback unwind, so closure
 -- cannot invalidate the scan's state mid-visit.
 local callback_close_client = assert_ok(lockdc.open({
-  endpoints = { "pouch://" .. root .. "-query-callback-close" },
+  endpoints = { "pouch://" .. root .. "/query-callback-close" },
 }), nil, "Lua query callback-close client creation")
 local callback_close_lease = assert_ok(callback_close_client:acquire({
   namespace = "lua-query-callback-close",
