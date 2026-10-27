@@ -15,6 +15,9 @@ Client.__index = Client
 local Lease = {}
 Lease.__index = Lease
 
+local Collection = {}
+Collection.__index = Collection
+
 local Message = {}
 Message.__index = Message
 
@@ -75,6 +78,10 @@ local function wrap_lease(core_lease)
   return setmetatable({ _core = core_lease, _closed = false }, Lease)
 end
 
+local function wrap_collection(core_collection)
+  return setmetatable({ _core = core_collection }, Collection)
+end
+
 local function wrap_message(core_message)
   return setmetatable({ _core = core_message, _closed = false }, Message)
 end
@@ -132,6 +139,9 @@ end
 
 -- Every start/advance/wait delegates to the same C coordinator. An application's
 -- event loop owns readiness and coroutine scheduling; the facade never polls.
+-- Start deadlines are absolute monotonic milliseconds: nil/0 uses 30 seconds,
+-- -1 is infinite. A terminal ERR_PENDING still requires durable recovery;
+-- inspect result().done rather than treating every pending result as progress.
 function Client:xa_coordinator(config)
   local await = type(config) == "table" and rawget(config, "await") or nil
   local receiver, err, code = self._core:xa_coordinator(config)
@@ -620,8 +630,9 @@ function Client:close()
   end
 end
 
--- Creates a threadless producer. Delivery and automatic Pouch retention require
--- an explicit outbox:dispatcher(); options may attach a compatible dispatcher.
+-- Creates a threadless producer. Delivery and terminal-receipt/dead-letter
+-- reclamation require an explicit outbox:dispatcher(); options may attach one.
+-- Ordinary state and collection expiry instead use Pouch's root maintenance.
 -- Completed/inbox/command retention defaults independently to 30 days. Seconds
 -- 0 select defaults, -1 disables that type (including its count cap); positive
 -- seconds override. Their count fields are unbounded with nil, 0, or false.
@@ -641,6 +652,58 @@ function Client:new_outbox(config, options)
   end
   return wrap_outbox(outbox)
 end
+
+-- Collection entries retain their stored JSON bodies and permanent positions.
+-- Retention metadata can change separately; omitted retention preserves it.
+-- Collection retention drops the collection and all entries; entry retention
+-- deletes only that entry. Both default to no expiry and are reclaimed lazily.
+-- Collections are Pouch-only and append independently of implicit/managed XA.
+function Client:create_collection(config)
+  local value, err, code = self._core:create_collection(config)
+  if value == nil then return nil, err, code end
+  return wrap_collection(value)
+end
+
+function Client:open_collection(config)
+  local value, err, code = self._core:open_collection(config)
+  if value == nil then return nil, err, code end
+  return wrap_collection(value)
+end
+
+function Client:collection_capabilities()
+  return self._core:collection_capabilities()
+end
+
+function Client:list_collections(options, visitor)
+  return self._core:list_collections(options, visitor)
+end
+
+function Collection:describe() return self._core:describe() end
+-- nil/omitted retention_seconds preserves, 0 clears, positive integer seconds
+-- reset expiry from this commit. Collection policy does not assign entry ages.
+function Collection:metadata(request) return self._core:metadata(request) end
+function Collection:entry_metadata(position, request)
+  return self._core:entry_metadata(position, request)
+end
+-- Exactly one JSON object. Keep append_id before a single-pass upload; retry
+-- the same compact body/ID or inspect append_status after an ambiguous error.
+-- An identical retry preserves the original position and retention deadline.
+function Collection:append(request, source) return self._core:append(request, source) end
+function Collection:append_status(append_id) return self._core:append_status(append_id) end
+-- Requires a sink. Raw JSONL reaches it directly; cursor/retention facts arrive
+-- separately through on_metadata. Success is nil, result; errors also return
+-- the accepted partial result as the fourth value. All uint64 facts are strings.
+-- after (exclusive), through (inclusive), and first_n are optional canonical
+-- uint64 decimal strings. first_n selects live inputs before LQL; filtered-out
+-- inputs consume N, deleted entries do not. Resume retains the input budget;
+-- a completed window's checkpoint continues after its last examined input.
+-- Repeat all selection options when supplying either cursor purpose.
+-- Each call captures a new view: later deletion/expiry can remove entries from
+-- a resumed window. Discard incomplete JSON bytes before replaying that entry.
+function Collection:read(options, sink) return self._core:read(options, sink) end
+function Collection:delete_entry(position) return self._core:delete_entry(position) end
+function Collection:drop() return self._core:drop() end
+function Collection:close() return self._core:close() end
 
 function Client:new_history_consumer(config)
   local consumer, err = self._core:new_history_consumer(config)
@@ -680,6 +743,11 @@ function Client:acquire(req)
   return wrap_lease(lease)
 end
 
+-- Buffered callback convenience: C first spools the complete private snapshot
+-- to a temporary file, then the binding copies it into the Lua state string.
+-- Use acquire() plus lease:get(opts, sink) for transfer without staging a body.
+-- Return nil or forward SDK results for success. Failure is nil,error, a string,
+-- false, or a raised error; error tables belong in the second return value.
 function Client:acquire_for_update(req, handler)
   return normalize_result(self._core:acquire_for_update(req, function(ctx)
     local lease = wrap_lease(ctx.lease)
@@ -772,6 +840,8 @@ function Client:update(req, body)
   return self._core:update(flatten_lease_request(req), body)
 end
 
+-- retention_seconds is forwarded unchanged: omission preserves the policy,
+-- zero clears it, and positive seconds start at the transaction's commit.
 function Client:update_json(req, value)
   return self:update(with_json_content_type(req), encode_json(value))
 end
@@ -992,6 +1062,8 @@ function Lease:update(body, req)
   return self._core:update(body, req)
 end
 
+-- State retention uses the same request field as client and XA participant
+-- writes. Returned metadata reports support and the observed private deadline.
 function Lease:update_json(value, req)
   return self:update(encode_json(value), with_json_content_type(req))
 end
@@ -1559,6 +1631,8 @@ function OutboxParticipant:update(body, opts)
   return self._core:update(body, opts)
 end
 
+-- Retention belongs to the business state, independently of outbox receipts:
+-- omitted/nil preserves, 0 clears, positive seconds start at global commit.
 function OutboxParticipant:update_json(value, opts)
   return self:update(encode_json(value), with_json_content_type(opts))
 end

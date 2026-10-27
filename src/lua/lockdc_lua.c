@@ -351,7 +351,7 @@ static int lcdc_push_error(lua_State *L, const lc_error *error) {
   return 1;
 }
 
-static int lcdc_push_status_error(lua_State *L, int rc, const lc_error *error) {
+int lcdc_push_status_error(lua_State *L, int rc, const lc_error *error) {
   lua_pushnil(L);
   lcdc_push_error(L, error);
   lua_pushinteger(L, (lua_Integer)rc);
@@ -663,6 +663,28 @@ static void lcdc_set_version_field(lua_State *L, const char *name,
   lua_setfield(L, -2, name);
 }
 
+void lcdc_set_u64_decimal(lua_State *L, const char *key, uint64_t value) {
+  char bytes[20];
+  size_t offset = sizeof(bytes);
+  do {
+    bytes[--offset] = (char)('0' + value % 10U);
+    value /= 10U;
+  } while (value != 0U);
+  lua_pushlstring(L, bytes + offset, sizeof(bytes) - offset);
+  lua_setfield(L, -2, key);
+}
+
+void lcdc_set_state_retention(lua_State *L, lc_state_retention_support support,
+                              int has_expiry, lc_unix_seconds expiry) {
+  lcdc_set_string_field(L, "retention_support",
+                        support == LC_STATE_RETENTION_SUPPORTED ? "supported"
+                        : support == LC_STATE_RETENTION_UNSUPPORTED
+                            ? "unsupported"
+                            : "unknown");
+  if (has_expiry)
+    lcdc_set_version_field(L, "retention_expires_at_unix", (lc_version)expiry);
+}
+
 static void lcdc_set_bool_field(lua_State *L, const char *name, int value) {
   lua_pushboolean(L, value);
   lua_setfield(L, -2, name);
@@ -719,6 +741,40 @@ static int lcdc_opt_integer_field(lua_State *L, int index, const char *name,
     lua_pop(L, 1);
   }
   return 0;
+}
+
+/* Parse before allocating mutation arrays or entering a streaming callback. */
+static int lcdc_read_state_retention(lua_State *L, int index, int *selected,
+                                     long *out) {
+  lua_Integer value;
+  int integer = 0;
+  int valid;
+  lc_error error;
+  *selected = 0;
+  if (!lua_istable(L, index))
+    return 1;
+  lua_getfield(L, index, "retention_seconds");
+  if (lua_isnil(L, -1)) {
+    lua_pop(L, 1);
+    return 1;
+  }
+  value = lua_tointegerx(L, -1, &integer);
+  valid = lua_type(L, -1) == LUA_TNUMBER && integer && value >= 0 &&
+          (uintmax_t)value <= (uintmax_t)LONG_MAX;
+  lua_pop(L, 1);
+  if (!valid) {
+    lc_error_init(&error);
+    lc_error_set(&error, LC_ERR_INVALID, 0L,
+                 "retention_seconds must be a nonnegative integer "
+                 "representable by a C long",
+                 NULL, NULL, NULL);
+    lcdc_push_status_error(L, LC_ERR_INVALID, &error);
+    lc_error_cleanup(&error);
+    return 0;
+  }
+  *selected = 1;
+  *out = (long)value;
+  return 1;
 }
 
 static int lcdc_opt_int64_field(lua_State *L, int index, const char *name,
@@ -1009,12 +1065,31 @@ static void lcdc_free_string_array(const char ***items) {
   }
 }
 
+typedef struct lcdc_lua_sink_write_args {
+  lcdc_lua_sink *sink;
+  const void *bytes;
+  size_t count;
+} lcdc_lua_sink_write_args;
+
+/* String construction belongs inside the protected frame too: a Lua heap
+ * failure must return through native stream cleanup and release its locks. */
+static int lcdc_lua_sink_write_call(lua_State *L) {
+  lcdc_lua_sink_write_args *args;
+  args = lua_touserdata(L, 1);
+  lua_rawgeti(L, LUA_REGISTRYINDEX, args->sink->write_ref);
+  lua_pushlstring(L, (const char *)args->bytes, args->count);
+  lua_call(L, 1, 2);
+  return 2;
+}
+
 static int lcdc_lua_sink_write(lc_sink *self, const void *bytes, size_t count,
                                lc_error *error) {
   lcdc_lua_sink *sink;
   lua_State *L;
   const char *message;
   int failed;
+  int status;
+  lcdc_lua_sink_write_args args;
 
   sink = (lcdc_lua_sink *)self;
   if (sink == NULL || sink->L == NULL || sink->write_ref == LUA_NOREF) {
@@ -1023,13 +1098,23 @@ static int lcdc_lua_sink_write(lc_sink *self, const void *bytes, size_t count,
     return 0;
   }
   L = sink->L;
-  lua_rawgeti(L, LUA_REGISTRYINDEX, sink->write_ref);
-  lua_pushlstring(L, (const char *)bytes, count);
-  if (lua_pcall(L, 1, 2, 0) != 0) {
-    message = lua_tostring(L, -1);
-    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
-                       message != NULL ? message : "Lua sink write failed",
-                       NULL, NULL, NULL);
+  if (!lua_checkstack(L, 2)) {
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to reserve Lua stream callback stack", NULL,
+                       NULL, NULL);
+    return 0;
+  }
+  args.sink = sink;
+  args.bytes = bytes;
+  args.count = count;
+  lua_pushcfunction(L, lcdc_lua_sink_write_call);
+  lua_pushlightuserdata(L, &args);
+  status = lua_pcall(L, 1, 2, 0);
+  if (status != LUA_OK) {
+    message = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
+    (void)lc_error_set(
+        error, status == LUA_ERRMEM ? LC_ERR_NOMEM : LC_ERR_INVALID, 0L,
+        message != NULL ? message : "Lua sink write failed", NULL, NULL, NULL);
     lua_pop(L, 1);
     return 0;
   }
@@ -1071,8 +1156,8 @@ static void lcdc_lua_sink_close(lc_sink *self) {
   free(sink);
 }
 
-static int lcdc_sink_from_value(lua_State *L, int index, lc_sink **out,
-                                lc_error *error) {
+int lcdc_sink_from_value(lua_State *L, int index, lc_sink **out,
+                         lc_error *error) {
   const char *path;
   long fd;
   lcdc_lua_sink *sink;
@@ -1129,13 +1214,13 @@ static int lcdc_sink_from_value(lua_State *L, int index, lc_sink **out,
   sink->pub.write = lcdc_lua_sink_write;
   sink->pub.close = lcdc_lua_sink_close;
   sink->pub.impl = sink;
+  *out = &sink->pub;
   if (!lua_isnil(L, -1)) {
     sink->close_ref = luaL_ref(L, LUA_REGISTRYINDEX);
   } else {
     lua_pop(L, 1);
   }
   sink->write_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-  *out = &sink->pub;
   return LC_OK;
 }
 
@@ -1179,15 +1264,23 @@ static size_t lcdc_lua_source_read(void *context, void *buffer, size_t count,
   const char *chunk;
   const char *message;
   size_t length;
+  int status;
 
   source = (lcdc_lua_source *)context;
   L = source->L;
+  if (!lua_checkstack(L, 2)) {
+    lc_error_set(error, LC_ERR_NOMEM, 0L,
+                 "failed to reserve Lua source callback stack", NULL, NULL,
+                 NULL);
+    return 0U;
+  }
   lua_rawgeti(L, LUA_REGISTRYINDEX, source->read_ref);
   lua_pushinteger(L, (lua_Integer)count);
-  if (lua_pcall(L, 1, 2, 0) != 0) {
-    message = lua_tostring(L, -1);
-    lc_error_set(error, LC_ERR_INVALID, 0L,
-                 message != NULL ? message : "Lua source read failed", NULL,
+  status = lua_pcall(L, 1, 2, 0);
+  if (status != LUA_OK) {
+    message = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
+    lc_error_set(error, status == LUA_ERRMEM ? LC_ERR_NOMEM : LC_ERR_INVALID,
+                 0L, message != NULL ? message : "Lua source read failed", NULL,
                  NULL, NULL);
     lua_pop(L, 1);
     return 0U;
@@ -1282,8 +1375,8 @@ static void lcdc_lua_source_close(void *context) {
   free(source);
 }
 
-static int lcdc_source_from_value(lua_State *L, int index, lc_source **out,
-                                  lc_error *error) {
+int lcdc_source_from_value(lua_State *L, int index, lc_source **out,
+                           lc_error *error) {
   size_t len;
   const char *bytes;
   long fd;
@@ -1346,6 +1439,17 @@ static int lcdc_source_from_value(lua_State *L, int index, lc_source **out,
     lua_source->reset_ref = LUA_NOREF;
     lua_source->close_ref = LUA_NOREF;
     lua_source->read_ref = LUA_NOREF;
+    /* Publish ownership before registry growth can raise a Lua allocation
+     * error. Protected callers can now release this partially filled adapter.
+     */
+    rc =
+        lc_source_from_callbacks(lcdc_lua_source_read, lcdc_lua_source_reset,
+                                 lcdc_lua_source_close, lua_source, out, error);
+    if (rc != LC_OK) {
+      lua_pop(L, 3);
+      lcdc_lua_source_close(lua_source);
+      return rc;
+    }
     if (!lua_isnil(L, -1)) {
       lua_source->close_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     } else {
@@ -1357,13 +1461,7 @@ static int lcdc_source_from_value(lua_State *L, int index, lc_source **out,
       lua_pop(L, 1);
     }
     lua_source->read_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    rc =
-        lc_source_from_callbacks(lcdc_lua_source_read, lcdc_lua_source_reset,
-                                 lcdc_lua_source_close, lua_source, out, error);
-    if (rc != LC_OK) {
-      lcdc_lua_source_close(lua_source);
-    }
-    return rc;
+    return LC_OK;
   }
   lua_pop(L, 1);
   (void)error;
@@ -1383,6 +1481,9 @@ static void lcdc_push_lease_info(lua_State *L, lc_lease *lease) {
   lcdc_set_integer_field(L, "lease_expires_at_unix",
                          lease->lease_expires_at_unix);
   lcdc_set_string_field(L, "state_etag", lease->state_etag);
+  lcdc_set_state_retention(L, lease->retention_support,
+                           lease->has_retention_expires_at_unix,
+                           lease->retention_expires_at_unix);
   lcdc_set_bool_field(L, "has_query_hidden", lease->has_query_hidden);
   lcdc_set_bool_field(L, "query_hidden", lease->query_hidden);
 }
@@ -2722,6 +2823,9 @@ static int lcdc_acquire_for_update_handler_call(
   lcdc_set_version_field(L, "version", update->state.version);
   lcdc_set_integer_field(L, "fencing_token", update->state.fencing_token);
   lcdc_set_string_field(L, "correlation_id", update->state.correlation_id);
+  lcdc_set_state_retention(L, update->state.retention_support,
+                           update->state.has_retention_expires_at_unix,
+                           update->state.retention_expires_at_unix);
   lua_setfield(L, -2, "state_meta");
 
   if (lua_pcall(L, 1, 2, 0) != 0) {
@@ -2827,6 +2931,9 @@ static int lcdc_client_describe(lua_State *L) {
   lcdc_set_bool_field(L, "has_query_hidden", res.has_query_hidden);
   lcdc_set_bool_field(L, "query_hidden", res.query_hidden);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
+  lcdc_set_state_retention(L, res.retention_support,
+                           res.has_retention_expires_at_unix,
+                           res.retention_expires_at_unix);
   lc_describe_res_cleanup(&res);
   lc_error_cleanup(&error);
   return 1;
@@ -2883,6 +2990,9 @@ static int lcdc_client_get(lua_State *L) {
   lcdc_set_version_field(L, "version", res.version);
   lcdc_set_integer_field(L, "fencing_token", res.fencing_token);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
+  lcdc_set_state_retention(L, res.retention_support,
+                           res.has_retention_expires_at_unix,
+                           res.retention_expires_at_unix);
   lc_get_res_cleanup(&res);
   lc_error_cleanup(&error);
   return 2;
@@ -2904,6 +3014,10 @@ static int lcdc_client_update(lua_State *L) {
   lc_error_init(&error);
   src = NULL;
   luaL_checktype(L, 2, LUA_TTABLE);
+  if (!lcdc_read_state_retention(L, 2, &req.has_retention_seconds,
+                                 &req.retention_seconds)) {
+    return 3;
+  }
   lcdc_parse_lease_ref(L, 2, &req.lease);
   req.if_state_etag = lcdc_opt_string_field(L, 2, "if_state_etag");
   if (lcdc_opt_version_field(L, 2, "if_version", &req.if_version)) {
@@ -2935,6 +3049,9 @@ static int lcdc_client_update(lua_State *L) {
   lcdc_set_string_field(L, "new_state_etag", res.new_state_etag);
   lcdc_set_integer_field(L, "bytes", res.bytes);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
+  lcdc_set_state_retention(L, res.retention_support,
+                           res.has_retention_expires_at_unix,
+                           res.retention_expires_at_unix);
   lc_update_res_cleanup(&res);
   lc_error_cleanup(&error);
   return 1;
@@ -2957,6 +3074,10 @@ static int lcdc_client_mutate(lua_State *L) {
   mutations = NULL;
   mutation_count = 0U;
   luaL_checktype(L, 2, LUA_TTABLE);
+  if (!lcdc_read_state_retention(L, 2, &req.has_retention_seconds,
+                                 &req.retention_seconds)) {
+    return 3;
+  }
   lcdc_parse_lease_ref(L, 2, &req.lease);
   lcdc_parse_string_array(L, 2, "mutations", &mutations, &mutation_count);
   req.mutations = mutations;
@@ -2979,6 +3100,9 @@ static int lcdc_client_mutate(lua_State *L) {
   lcdc_set_string_field(L, "new_state_etag", res.new_state_etag);
   lcdc_set_integer_field(L, "bytes", res.bytes);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
+  lcdc_set_state_retention(L, res.retention_support,
+                           res.has_retention_expires_at_unix,
+                           res.retention_expires_at_unix);
   lc_mutate_res_cleanup(&res);
   lc_error_cleanup(&error);
   return 1;
@@ -2997,6 +3121,10 @@ static int lcdc_client_metadata(lua_State *L) {
   memset(&res, 0, sizeof(res));
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
+  if (!lcdc_read_state_retention(L, 2, &req.has_retention_seconds,
+                                 &req.retention_seconds)) {
+    return 3;
+  }
   lcdc_parse_lease_ref(L, 2, &req.lease);
   if (lcdc_opt_boolean_field(L, 2, "query_hidden", &req.query_hidden)) {
     req.has_query_hidden = 1;
@@ -3019,6 +3147,9 @@ static int lcdc_client_metadata(lua_State *L) {
   lcdc_set_bool_field(L, "has_query_hidden", res.has_query_hidden);
   lcdc_set_bool_field(L, "query_hidden", res.query_hidden);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
+  lcdc_set_state_retention(L, res.retention_support,
+                           res.has_retention_expires_at_unix,
+                           res.retention_expires_at_unix);
   lc_metadata_res_cleanup(&res);
   lc_error_cleanup(&error);
   return 1;
@@ -4933,6 +5064,9 @@ static int lcdc_lease_get(lua_State *L) {
   lcdc_set_version_field(L, "version", res.version);
   lcdc_set_integer_field(L, "fencing_token", res.fencing_token);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
+  lcdc_set_state_retention(L, res.retention_support,
+                           res.has_retention_expires_at_unix,
+                           res.retention_expires_at_unix);
   lc_get_res_cleanup(&res);
   lc_error_cleanup(&error);
   return 2;
@@ -4952,6 +5086,10 @@ static int lcdc_lease_update(lua_State *L) {
   src = NULL;
   if (!lua_isnoneornil(L, 3)) {
     luaL_checktype(L, 3, LUA_TTABLE);
+    if (!lcdc_read_state_retention(L, 3, &opts.has_retention_seconds,
+                                   &opts.retention_seconds)) {
+      return 3;
+    }
     opts.if_state_etag = lcdc_opt_string_field(L, 3, "if_state_etag");
     if (lcdc_opt_version_field(L, 3, "if_version", &opts.if_version)) {
       opts.has_if_version = 1;
@@ -4999,6 +5137,10 @@ static int lcdc_lease_mutate(lua_State *L) {
   mutations = NULL;
   mutation_count = 0U;
   luaL_checktype(L, 2, LUA_TTABLE);
+  if (!lcdc_read_state_retention(L, 2, &req.has_retention_seconds,
+                                 &req.retention_seconds)) {
+    return 3;
+  }
   lcdc_parse_string_array(L, 2, "mutations", &mutations, &mutation_count);
   req.mutations = mutations;
   req.mutation_count = mutation_count;
@@ -5035,6 +5177,10 @@ static int lcdc_lease_mutate_local(lua_State *L) {
   mutations = NULL;
   mutation_count = 0U;
   luaL_checktype(L, 2, LUA_TTABLE);
+  if (!lcdc_read_state_retention(L, 2, &req.update.has_retention_seconds,
+                                 &req.update.retention_seconds)) {
+    return 3;
+  }
   lcdc_parse_string_array(L, 2, "mutations", &mutations, &mutation_count);
   req.mutations = mutations;
   req.mutation_count = mutation_count;
@@ -5070,6 +5216,10 @@ static int lcdc_lease_metadata(lua_State *L) {
   lc_metadata_req_init(&req);
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
+  if (!lcdc_read_state_retention(L, 2, &req.has_retention_seconds,
+                                 &req.retention_seconds)) {
+    return 3;
+  }
   if (lcdc_opt_boolean_field(L, 2, "query_hidden", &req.query_hidden)) {
     req.has_query_hidden = 1;
   }
@@ -5703,6 +5853,9 @@ static int lcdc_push_outbox_participant_info(
     return LC_ERR_INVALID;
   }
   lcdc_set_string_field(L, "state_etag", participant->state_etag);
+  lcdc_set_state_retention(L, participant->retention_support,
+                           participant->has_retention_expires_at_unix,
+                           participant->retention_expires_at_unix);
   return LC_OK;
 }
 
@@ -7724,6 +7877,9 @@ static int lcdc_outbox_participant_get(lua_State *L) {
   }
   lcdc_set_integer_field(L, "fencing_token", result.fencing_token);
   lcdc_set_string_field(L, "correlation_id", result.correlation_id);
+  lcdc_set_state_retention(L, result.retention_support,
+                           result.has_retention_expires_at_unix,
+                           result.retention_expires_at_unix);
   lc_get_res_cleanup(&result);
   lc_error_cleanup(&error);
   return 2;
@@ -7742,6 +7898,11 @@ static int lcdc_outbox_participant_update(lua_State *L) {
   participant = NULL;
   if (!lua_isnoneornil(L, 3)) {
     luaL_checktype(L, 3, LUA_TTABLE);
+    if (!lcdc_read_state_retention(L, 3, &opts.has_retention_seconds,
+                                   &opts.retention_seconds)) {
+      lcdc_outbox_txn_note_staging_failure(ud->transaction_ud);
+      return 3;
+    }
     opts.if_state_etag = lcdc_opt_string_field(L, 3, "if_state_etag");
     if (lcdc_opt_version_field(L, 3, "if_version", &opts.if_version)) {
       opts.has_if_version = 1;
@@ -7784,6 +7945,11 @@ static int lcdc_outbox_participant_mutate(lua_State *L) {
 
   lc_mutate_req_init(&request);
   luaL_checktype(L, 2, LUA_TTABLE);
+  if (!lcdc_read_state_retention(L, 2, &request.has_retention_seconds,
+                                 &request.retention_seconds)) {
+    lcdc_outbox_txn_note_staging_failure(ud->transaction_ud);
+    return 3;
+  }
   lcdc_parse_string_array(L, 2, "mutations", &mutations, &mutation_count);
   request.mutations = mutations;
   request.mutation_count = mutation_count;
@@ -7818,6 +7984,11 @@ static int lcdc_outbox_participant_mutate_local(lua_State *L) {
 
   lc_mutate_local_req_init(&request);
   luaL_checktype(L, 2, LUA_TTABLE);
+  if (!lcdc_read_state_retention(L, 2, &request.update.has_retention_seconds,
+                                 &request.update.retention_seconds)) {
+    lcdc_outbox_txn_note_staging_failure(ud->transaction_ud);
+    return 3;
+  }
   lcdc_parse_string_array(L, 2, "mutations", &mutations, &mutation_count);
   request.mutations = mutations;
   request.mutation_count = mutation_count;
@@ -7855,6 +8026,11 @@ static int lcdc_outbox_participant_metadata(lua_State *L) {
 
   lc_metadata_req_init(&request);
   luaL_checktype(L, 2, LUA_TTABLE);
+  if (!lcdc_read_state_retention(L, 2, &request.has_retention_seconds,
+                                 &request.retention_seconds)) {
+    lcdc_outbox_txn_note_staging_failure(ud->transaction_ud);
+    return 3;
+  }
   if (lcdc_opt_boolean_field(L, 2, "query_hidden", &request.query_hidden)) {
     request.has_query_hidden = 1;
   }
@@ -8334,6 +8510,10 @@ static int lcdc_outbox_job_dead_letter(lua_State *L) {
 }
 
 static const luaL_Reg lcdc_client_methods[] = {
+    {"create_collection", lcdc_collection_create},
+    {"open_collection", lcdc_collection_open},
+    {"list_collections", lcdc_collection_list},
+    {"collection_capabilities", lcdc_collection_capabilities},
     {"xa_store", lcdc_xa_store_open},
     {"xa_coordinator", lcdc_xa_open},
     {"info", lcdc_client_info},
@@ -8525,6 +8705,7 @@ int luaopen_lockdc_core(lua_State *L) {
       {NULL, NULL}};
 
   lcdc_xa_install(L);
+  lcdc_collections_install(L);
   lcdc_create_metatable(L, LCDC_CLIENT_MT, lcdc_client_methods, lcdc_client_gc);
   lcdc_create_metatable(L, LCDC_LEASE_MT, lcdc_lease_methods, lcdc_lease_gc);
   lcdc_create_metatable(L, LCDC_MESSAGE_MT, lcdc_message_methods,

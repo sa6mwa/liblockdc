@@ -74,7 +74,7 @@ for test_name in "${valgrind_tests[@]}"; do
 
   test_cases=("${CMOCKA_TEST_FILTER:-*}")
   if [ "$test_name" = lc_unit_outbox ] && [ -z "${CMOCKA_TEST_FILTER:-}" ]; then
-    # Native/QEMU suites own the full outbox inventory and timing contracts.
+    # Native sanitizers own the full outbox inventory and timing contracts.
     # Instrument the shutdown/ownership regressions without timing load cases.
     test_cases=(
       test_pouch_dispatcher_wait_includes_worker_release

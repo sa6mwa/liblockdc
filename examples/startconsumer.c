@@ -267,7 +267,7 @@ static int handle_message(void *context, lc_consumer_message *delivery,
   snprintf(state_json, sizeof(state_json), "{\"counter\":%ld}", counter);
   counter_doc.counter = (lonejson_int64)counter;
   rc = delivery->state->save(delivery->state, &example_counter_map,
-                             &counter_doc, error);
+                             &counter_doc, NULL, error);
   if (rc != LC_OK) {
     return rc;
   }

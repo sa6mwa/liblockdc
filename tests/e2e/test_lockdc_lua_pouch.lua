@@ -1144,6 +1144,61 @@ if #unregistered.endpoints ~= 0 then
   error("Lua TC RM unregister did not remove its endpoint")
 end
 
+-- The installed facade links against the public SDK for ordered collections,
+-- including raw payload delivery and both retention metadata targets.
+do
+  local journal = assert(client:create_collection({ namespace = namespace,
+    name = "installed-journal", retention_seconds = 3600 }))
+  local identity = journal:describe().collection_id
+  local first = assert(journal:append({ append_id = "one", retention_seconds = 60 },
+    '{ "collection_event" : 1 }'))
+  assert(first.position == "1" and first.retention_support == "supported")
+  assert(journal:entry_metadata("1", { retention_seconds = 0 }).etag == first.etag)
+  assert(journal:metadata({ retention_seconds = 0 }).retention_expires_at_unix == 0)
+  assert(journal:append({ append_id = "two" }, '{"collection_event":2}').position == "2")
+  local bytes, positions = {}, {}
+  local streamed, result, code = journal:read({ on_metadata = function(meta)
+    if meta.kind == "entry" then
+      positions[#positions + 1] = meta.position
+      assert(table.concat(bytes):sub(-1) == "\n")
+      assert(meta.retention_expires_at_unix == 0)
+    end
+  end }, { write = function(chunk) bytes[#bytes + 1] = chunk end })
+  assert(streamed == nil and code == nil and result.complete)
+  assert(result.completed_records == "2" and result.upper_position == "2")
+  assert(table.concat(positions, ",") == "1,2")
+  assert(table.concat(bytes) == '{"collection_event":1}\n{"collection_event":2}\n')
+  local checkpoint = result.checkpoint_cursor
+  assert(journal:append({ append_id = "three" }, '{"collection_event":3}').position == "3")
+  bytes = {}
+  streamed, result, code = journal:read({ cursor = checkpoint },
+    { write = function(chunk) bytes[#bytes + 1] = chunk end })
+  assert(streamed == nil and code == nil and result.completed_records == "1")
+  assert(table.concat(bytes) == '{"collection_event":3}\n')
+  bytes = {}
+  streamed, result, code = journal:read({ selector_lql = "eq{field=/collection_event,value=2}" },
+    { write = function(chunk) bytes[#bytes + 1] = chunk end })
+  assert(streamed == nil and code == nil and result.completed_records == "1")
+  assert(table.concat(bytes) == '{"collection_event":2}\n')
+  assert(journal:delete_entry("1").deleted)
+  local retry = assert(journal:append({ append_id = "one", retention_seconds = 600 },
+    '{"collection_event":1}'))
+  assert(retry.duplicate and retry.deleted and retry.position == "1")
+  assert(journal:append_status("one").state == "deleted")
+  local peer = assert(client:open_collection({ namespace = namespace, name = "installed-journal" }))
+  assert(peer:describe().collection_id == identity)
+  assert(journal:drop())
+  local stale, stale_err, stale_code = peer:describe()
+  assert(stale == nil and stale_err.server_code == "collection_stale" and stale_code ~= nil)
+  peer:close()
+  journal:close()
+  journal = assert(client:create_collection({ namespace = namespace, name = "installed-journal" }))
+  assert(journal:describe().collection_id ~= identity)
+  assert(journal:describe().live_count == "0")
+  assert(journal:drop())
+  journal:close()
+end
+
 local flush, flush_err = client:flush_index({ namespace = namespace, mode = "wait" })
 if flush == nil then
   client:close()

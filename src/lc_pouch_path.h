@@ -15,6 +15,8 @@ int lc_pouch_path_fsync_directory(const char *path, const char *message,
                                   lc_error *error);
 int lc_pouch_path_write_text_file(const char *path, const char *text,
                                   lc_error *error);
+int lc_pouch_path_write_bytes_file(const char *path, const void *bytes,
+                                   size_t length, lc_error *error);
 int lc_pouch_path_write_text_file_defer_dirsync(const char *path,
                                                 const char *text,
                                                 lc_error *error);

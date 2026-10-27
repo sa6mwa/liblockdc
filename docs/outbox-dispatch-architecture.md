@@ -24,7 +24,8 @@ This cutover splits those roles:
 
 The dispatcher cutover shipped in ABI generation 4 after ABI 3. The terminal
 retention configuration and statistics extend public C layouts and advance
-the current ABI to generation 5 from released ABI 4. Future incompatible
+the ABI to generation 5 from released ABI 4. Per-object state retention advances
+it to generation 6 from released ABI 5. Future incompatible
 public C layout changes require a new ABI generation. There is no compatibility
 constructor and no legacy implicit-thread mode.
 

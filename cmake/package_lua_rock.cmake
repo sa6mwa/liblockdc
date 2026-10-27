@@ -69,6 +69,7 @@ endif()
 file(COPY "${LOCKDC_ROOT}/lua/lockdc/init.lua" DESTINATION "${lockdc_lua_source_root}/lua/lockdc")
 file(COPY "${LOCKDC_ROOT}/src/lua/lockdc_lua.c" DESTINATION "${lockdc_lua_source_root}/src/lua")
 file(COPY
+    "${LOCKDC_ROOT}/src/lua/lockdc_collections_lua.c"
     "${LOCKDC_ROOT}/src/lua/lockdc_xa_lua.c"
     "${LOCKDC_ROOT}/src/lua/lockdc_xa_resource_lua.c"
     "${LOCKDC_ROOT}/src/lua/lockdc_xa_provider_lua.c"
@@ -100,9 +101,12 @@ set(lockdc_lua_documentation_sources
     docs/postgres.md
     docs/pouch-open-settings-api.md
     docs/pouch-storage.md
+    docs/collections.md
+    docs/state-retention.md
     docs/worst-case-scenario.md
     examples/lua/README.md
-    examples/outbox_producer.c)
+    examples/outbox_producer.c
+    examples/collection_journal.c)
 file(GLOB lockdc_lua_example_sources RELATIVE "${LOCKDC_ROOT}"
     "${LOCKDC_ROOT}/examples/lua/*.lua")
 list(APPEND lockdc_lua_documentation_sources ${lockdc_lua_example_sources})
@@ -127,6 +131,7 @@ file(WRITE "${lockdc_lua_source_root}/RELEASE_MANIFEST"
     "scripts/build_lua_rock.sh\n"
     "scripts/build_postgres_lua_rock.sh\n"
     "src/lua/lockdc_lua.c\n"
+    "src/lua/lockdc_collections_lua.c\n"
     "src/lua/lockdc_xa_lua.c\n"
     "src/lua/lockdc_xa_resource_lua.c\n"
     "src/lua/lockdc_xa_provider_lua.c\n"

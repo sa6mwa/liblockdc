@@ -349,6 +349,12 @@ int lc_pouch_path_write_text_file(const char *path, const char *text,
       path, text, text != NULL ? strlen(text) : 0U, 1, 1, error);
 }
 
+int lc_pouch_path_write_bytes_file(const char *path, const void *bytes,
+                                   size_t length, lc_error *error) {
+  return lc_pouch_path_write_bytes_file_impl(path, (const char *)bytes, length,
+                                             1, 1, error);
+}
+
 int lc_pouch_path_write_text_file_defer_dirsync(const char *path,
                                                 const char *text,
                                                 lc_error *error) {

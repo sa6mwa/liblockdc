@@ -45,6 +45,12 @@ file(READ "${test_root}/core/tests/unit/CTestTestfile.cmake" unit_tests)
 if(unit_tests MATCHES "lc_unit_cpkt_postgres_checked")
     message(FATAL_ERROR "Disabled PostgreSQL still registered its facade test")
 endif()
+execute_process(COMMAND "${CMAKE_COMMAND}" --build "${test_root}/core"
+    --target lc_public_header_core --parallel 1
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "Core public-header check required absent cpktdb\n${output}\n${error}")
+endif()
 execute_process(COMMAND "${CMAKE_COMMAND}" ${configure_args}
     -B "${test_root}/provider" -DLOCKDC_BUILD_POSTGRES=ON
     RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)

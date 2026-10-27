@@ -8,6 +8,39 @@ else()
   return()
 endif()
 
+# Compile public headers as standalone C89 translation units, outside the SDK
+# libraries. Their exact database entries also keep clangd from borrowing an
+# unrelated source target's dependency context when opening a header directly.
+function(lc_add_public_header_check target header library)
+  set(source "${CMAKE_SOURCE_DIR}/${header}")
+  set_source_files_properties("${source}" PROPERTIES
+    LANGUAGE C HEADER_FILE_ONLY FALSE)
+  add_library(${target} OBJECT "${source}")
+  lc_configure_c_target(${target})
+  target_link_libraries(${target} PRIVATE ${library})
+endfunction()
+
+if(TARGET lc_static)
+  lc_add_public_header_check(lc_public_header_core include/lc/lc.h lc_static)
+elseif(TARGET lc_shared)
+  lc_add_public_header_check(lc_public_header_core include/lc/lc.h lc_shared)
+endif()
+if(TARGET lc_postgres_static)
+  lc_add_public_header_check(lc_public_header_postgres include/lc/postgres.h lc_postgres_static)
+elseif(TARGET lc_postgres_shared)
+  lc_add_public_header_check(lc_public_header_postgres include/lc/postgres.h lc_postgres_shared)
+endif()
+
+if(CMAKE_BINARY_DIR STREQUAL "${CMAKE_SOURCE_DIR}/build/debug")
+  add_test(NAME clangd_public_api_test COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+    -DLOCKDC_BUILD_POSTGRES=${LOCKDC_BUILD_POSTGRES}
+    -P "${CMAKE_SOURCE_DIR}/tests/clangd_public_api_test.cmake")
+  set_tests_properties(clangd_public_api_test PROPERTIES
+    LABELS "unit;local;lifecycle-host;editor" RUN_SERIAL TRUE TIMEOUT 90)
+endif()
+
 if(LOCKDC_EXTERNAL_ROOT)
   add_test(NAME lonejson_dependency_interface
     COMMAND "${CMAKE_COMMAND}"
@@ -107,6 +140,7 @@ foreach(contract release_test_selection valgrind_targeting)
   add_test(NAME ${contract}_test COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR} -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
     -DLOCKDC_TARGET_LIBC=${LOCKDC_TARGET_LIBC}
+    -DLOCKDC_BUILD_TYPE=${CMAKE_BUILD_TYPE}
     -P "${CMAKE_SOURCE_DIR}/tests/${contract}_test.cmake")
   set_tests_properties(${contract}_test PROPERTIES
     LABELS "unit;local;lifecycle-host" RUN_SERIAL TRUE TIMEOUT 20)
@@ -292,6 +326,7 @@ if(TARGET lockdc_lua_core AND LOCKDC_LUA_RUNNABLE)
   add_executable(lc_lua_xa_test
     integration/test_lua_xa.c
     ${CMAKE_SOURCE_DIR}/src/lua/lockdc_lua.c
+    ${CMAKE_SOURCE_DIR}/src/lua/lockdc_collections_lua.c
     ${CMAKE_SOURCE_DIR}/src/lua/lockdc_xa_lua.c
     ${CMAKE_SOURCE_DIR}/src/lua/lockdc_xa_resource_lua.c
     ${CMAKE_SOURCE_DIR}/src/lua/lockdc_xa_provider_lua.c)
@@ -313,6 +348,24 @@ if(TARGET lockdc_lua_core AND LOCKDC_LUA_RUNNABLE)
       -P ${CMAKE_SOURCE_DIR}/tests/lua_xa_test.cmake)
   set_tests_properties(lua_xa_test PROPERTIES
     RUN_SERIAL TRUE TIMEOUT 30 LABELS "unit;local;lua;xa")
+  add_test(NAME lua_state_retention_test
+    COMMAND ${CMAKE_COMMAND}
+      -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+      -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+      -DLOCKDC_LUA_XA_BINARY=$<TARGET_FILE:lc_lua_xa_test>
+      -DLOCKDC_LUA_TEST_CASE=retention
+      -P ${CMAKE_SOURCE_DIR}/tests/lua_xa_test.cmake)
+  set_tests_properties(lua_state_retention_test PROPERTIES
+    RUN_SERIAL TRUE TIMEOUT 30 LABELS "unit;local;lua;retention")
+  add_test(NAME lua_collections_test
+    COMMAND ${CMAKE_COMMAND}
+      -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+      -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+      -DLOCKDC_LUA_XA_BINARY=$<TARGET_FILE:lc_lua_xa_test>
+      -DLOCKDC_LUA_TEST_CASE=collections
+      -P ${CMAKE_SOURCE_DIR}/tests/lua_xa_test.cmake)
+  set_tests_properties(lua_collections_test PROPERTIES
+    RUN_SERIAL TRUE TIMEOUT 30 LABELS "unit;local;lua;collections")
   add_test(NAME lua_binding_core_smoke_test
     COMMAND "${LOCKDC_LUA_BIN}" "${CMAKE_SOURCE_DIR}/tests/lua/test_lockdc_core_smoke.lua"
   )

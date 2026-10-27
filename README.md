@@ -1,12 +1,17 @@
 # liblockdc
 
-`liblockdc` is a C89/C90 client library for `lockd`. Its installed header is
-also usable from C++98-or-later applications through C linkage. It provides a
-receiver-function public API for client, lease, queue delivery, attachment,
-management, and consumer-service handles, plus stream-based JSON and payload
-I/O. The project ships both static and shared libraries, a local development
-environment, a cross-architecture release pipeline, and dependency-backed
-unit, e2e, sanitizer, coverage, fuzz, and benchmark targets.
+`liblockdc` is a C89/C90 client library for `lockd`, providing persistent state,
+leases, queues, attachments, queries, and built-in implicit XA transactions
+with coordinated commit, rollback, and recovery. It also includes Pouch, an
+embedded storage engine that makes these capabilities available directly
+inside your application without a separate `lockd` server.
+
+Its installed header is also usable from C++98-or-later applications through C
+linkage. It provides a receiver-function public API for client, lease, queue
+delivery, attachment, management, and consumer-service handles, plus stream-based
+JSON and payload I/O. The project ships both static and shared libraries, a
+local development environment, a cross-architecture release pipeline, and
+dependency-backed unit, e2e, sanitizer, coverage, fuzz, and benchmark targets.
 
 ## Supported targets
 
@@ -27,6 +32,8 @@ The library itself is delivered as:
 
 ## Capabilities
 
+- built-in implicit XA transactions for state and attachment changes, with
+  coordinated commit, rollback, and recovery
 - mTLS client authentication through a combined `client.pem` bundle
 - HTTP/1.1 and HTTP/2 transport through bundled `libcurl` and `nghttp2`
 - Unix domain socket transport support for local `mem://` deployments
@@ -39,8 +46,8 @@ The library itself is delivered as:
 - durable command-receipt, inbox, outbox, dispatcher, retry, reconciliation,
   and dead-letter outbox receivers
 - integrated SDK logging through `libpslog`
-- managed XA coordination across local Pouch and PostgreSQL participants,
-  with native two-phase completion and recovery
+- optional PostgreSQL participation in the existing XA coordinator, with native
+  two-phase completion and recovery
 
 The durable transactional messaging model and endpoint constraints are
 specified in [the outbox design](docs/inbox-outbox.md). The threadless
@@ -53,6 +60,11 @@ attachment transactions, with optional inbox/outbox composition. See the
 [Lua transaction facade](docs/lua.md#optional-postgresql-participation). The coordinator
 uses a local Pouch journal; remote lockd participation is unsupported.
 See [release notes](CHANGELOG.md) for changes and ABI requirements.
+[Ordered collections](docs/collections.md) provide Pouch journals with immutable
+JSON bodies, permanent positions, LQL filtering, raw ordered streaming, and
+optional collection/entry retention metadata through the C and Lua APIs. The
+same contract defines a future lockd server interface; remote collections are
+currently unsupported.
 The executable direct deployment pair is
 [`examples/outbox_producer.c`](examples/outbox_producer.c) and
 [`examples/lua/outbox_dispatcher.lua`](examples/lua/outbox_dispatcher.lua):
@@ -95,7 +107,7 @@ Common legacy options are:
   bounded query-index publication: exclusive roots publish at the document
   threshold after all pending leases or transactions have completed, while
   shared roots publish asynchronously
-- `background_compaction=false` to disable the default idle-debounced
+- `background_compaction=false` to disable the default cadence-based
   compaction worker, and `disable_compaction_throttling=true` to remove its
   default throughput bound
 - `terminal_reclaim_min_bytes=<u64>` to set the minimum active-segment size
@@ -108,6 +120,20 @@ Common legacy options are:
   disables local index maintenance and makes implicit queries use scans;
   explicit indexed queries and `flush_index` are unavailable. Pouch outbox
   recovery and dead-letter management continue through bounded scan queries.
+
+State writes and metadata updates accept optional per-object retention through
+the same C and Lua APIs for Pouch and remote lockd. Omission preserves the
+policy, explicit zero clears it, and positive seconds start at commit. Expired
+Pouch objects remain ordinary state until the existing maintenance worker
+deletes them. The default maintenance cadence is 30 minutes; disabling background
+compaction also disables automatic expiry cleanup. Remote results advertise
+support when available; a successful write without retention metadata does not
+confirm that an older server applied the option. Older servers remain usable
+without retention. See [state retention](docs/state-retention.md).
+
+Version 0.22.0 advances the core shared-library ABI from 5 to **6**. Rebuild C
+consumers and the optional PostgreSQL provider; mapped C `save()` calls also
+need the new options argument. See [upgrade instructions](CHANGELOG.md#upgrading-from-021x).
 
 The public API remains the same receiver-function SDK surface for remote and
 Pouch clients. State bodies, queue payloads, attachments, scan output,
@@ -174,7 +200,7 @@ That command provisions the pinned Linux host MIG helper in the shared toolchain
 cache, without obtaining Apple content. Darwin configure requires both tools;
 MIG is build tooling and is excluded from SDK packages.
 
-The pinned `cpkt` 0.5.0 GNU SDKs require glibc 2.43 or newer at
+The pinned `cpkt` 0.5.2 GNU SDKs require glibc 2.43 or newer at
 deployment. This does not change the `liblockdc` public ABI, but deployments
 using the shared GNU SDK must upgrade their runtime accordingly. Development
 executables, tests, examples, Lua module checks, and SDK consumer probes run
@@ -185,8 +211,8 @@ The separately pinned dependencies are:
 
 | Dependency | Version | Use |
 | --- | --- | --- |
-| [cpkt](https://github.com/c89systems/cpkt) | 0.5.0 | Core SDK dependencies and Lua runtime |
-| [cpktdb](https://github.com/c89systems/cpktdb) | 0.3.0 | Optional PostgreSQL C89 facade and database SDK |
+| [cpkt](https://github.com/c89systems/cpkt) | 0.5.2 | Core SDK dependencies and Lua runtime |
+| [cpktdb](https://github.com/c89systems/cpktdb) | 0.3.1 | Optional PostgreSQL C89 facade and database SDK |
 | lonejson | 0.45.0 (ABI 26) | JSON parsing, mapping, and streaming |
 | libpslog | 0.12.0 | SDK diagnostics |
 | liblql | 0.3.0 | Pouch query support |
@@ -199,8 +225,8 @@ Core and database SDKs remain in separate `cpkt/install` and `cpktdb/install`
 prefixes under each target's dependency root. cpktdb records its exact core build
 pin as provenance and requests a compatible minimum core through CMake. Core's
 declared compatibility floor governs independent upgrades; matching major/minor
-versions alone do not establish compatibility. cpkt 0.5.0 accepts baselines from
-0.2.0 through 0.5.0; cpktdb 0.3.0 requires at least 0.3.0. Target and payload
+versions alone do not establish compatibility. cpkt 0.5.2 accepts baselines from
+0.2.0 through 0.5.2; cpktdb 0.3.1 requires at least 0.5.1. Target and payload
 integrity checks remain enforced. `scripts/deps.sh` pins each provider release and
 checksum independently; cpktdb is acquired/discovered only when PostgreSQL is
 enabled. Consumers use the official imported targets. pkg-config consumers must
@@ -219,6 +245,14 @@ make build
 `make build` and `make test-debug` use the sanitizer-instrumented debug
 preset. Third-party dependencies are still reused from the release-built host
 dependency cache.
+
+This native build also prepares clangd: `.clangd` discovers
+`build/debug/compile_commands.json`, and standalone C89 header checks supply
+exact core/provider commands when opening public headers directly. Run
+`make build` after `make clean` to restore the dependency headers, generated
+headers, and compilation database. For the optional PostgreSQL header, prepare
+its SDK and enable `LOCKDC_BUILD_POSTGRES=ON` as described above; keep that
+selection when running `make build`. No separate editor SDK is required.
 
 Run the host release suites for the shipped x86_64 GNU and musl builds:
 
@@ -252,10 +286,11 @@ hardening work, not an everyday functional invariant. Performance workloads
 belong to the explicit `make bench-gate` command. The complete artifact
 rehearsal remains `make release`.
 
-`make prerelease-hardening` is the longer pre-release layer. It keeps the
-normal release gate bounded, then adds native benchmarks, the Pouch-vs-lockd
-performance thresholds, the finite multi-mode Pouch core churn soak, reclaim
-proof, shared-root contention coverage, full fuzzing, and the release matrix.
+`make prerelease-hardening` runs ordinary prerelease, including full fuzzing,
+then adds native benchmarks, the Pouch-vs-lockd performance thresholds, the
+finite multi-mode Pouch core churn soak, reclaim proof, and outbox reconciliation
+hardening. Run `make prerelease-hardening release-matrix` when the same exercise
+also needs the shipped target/package matrix.
 The Pouch-vs-lockd performance comparison measures every core storage
 operation separately: acquire, update and stale-precondition rejection,
 release, public and leased reads, attachment write/read, queue delivery, all
@@ -344,7 +379,7 @@ generated state with the candidate version and intended optional capabilities:
 
 ```bash
 make clean
-LOCKDC_VERSION_OVERRIDE=0.20.0 LOCKDC_BUILD_POSTGRES=ON \
+LOCKDC_VERSION_OVERRIDE=0.22.0 LOCKDC_BUILD_POSTGRES=ON \
   make prerelease release-matrix
 ```
 
@@ -377,8 +412,31 @@ longer performance, churn, and compaction campaigns remain the explicit
 dependency caches for a faster release matrix/package rerun.
 
 During a full release, Debug owns the `lifecycle-host` source and host-fixture
-checks. GNU/musl Release lanes retain configuration-dependent runtime, SDK and
-ABI checks. The cpkt compatibility fixture consumes the same GNU dependency
+checks and complete behavioral tables. The three large Pouch, outbox and
+collection suites use explicit portability cases in optimized GNU/musl and
+QEMU lanes; their lists live in `tests/unit/portability.cmake`. These retain
+storage-format and integer-width boundaries, crash/restart recovery, compaction,
+durable synchronization, shared writers, retention, collection selection and
+ownership regressions. Smaller unit suites run in full on every Linux target,
+including mixed state/collection churn, allocator probes and the small-stack
+compaction regression. Every target retains its SDK and ABI checks.
+Executing a storage test binary without case arguments still runs its full
+table, including on a release target.
+
+Debug runs the complete PostgreSQL 14–18 matrix, with two servers, Pouch and
+the C/Lua driver variants. Optimized native GNU repeats PostgreSQL 14; the
+additional server versions carry the `native-behavior` label and run once.
+Lua E2E prepares one fresh installed rock through a CTest fixture per invocation;
+each scenario still runs in its own Lua process and retains allocator failure
+checks. Selecting an individual scenario automatically includes its setup.
+Standalone and final-artifact Lua package tests retain their own installations.
+
+Prerelease compiles its AFL configuration before long service/memory checks;
+the later full fuzz campaign reuses those compiled outputs. Lease-expiry
+semantics use controlled clocks where possible; real worker timing remains
+tested. This changes coverage ownership, not clean-release or signing rules.
+
+The cpkt compatibility fixture consumes the same GNU dependency
 SDK in Debug and Release, so Debug owns it; the distinct musl SDK is checked
 in its Release lane. The `release-artifact` checks have standalone CTest
 entrypoints; the release pipeline verifies those contracts against the final
@@ -386,8 +444,8 @@ archives and checksum inventory during packaging. Native archive consumers build
 in one pass per target, while cross consumers retain target-specific link
 checks. Valgrind builds only its selected test targets and their prerequisites.
 It runs the full Pouch suite and five focused outbox shutdown/allocator cases;
-the complete outbox inventory and timing assertions run in native and QEMU
-suites. `CMOCKA_TEST_FILTER` can select another case for Valgrind diagnosis.
+the complete outbox inventory and timing assertions run under native sanitizers.
+`CMOCKA_TEST_FILTER` can select another case for Valgrind diagnosis.
 `make test-all` reuses the Debug sanitizer build for E2E; standalone
 `make test-e2e` retains its own preset. Static and shared core libraries share
 compiled implementation objects. SDK configuration permutations run once per
@@ -685,11 +743,15 @@ client->close(client);
 ```
 
 For callback-style update flows, `lc_acquire_for_update()` acquires the lease,
-fetches a private state snapshot, invokes the handler, closes the snapshot, and
-always attempts to release the lease before returning. The lease and snapshot
-reader are borrowed and valid only during the callback; the helper owns the
-final release. Handler success commits staged changes; handler failure releases
-with rollback so partial callback updates are not published:
+captures the complete private snapshot in a temporary file, invokes the handler,
+closes the snapshot, and always attempts to release the lease before returning.
+The lease and snapshot reader are borrowed and valid only during the callback;
+the helper owns the final release. Handler success commits staged changes;
+handler failure releases
+with rollback so partial callback updates are not published. The callback reads
+a file-backed snapshot after capture completes. For direct transfer without
+snapshot staging, use `lc_acquire()` followed by `lc_lease_get()` with a sink.
+The callback helper is used as follows:
 
 ```c
 static int update_order(void *ctx, lc_acquire_for_update_context *af,

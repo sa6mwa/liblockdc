@@ -3017,7 +3017,7 @@ static int e2e_consumer_persist_state(e2e_consumer_context *consumer_context,
   memset(&doc, 0, sizeof(doc));
   memset(&get_res, 0, sizeof(get_res));
   doc.status = "from-consumer-service";
-  rc = state->save(state, &e2e_status_map, &doc, error);
+  rc = state->save(state, &e2e_status_map, &doc, NULL, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -3969,7 +3969,7 @@ static void test_mem_uds_dequeue_with_state_roundtrip(void **state) {
     e2e_status_doc doc;
 
     doc.status = "from-direct-state";
-    rc = state_lease->save(state_lease, &e2e_status_map, &doc, &error);
+    rc = state_lease->save(state_lease, &e2e_status_map, &doc, NULL, &error);
   }
   assert_lc_ok(rc, &error);
   {
@@ -4062,7 +4062,7 @@ static void test_s3_dequeue_with_state_roundtrip(void **state) {
     e2e_status_doc doc;
 
     doc.status = "from-s3-direct-state";
-    rc = state_lease->save(state_lease, &e2e_status_map, &doc, &error);
+    rc = state_lease->save(state_lease, &e2e_status_map, &doc, NULL, &error);
   }
   assert_lc_ok(rc, &error);
   {
@@ -5818,7 +5818,10 @@ static int pouch_e2e_shared_command_child(
       lc_outbox_config_init(&config);
       config.ns = ns;
       config.owner = owner;
-      config.claim_ttl_seconds = 1L;
+      /* Normal completion must not race a one-second claim while peer
+       * processes commit. Only deliberate crash/recovery needs fast expiry. */
+      config.claim_ttl_seconds =
+          mode == POUCH_E2E_COMMAND_CHILD_COMPLETE ? 30L : 1L;
       config.notification_capacity = 8U;
       config.recovery_interval_seconds = 1L;
       rc = lc_client_new_outbox(client, &config, &outbox, &error);

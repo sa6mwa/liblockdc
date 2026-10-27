@@ -16,6 +16,7 @@ typedef struct lc_engine_http_error_json {
 } lc_engine_http_error_json;
 
 typedef struct lc_engine_stream_request_state {
+  lc_engine_retention_headers retention;
   lc_engine_client *client;
   lc_engine_write_callback writer;
   void *writer_context;
@@ -441,6 +442,7 @@ static size_t lc_engine_stream_header_callback(char *buffer, size_t size,
   char status_line[64];
   size_t status_length;
   long parsed;
+  int retention_rc;
 
   state = (lc_engine_stream_request_state *)userdata;
   total = size * nitems;
@@ -457,6 +459,7 @@ static size_t lc_engine_stream_header_callback(char *buffer, size_t size,
     parsed = 0L;
     sscanf(status_line, "%*s %ld", &parsed);
     state->http_status = parsed;
+    memset(&state->retention, 0, sizeof(state->retention));
     return total;
   }
   colon = (char *)memchr(buffer, ':', total);
@@ -472,6 +475,21 @@ static size_t lc_engine_stream_header_callback(char *buffer, size_t size,
                          end[-1] == '\t')) {
     --end;
   }
+
+  retention_rc = state->http_status >= 200 && state->http_status < 300
+                     ? lc_engine_retention_header(&state->retention, buffer,
+                                                  (size_t)(colon - buffer),
+                                                  value, (size_t)(end - value))
+                     : 0;
+  if (retention_rc < 0) {
+    lc_engine_set_protocol_error(
+        state->error,
+        "response state retention headers are invalid or contradictory");
+    state->stream_error = 1;
+    return 0;
+  }
+  if (retention_rc > 0)
+    return total;
 
   if (lc_engine_header_name_equals(buffer, (size_t)(colon - buffer),
                                    "X-Correlation-Id")) {
@@ -801,6 +819,7 @@ static int lc_engine_perform_streaming(
     state->http_status = 0L;
     state->stream_error = 0;
     state->key_version = 0;
+    memset(&state->retention, 0, sizeof(state->retention));
     state->fencing_token = 0L;
     state->attachment_size = 0L;
     state->attachment_created_at_unix = 0L;
@@ -1086,6 +1105,10 @@ static int lc_engine_attachment_build_query(
 static int
 lc_engine_capture_get_metadata(lc_engine_get_stream_response *response,
                                const lc_engine_stream_request_state *state) {
+  response->retention_support = state->retention.support;
+  response->has_retention_expires_at_unix =
+      !response->no_content && state->retention.has_expiry;
+  response->retention_expires_at_unix = state->retention.expiry;
   if (state->content_type != NULL) {
     response->content_type = lc_engine_strdup_local(state->content_type);
     if (response->content_type == NULL) {
@@ -1509,6 +1532,7 @@ int lc_engine_client_update_from(lc_engine_client *client,
   struct curl_slist *headers;
   const char *ns;
   char if_version_buffer[64];
+  char retention_value[32];
   lc_engine_update_response_json parsed;
   int rc;
 
@@ -1523,6 +1547,11 @@ int lc_engine_client_update_from(lc_engine_client *client,
   }
 
   ns = lc_engine_effective_namespace(client, request->ns);
+  rc = lc_engine_retention_validate(client, request->has_retention_seconds,
+                                    request->retention_seconds, ns,
+                                    request->key, error);
+  if (rc != LC_ENGINE_OK)
+    return rc;
   rc = lc_engine_attachment_build_query(&path, "/v1/update", ns, request->key,
                                         NULL, 0, NULL, NULL, 0, 0L, 0, error);
   if (rc != LC_ENGINE_OK) {
@@ -1560,6 +1589,18 @@ int lc_engine_client_update_from(lc_engine_client *client,
     }
   }
 
+  if (request->has_retention_seconds) {
+    snprintf(retention_value, sizeof(retention_value), "%ld",
+             request->retention_seconds);
+    if (!lc_engine_append_header(&headers, "X-State-Retention-Seconds",
+                                 retention_value)) {
+      curl_slist_free_all(headers);
+      lc_engine_buffer_cleanup(&path);
+      return lc_engine_set_client_error(
+          error, LC_ENGINE_ERROR_NO_MEMORY,
+          "failed to append state retention header");
+    }
+  }
   lc_engine_update_response_cleanup(response);
   memset(&parsed, 0, sizeof(parsed));
   memset(&state, 0, sizeof(state));
@@ -1582,6 +1623,9 @@ int lc_engine_client_update_from(lc_engine_client *client,
     return rc;
   }
   response->new_version = parsed.new_version;
+  response->retention_support = state.retention.support;
+  response->has_retention_expires_at_unix = state.retention.has_expiry;
+  response->retention_expires_at_unix = state.retention.expiry;
   response->new_state_etag = lc_engine_strdup_local(parsed.new_state_etag);
   if (parsed.new_state_etag != NULL && response->new_state_etag == NULL) {
     lc_engine_lonejson_cleanup(client, &lc_engine_update_response_map, &parsed);

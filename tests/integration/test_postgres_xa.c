@@ -268,6 +268,9 @@ static void public_state(lc_client *client, const char *key, int expected) {
             (rc == LC_ERR_SERVER && error.http_status == 404L));
   else {
     REQUIRE(rc == LC_OK && !result.no_content);
+    REQUIRE(result.retention_support == LC_STATE_RETENTION_SUPPORTED &&
+            result.has_retention_expires_at_unix &&
+            result.retention_expires_at_unix > 0);
     REQUIRE(lc_sink_memory_bytes(sink, &bytes, &length, &error) == LC_OK);
     REQUIRE(length == strlen("{\"value\":42}") &&
             memcmp(bytes, "{\"value\":42}", length) == 0);
@@ -432,6 +435,7 @@ static void managed_cluster_case(const char *first, const char *second,
   lc_outbox_transaction *box;
   lc_outbox_participant_request participant_request;
   lc_outbox_participant *participant;
+  lc_update_opts retention;
   lc_outbox_entry effect;
   lc_outbox_receipt receipt;
   lc_outbox_commit_result receipts;
@@ -506,8 +510,13 @@ static void managed_cluster_case(const char *first, const char *second,
                                         &error) == LC_OK);
   REQUIRE(lc_source_from_memory("{\"value\":42}", 12U, &source, &error) ==
           LC_OK);
-  REQUIRE(lc_outbox_participant_update(participant, source, NULL, &error) ==
-          LC_OK);
+  lc_update_opts_init(&retention);
+  retention.has_retention_seconds = 1;
+  retention.retention_seconds = 3600;
+  REQUIRE(lc_outbox_participant_update(participant, source, &retention,
+                                       &error) == LC_OK);
+  REQUIRE(participant->retention_support == LC_STATE_RETENTION_SUPPORTED &&
+          !participant->has_retention_expires_at_unix);
   source->close(source);
   lc_inbox_message_init(&inbox);
   inbox.consumer_id = "managed-consumer";
@@ -897,6 +906,7 @@ int main(int argc, char **argv) {
     lc_release_req release;
     lc_lease *lease = NULL;
     lc_source *source = NULL;
+    lc_update_opts retention;
     lc_acquire_req_init(&acquire);
     acquire.key = "postgres-mixed";
     acquire.owner = "postgres-xa-fixture";
@@ -905,7 +915,12 @@ int main(int argc, char **argv) {
     REQUIRE(lc_acquire(client, &acquire, &lease, &error) == LC_OK);
     REQUIRE(lc_source_from_memory("{\"value\":42}", strlen("{\"value\":42}"),
                                   &source, &error) == LC_OK);
-    REQUIRE(lc_lease_update(lease, source, NULL, &error) == LC_OK);
+    lc_update_opts_init(&retention);
+    retention.has_retention_seconds = 1;
+    retention.retention_seconds = 3600;
+    REQUIRE(lc_lease_update(lease, source, &retention, &error) == LC_OK);
+    REQUIRE(lease->retention_support == LC_STATE_RETENTION_SUPPORTED &&
+            !lease->has_retention_expires_at_unix);
     source->close(source);
     borrow_work(branches[0], txn);
     REQUIRE(prepare(branches[0]) == LC_OK);

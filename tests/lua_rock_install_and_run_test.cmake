@@ -6,6 +6,28 @@ if(NOT DEFINED LOCKDC_ROOT)
     message(FATAL_ERROR "LOCKDC_ROOT is required")
 endif()
 
+# CTest prepares a fresh shared rock once per E2E invocation. Each scenario
+# then runs in its own Lua process, with its own queue/key/Pouch fixture.
+if(DEFINED LOCKDC_LUA_FIXTURE_ROOT AND NOT LOCKDC_LUA_FIXTURE_ROOT STREQUAL ""
+   AND NOT LOCKDC_LUA_PREPARE_FIXTURE)
+    find_program(LOCKDC_LUAROCKS_BIN NAMES luarocks REQUIRED)
+    string(REPLACE "|" ";" scenario_env "${LOCKDC_LUA_TEST_ENV}")
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E env ${scenario_env}
+        "LOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}"
+        "LOCKDC_LUAROCKS_BIN=${LOCKDC_LUAROCKS_BIN}"
+        "ASAN_OPTIONS=detect_leaks=0"
+        "LOCKDC_LUAROCKS_WORKDIR=${LOCKDC_ROOT}"
+        bash "${LOCKDC_ROOT}/scripts/validate_luarocks.sh" --run
+        "${LOCKDC_LUA_FIXTURE_ROOT}/tree" "${LOCKDC_LUA_FIXTURE_ROOT}/prefix"
+        unused "${LOCKDC_LUA_TEST_SCRIPT}"
+        RESULT_VARIABLE run_result OUTPUT_VARIABLE run_stdout ERROR_VARIABLE run_stderr)
+    if(NOT run_result EQUAL 0 OR run_stdout MATCHES "liblockdc allocator:" OR
+       run_stderr MATCHES "liblockdc allocator:")
+        message(FATAL_ERROR "LuaRocks validation failed for ${LOCKDC_TEST_NAME}\n${run_stdout}\n${run_stderr}")
+    endif()
+    return()
+endif()
+
 function(lockdc_import_cache_value var_name)
     if(DEFINED ${var_name} AND NOT "${${var_name}}" STREQUAL "")
         return()
@@ -101,7 +123,11 @@ if(NOT CMAKE_C_COMPILER)
 endif()
 
 if(NOT DEFINED LOCKDC_SDK_PREFIX OR LOCKDC_SDK_PREFIX STREQUAL "")
-    set(LOCKDC_SDK_PREFIX "${LOCKDC_BINARY_DIR}/lua-rock-tests/${LOCKDC_TEST_NAME}/prefix")
+    if(DEFINED LOCKDC_LUA_FIXTURE_ROOT AND NOT LOCKDC_LUA_FIXTURE_ROOT STREQUAL "")
+        set(LOCKDC_SDK_PREFIX "${LOCKDC_LUA_FIXTURE_ROOT}/prefix")
+    else()
+        set(LOCKDC_SDK_PREFIX "${LOCKDC_BINARY_DIR}/lua-rock-tests/${LOCKDC_TEST_NAME}/prefix")
+    endif()
     file(REMOVE_RECURSE "${LOCKDC_SDK_PREFIX}")
     # The base rock consumes only the core SDK. Optional provider components
     # may be configured without being built by the focused E2E targets.
@@ -140,6 +166,9 @@ set(lonejson_src_rock "${lonejson_cache_dir}/lonejson-0.45.0-1.src.rock")
 set(lonejson_src_rock_url "https://github.com/sa6mwa/lonejson/releases/download/v0.45.0/lonejson-0.45.0-1.src.rock")
 set(lonejson_src_rock_sha256 "22306c264c3645654acbc95a9147fe07b3920e442195cf12c59beeb60f3ab93e")
 set(lua_tree_dir "${LOCKDC_BINARY_DIR}/lua-rock-tests/${LOCKDC_TEST_NAME}/tree")
+if(DEFINED LOCKDC_LUA_FIXTURE_ROOT AND NOT LOCKDC_LUA_FIXTURE_ROOT STREQUAL "")
+    set(lua_tree_dir "${LOCKDC_LUA_FIXTURE_ROOT}/tree")
+endif()
 set(lua_rock_workdir "${LOCKDC_ROOT}")
 
 file(MAKE_DIRECTORY "${lonejson_cache_dir}")
@@ -271,11 +300,16 @@ if(LOCKDC_LUA_PACKAGE_PATH MATCHES "[.]rockspec$")
     list(APPEND test_env "LOCKDC_LUAROCKS_BUILD_ROOT=${lua_build_root}")
 endif()
 
+set(validation_mode)
+if(LOCKDC_LUA_PREPARE_FIXTURE)
+    set(validation_mode --prepare)
+endif()
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
         ${test_env}
         "LOCKDC_RUN_LUA_SMOKE=${lockdc_run_lua_smoke_env}"
         "${LOCKDC_BASH_BIN}" "${LOCKDC_ROOT}/scripts/validate_luarocks.sh"
+        ${validation_mode}
         "${lua_tree_dir}"
         "${LOCKDC_SDK_PREFIX}"
         "${LOCKDC_LUA_PACKAGE_PATH}"

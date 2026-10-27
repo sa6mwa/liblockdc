@@ -291,6 +291,7 @@ if(LOCKDC_BUILD_POSTGRES AND LOCKDC_TARGET_ID STREQUAL "x86_64-linux-gnu"
       add_executable(${lua_target}
         test_lua_postgres_xa.c
         ${CMAKE_SOURCE_DIR}/src/lua/lockdc_lua.c
+        ${CMAKE_SOURCE_DIR}/src/lua/lockdc_collections_lua.c
         ${CMAKE_SOURCE_DIR}/src/lua/lockdc_xa_lua.c
         ${CMAKE_SOURCE_DIR}/src/lua/lockdc_xa_resource_lua.c
         ${CMAKE_SOURCE_DIR}/src/lua/lockdc_xa_provider_lua.c
@@ -333,7 +334,7 @@ if(LOCKDC_BUILD_POSTGRES AND LOCKDC_TARGET_ID STREQUAL "x86_64-linux-gnu"
       COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/test-postgres-xa.sh"
         --server-version ${server_version} ${postgres_xa_executables})
     set_tests_properties(postgres_xa_pg${server_version}_test PROPERTIES
-      LABELS "integration;postgres;podman" RUN_SERIAL TRUE TIMEOUT 240
+      LABELS "integration;postgres;podman;native-behavior" RUN_SERIAL TRUE TIMEOUT 240
       ENVIRONMENT "LOCKDC_TEST_ALLOCATOR_TRACKING=1")
   endforeach()
 endif()

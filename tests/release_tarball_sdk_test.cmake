@@ -355,7 +355,21 @@ set_target_properties(example_shared PROPERTIES BUILD_RPATH "${LOCKDC_RELEASE_PR
 add_executable(test_shared test.c $<TARGET_OBJECTS:api_surface>)
 target_link_libraries(test_shared PRIVATE lockdc::shared)
 set_target_properties(test_shared PROPERTIES BUILD_RPATH "${LOCKDC_RELEASE_PREFIX}/lib")
+
+foreach(linkage static shared)
+    add_executable(collections_${linkage} collection_journal.c tracking.c)
+    target_link_libraries(collections_${linkage} PRIVATE lockdc::${linkage})
+    set_target_properties(collections_${linkage} PROPERTIES
+        C_STANDARD 90 C_EXTENSIONS OFF
+        BUILD_RPATH "${LOCKDC_RELEASE_PREFIX}/lib")
+    target_compile_options(collections_${linkage} PRIVATE -Wall -Wextra -Werror -pedantic-errors)
+endforeach()
 ]=])
+
+configure_file("${LOCKDC_ROOT}/examples/collection_journal.c"
+    "${consumer_src_dir}/collection_journal.c" COPYONLY)
+configure_file("${LOCKDC_ROOT}/tests/support/lc_test_tracking.c"
+    "${consumer_src_dir}/tracking.c" COPYONLY)
 
 file(WRITE "${consumer_src_dir}/example.c" [=[
 #include <lc/lc.h>
@@ -545,7 +559,7 @@ int lockdc_release_tarball_touch_lease_api(lc_lease *lease, lc_source *src,
     return lc_lease_describe(lease, &error) +
            lc_lease_get(lease, dst, &get_opts, &get_res, &error) +
            lc_lease_load(lease, map, (void *)0, &get_opts, &get_res, &error) +
-           lc_lease_save(lease, map, (const void *)0, &error) +
+           lc_lease_save(lease, map, (const void *)0, &update_opts, &error) +
            lc_lease_update(lease, src, &update_opts, &error) +
            lc_lease_mutate(lease, &mutate, &error) +
            lc_lease_mutate_local(lease, &mutate_local, &error) +
@@ -636,6 +650,24 @@ if(LOCKDC_RUN_DOWNSTREAM_BINARIES)
                 "release-tarball consumer binary failed: ${binary_name}\n"
                 "stdout:\n${run_stdout}\n"
                 "stderr:\n${run_stderr}")
+        endif()
+    endforeach()
+    foreach(linkage static shared)
+        set(binary_name collections_${linkage})
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E env LOCKDC_TEST_ALLOCATOR_TRACKING=1
+                "${consumer_bin_dir}/${binary_name}"
+                "pouch://${test_root}/${binary_name}.pouch"
+            RESULT_VARIABLE run_result
+            OUTPUT_VARIABLE run_stdout
+            ERROR_VARIABLE run_stderr
+            TIMEOUT 30)
+        if(NOT run_result EQUAL 0 OR
+           run_stderr MATCHES "liblockdc allocator:" OR
+           NOT run_stdout STREQUAL "{\"event\":\"created\"}\n{\"event\":\"completed\"}\n")
+            message(FATAL_ERROR
+                "extracted SDK collection example failed: ${binary_name}\n"
+                "stdout:\n${run_stdout}\nstderr:\n${run_stderr}")
         endif()
     endforeach()
 endif()

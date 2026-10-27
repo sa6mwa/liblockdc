@@ -90,9 +90,9 @@ set(LOCKDC_LIBLQL_VERSION "0.3.0" CACHE STRING "Pinned liblql release used for p
 set(LOCKDC_LIBLQL_ABI_VERSION "0" CACHE STRING "Pinned liblql shared-library ABI/SOVERSION." FORCE)
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
 set(LOCKDC_PSLOG_VERSION "0.12.0" CACHE STRING "Pinned libpslog release used for SDK logging." FORCE)
-set(LOCKDC_CPKT_VERSION "0.5.0" CACHE STRING "Pinned cpkt dependency bundle version." FORCE)
-set(LOCKDC_CPKTDB_VERSION "0.3.0" CACHE STRING "Pinned cpktdb database bundle version." FORCE)
-set(LOCKDC_MIN_ABI_VERSION "5")
+set(LOCKDC_CPKT_VERSION "0.5.2" CACHE STRING "Pinned cpkt dependency bundle version." FORCE)
+set(LOCKDC_CPKTDB_VERSION "0.3.1" CACHE STRING "Pinned cpktdb database bundle version." FORCE)
+set(LOCKDC_MIN_ABI_VERSION "6")
 set(LOCKDC_ABI_VERSION "${LOCKDC_MIN_ABI_VERSION}" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc.")
 if(LOCKDC_ABI_VERSION MATCHES "^[0-9]+$" AND LOCKDC_ABI_VERSION LESS LOCKDC_MIN_ABI_VERSION)
     set(LOCKDC_ABI_VERSION "${LOCKDC_MIN_ABI_VERSION}" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc." FORCE)
@@ -299,6 +299,11 @@ function(lc_collect_development_runtime_targets directory)
     get_property(lockdc_directory_targets DIRECTORY "${directory}"
         PROPERTY BUILDSYSTEM_TARGETS)
     foreach(lockdc_directory_target IN LISTS lockdc_directory_targets)
+        get_target_property(lockdc_excluded_from_all "${lockdc_directory_target}"
+            EXCLUDE_FROM_ALL)
+        if(lockdc_excluded_from_all)
+            continue()
+        endif()
         get_target_property(lockdc_target_type "${lockdc_directory_target}" TYPE)
         if(lockdc_target_type STREQUAL "EXECUTABLE")
             get_target_property(lockdc_link_options "${lockdc_directory_target}" LINK_OPTIONS)
@@ -518,6 +523,24 @@ set(lc_sources
     src/lc_attachment_api.c
     src/lc_client_api.c
     src/lc_client_management_api.c
+    src/lc_collection_order.c
+    src/lc_collection_json.c
+    src/lc_collection_ids.c
+    src/lc_collection_index.c
+    src/lc_collection_payload.c
+    src/lc_collection_query_storage.c
+    src/lc_collection_query_build.c
+    src/lc_collection_query_plan.c
+    src/lc_collection_query_maintenance.c
+    src/lc_collection_query_cleanup.c
+    src/lc_collection_api.c
+    src/lc_collection_catalog.c
+    src/lc_collection_read.c
+    src/lc_collection_compact.c
+    src/lc_collection_cleanup.c
+    src/lc_collection_maintenance.c
+    src/lc_collection_retention.c
+    src/lc_collections.c
     src/lc_consumer_service.c
     src/lc_core.c
     src/lc_intcompat.c
@@ -547,6 +570,7 @@ set(lc_sources
     src/lc_pouch_path.c
     src/lc_pouch_record.c
     src/lc_pouch_state.c
+    src/lc_pouch_retention.c
     src/lc_queue_api.c
     src/lc_queue_stream_api.c
     src/lc_outbox.c
@@ -554,6 +578,7 @@ set(lc_sources
     src/lc_state_api.c
     src/lc_streaming.c
     src/lc_transport.c
+    src/lc_utf8.c
     src/lc_xid.c
 )
 
@@ -946,6 +971,7 @@ if(LOCKDC_BUILD_LUA_BINDINGS)
     if(LOCKDC_BUILD_SHARED)
         add_library(lockdc_lua_core MODULE
             src/lua/lockdc_lua.c src/lua/lockdc_xa_lua.c
+            src/lua/lockdc_collections_lua.c
             src/lua/lockdc_xa_resource_lua.c src/lua/lockdc_xa_provider_lua.c)
         target_include_directories(lockdc_lua_core SYSTEM PRIVATE "${LUA_INCLUDE_DIR}")
         target_include_directories(lockdc_lua_core PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -1060,6 +1086,8 @@ endif()
 if(LOCKDC_BUILD_BENCHMARKS)
     add_subdirectory(bench)
 endif()
+
+add_subdirectory(tools)
 
 if(LOCKDC_BUILD_TESTS OR LOCKDC_BUILD_FUZZERS OR
    LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS)

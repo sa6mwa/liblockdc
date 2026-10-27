@@ -1,4 +1,5 @@
 #include "lc_mutate_stream.h"
+#include "lc_utf8.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -16,11 +17,7 @@ extern time_t timegm(struct tm *tm_value);
 
 #define LC_MS_SCRATCH 65536U
 
-typedef struct lc_ms_utf8_state {
-  int remaining;
-  unsigned int codepoint;
-  unsigned int min_codepoint;
-} lc_ms_utf8_state;
+typedef lc_utf8_state lc_ms_utf8_state;
 
 typedef struct lc_ms_rewrite_context {
   const lc_mutation *mutation;
@@ -228,44 +225,8 @@ static lonejson_status lc_ms_lonejson_error_from_lc(lonejson_error *error,
 
 static int lc_ms_utf8_push(lc_ms_utf8_state *state, unsigned char byte,
                            lc_error *error) {
-  if (state->remaining == 0) {
-    if (byte <= 0x7fU) {
-      state->codepoint = byte;
-      state->min_codepoint = 0U;
-      return LC_OK;
-    }
-    if (byte >= 0xc2U && byte <= 0xdfU) {
-      state->remaining = 1;
-      state->codepoint = byte & 0x1fU;
-      state->min_codepoint = 0x80U;
-      return LC_OK;
-    }
-    if (byte >= 0xe0U && byte <= 0xefU) {
-      state->remaining = 2;
-      state->codepoint = byte & 0x0fU;
-      state->min_codepoint = 0x800U;
-      return LC_OK;
-    }
-    if (byte >= 0xf0U && byte <= 0xf4U) {
-      state->remaining = 3;
-      state->codepoint = byte & 0x07U;
-      state->min_codepoint = 0x10000U;
-      return LC_OK;
-    }
+  if (!lc_utf8_push(state, &byte, 1U)) {
     return lc_ms_set_error(error, "invalid UTF-8 in textfile mutation", NULL);
-  }
-
-  if ((byte & 0xc0U) != 0x80U) {
-    return lc_ms_set_error(error, "invalid UTF-8 in textfile mutation", NULL);
-  }
-  state->codepoint = (state->codepoint << 6) | (byte & 0x3fU);
-  state->remaining -= 1;
-  if (state->remaining == 0) {
-    if (state->codepoint < state->min_codepoint ||
-        state->codepoint > 0x10ffffU ||
-        (state->codepoint >= 0xd800U && state->codepoint <= 0xdfffU)) {
-      return lc_ms_set_error(error, "invalid UTF-8 in textfile mutation", NULL);
-    }
   }
   return LC_OK;
 }

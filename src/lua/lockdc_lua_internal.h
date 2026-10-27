@@ -5,6 +5,23 @@
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC visibility push(hidden)
 #endif
+/* Shared Lua byte adapters retain only callbacks/chunks, never a whole value.
+ * Callers root returned stream pointers in an owned cleanup scope before any
+ * further Lua operation that may raise. */
+int lcdc_source_from_value(lua_State *L, int index, lc_source **out,
+                           lc_error *error);
+int lcdc_sink_from_value(lua_State *L, int index, lc_sink **out,
+                         lc_error *error);
+int lcdc_push_status_error(lua_State *L, int rc, const lc_error *error);
+/* Exact decimal fields across C89 targets, including 32-bit unsigned long. */
+void lcdc_set_u64_decimal(lua_State *L, const char *key, uint64_t value);
+void lcdc_set_state_retention(lua_State *L, lc_state_retention_support support,
+                              int has_expiry, lc_unix_seconds expiry);
+void lcdc_collections_install(lua_State *L);
+int lcdc_collection_create(lua_State *L);
+int lcdc_collection_open(lua_State *L);
+int lcdc_collection_list(lua_State *L);
+int lcdc_collection_capabilities(lua_State *L);
 void lcdc_xa_install(lua_State *L);
 int lcdc_xa_open(lua_State *L);
 void lcdc_xa_resource_install(lua_State *L);

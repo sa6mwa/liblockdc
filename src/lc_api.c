@@ -715,8 +715,8 @@ int lc_lease_load(lc_lease *lease, const lonejson_map *map, void *dst,
 }
 
 int lc_lease_save(lc_lease *lease, const lonejson_map *map, const void *src,
-                  lc_error *error) {
-  return lease->save(lease, map, src, error);
+                  const lc_update_opts *opts, lc_error *error) {
+  return lease->save(lease, map, src, opts, error);
 }
 
 int lc_lease_update(lc_lease *lease, lc_source *src, const lc_update_opts *opts,

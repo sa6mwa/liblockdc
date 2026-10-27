@@ -158,10 +158,17 @@ Primary entrypoints:
 - `lockdc.pouch_crypto_default_key_file()`
 - `lockdc.pouch_crypto_generate_key_file(path[, overwrite])`
 
-`lockdc.ERR_PENDING` means a durable transaction decision exists but participant
-application remains incomplete. Preserve its transaction ID and continue recovery;
-do not rerun application work or change the decision. See
+`lockdc.ERR_PENDING` can report incomplete work or temporary contention; it does
+not by itself prove a durable transaction decision. For asynchronous operations,
+inspect `result().done` and drive the wait/advance contract. For a recorded
+transaction decision whose application is pending, preserve its ID and decision
+and continue recovery rather than replaying application work. See
 [the XA participation contract](xa.md) for PostgreSQL coordination and recovery.
+
+Unsupported collection operations return numeric status `8`
+(`LC_ERR_UNSUPPORTED` in C). The Lua facade currently exports `ERR_INVALID`
+through `ERR_PENDING`, but has no `lockdc.ERR_UNSUPPORTED` constant. Prefer the
+collection capability query when deciding which features to offer.
 
 Primary handle types:
 
@@ -339,9 +346,115 @@ Common client methods:
 - `client:tc_rm_list()`
 - `client:new_outbox(config)`
 - `client:new_history_consumer(config)`
+- `client:create_collection(config)`, `client:open_collection(config)`
+- `client:list_collections(options, visitor)`, `client:collection_capabilities()`
 - `client:subscribe(req, handler)` and `client:subscribe_with_state(req, handler)`
 - `client:watch_queue(req, handler)`
 - `client:new_consumer_service(config)`
+
+## Ordered collections
+
+Collections are isolated, ordered journals of state objects with immutable JSON
+bodies. Pouch implements them locally; remote lockd currently reports
+numeric status `8` (`LC_ERR_UNSUPPORTED` in C). The
+[collection contract](collections.md) also defines the
+future server interface. Collections do not enlist in XA transactions.
+
+`client:create_collection({namespace=..., name=..., retention_seconds=...})`
+returns a new bound receiver; an existing name is a conflict.
+`client:open_collection({namespace=..., name=...})` opens without creating or
+changing retention. Omit `namespace` to select the client default. Creation
+assigns a collection ID; drop/recreation invalidates old receivers and cursors.
+`client:list_collections({namespace=...}, visitor)` visits descriptions in name
+order without entry bodies. The visitor accepts a description by returning
+`true` or nothing. `client:collection_capabilities()` reports current and future
+selection support. Pouch currently enables `collections`, `lql_filter`, `resume`,
+`checkpoint`, `ranges`, and `first_n`; `last_n` and `position_selection` are false.
+A remote client's capability query returns all false without a network request;
+other collection operations are unsupported. Unknown selection options are
+rejected rather than ignored.
+
+| Collection method | Result |
+| --- | --- |
+| `describe()` | Namespace, name, collection ID, upper position, live count, indexing and collection retention |
+| `metadata({retention_seconds=...})` | Updated collection description |
+| `append({append_id=..., retention_seconds=...}, source)` | Position, ETag, bytes, duplicate/deleted and entry retention facts |
+| `append_status(append_id)` | `state="absent"`, `"committed"`, or `"deleted"`; assigned identities include an `entry` table |
+| `entry_metadata(position, {retention_seconds=...})` | Entry facts after a body-preserving retention change |
+| `read(options, sink)` | `nil, result`; on failure `nil, error, code, partial_result` |
+| `delete_entry(position)` | Position, `deleted`, and `already_deleted` |
+| `drop()` | `true` after logical removal; physical cleanup follows maintenance |
+| `close()` | Release only this local receiver; repeat close is harmless |
+
+All uint64 positions, byte counts and record counts are canonical decimal
+strings, including small values. Position inputs use those strings too; Lua
+numbers are rejected. Retention uses the ordinary state option convention:
+omitted/`nil` preserves an existing deadline, zero clears it, and positive
+integer seconds replace it from commit. New objects default to no expiry.
+Observations return `retention_support` and, when known,
+`retention_expires_at_unix`, including zero for no expiry.
+
+Collection retention expires the collection itself with all remaining entries.
+Entry retention expires only that state. An empty collection remains until its
+own expiry or an explicit drop. Appends and retries do not renew either policy.
+Expiry permits later maintenance deletion; reads and metadata changes continue
+normally until that deletion occurs. Metadata changes preserve the body, ETag,
+append identity, and position. Retrying a deleted append ID cannot resurrect it.
+
+`source` accepts the normal bytes/file/FD/callback adapters. Callback and file
+sources supply bounded chunks. `read` requires a sink and forwards original
+compact JSON objects with LF; it has no buffered read convenience or JSON
+conversion step. Its options are `selector_lql`, `cursor`, `after`, `through`,
+`first_n`, `on_metadata`, and `cancelled`. Bounds and counts are canonical uint64
+decimal strings, including on 32-bit Lua builds. `after` is exclusive and
+`through` inclusive; omitted bounds use zero and captured EOD. Equal bounds or
+a start beyond current EOD select nothing; reversed explicit bounds fail.
+`first_n` selects live inputs before LQL filtering; filtered-out inputs consume
+N and deleted entries do not. A window may therefore emit fewer than N states,
+including none. Omission is unlimited, while `"0"` completes an empty window
+without advancing its checkpoint. Last-N,
+projection and position-list options remain unavailable.
+
+```lua
+local journal = assert(client:create_collection({ name = "events" }))
+local event = assert(journal:append({ append_id = event_id }, event_source))
+local _, result, code, partial = journal:read({
+  selector_lql = "eq{field=/kind,value=message}",
+  after = "0",
+  first_n = "100",
+  on_metadata = function(meta)
+    if meta.kind == "entry" then
+      -- This entry's raw JSON and LF have already reached event_sink.
+      accept_entry(meta.position, meta.resume_cursor)
+    end
+    return true
+  end,
+}, event_sink)
+assert(code == nil, result and result.message)
+assert(result.complete)
+save_checkpoint(result.checkpoint_cursor)
+journal:close()
+```
+
+Entry metadata includes `kind="entry"`, `position`, `append_id`, `etag`, `bytes`,
+retention, `last_examined_position`, and `resume_cursor`. Progress frames have
+`kind="progress"` and only the examined boundary/cursor, with no payload.
+Metadata stays outside the JSON sink. Callback success is `true` or no return;
+false/error rejects that boundary and preserves the preceding accepted cursor.
+Cancellation returns success with `complete=false`, `stop_reason="cancelled"`,
+and safe progress. A raised cancellation callback is an error.
+
+Incomplete results carry `resume_cursor`; complete results carry
+`checkpoint_cursor` for a new selected window after the prior window's last
+safely examined position. Reaching first-N completes that selection and its
+checkpoint starts a fresh N-entry budget without skipping remaining entries.
+A resume cursor retains the unconsumed budget and captured upper boundary.
+Repeat the same selector, bounds and count with either cursor purpose; changing
+selection is rejected. Discard any incomplete final object from the sink
+before resume. Store cursors only after accepting the corresponding output
+durably. Sink acceptance followed by callback rejection may repeat that entry.
+Closing a receiver or client inside a callback defers native cleanup until the
+call unwinds; re-entry on the same active collection returns a status error.
 
 ## Pouch durable-history consumers
 
@@ -711,7 +824,12 @@ An empty result, including a server response that omits `keys`, succeeds without
 invoking the key handlers.
 
 `client:acquire_for_update(req, handler)` wraps the common acquire, snapshot,
-update, release outbox. The handler receives a context table with:
+update, release workflow. C captures the complete private snapshot in a temporary
+file before invoking the binding, which then materializes it into the Lua
+`state` string. `load_json()` additionally decodes that string into Lua values.
+Use `client:acquire()` followed by `lease:get(opts, sink)` for direct bounded
+transfer without capturing a whole snapshot. The handler receives a context
+table with:
 
 - `lease`
 - `state`
@@ -727,8 +845,10 @@ update, release outbox. The handler receives a context table with:
 
 The helper always attempts to release the lease after the handler returns.
 Handler success commits staged changes; handler failure releases with rollback
-so partial callback updates are not published. Return `nil` from the handler
-for success, or return an error value to report failure and roll back:
+so partial callback updates are not published. Return `nil` for success or
+forward the complete return values of an SDK call, as below. To fail and roll
+back, return `nil, error`, a string or `false`, or raise an error. An error table
+belongs in the second return value.
 
 `af.lease` is a scoped lease: it is valid only while this handler is running.
 Do not retain it, pass it to another coroutine, or use it after the handler
@@ -751,6 +871,38 @@ end)
 ```
 
 ## Lease API
+
+State updates, mutations, local mutations, and metadata updates accept an
+optional integer `retention_seconds`, through client, lease, outbox participant,
+and managed XA lease APIs. Omission or `nil` preserves the existing policy;
+zero removes expiry; positive seconds replace it with commit time plus the
+duration. New objects default to no expiry. Metadata may specify retention alone,
+but requires an existing body or staged replacement. Booleans, fractions,
+negative values, strings, and values outside a C `long` return
+`nil, error, ERR_INVALID` before mutation.
+
+```lua
+assert(lease:update_json({ status = "complete" }, {
+  retention_seconds = 30 * 24 * 60 * 60,
+}))
+assert(lease:metadata({ retention_seconds = 0 })) -- Keep indefinitely.
+```
+
+State results, lease/participant `info()`, and callback `state_meta` expose
+`retention_support` (`"unknown"`, `"supported"`, or `"unsupported"`). A known
+deadline appears as `retention_expires_at_unix`; zero confirms no expiry.
+Pending positive durations have no final deadline until commit. Public reads
+report committed policy and leave the receiver's private observation unchanged.
+
+Expiry makes an object eligible for cleanup; it remains ordinary readable and
+writable state until maintenance deletes it. Pouch uses its existing compaction
+worker, normally on a 30-minute cadence. Setting `pouch.background_compaction=false`
+disables automatic state and collection expiry, without affecting their stored
+deadlines. This root worker does not require an outbox dispatcher. Remote lockd
+must implement cleanup itself. Older servers remain usable when retention is
+omitted; an explicit request may be rejected or ignored. Success alone does not
+confirm support, so inspect the returned observation. This policy is separate from
+outbox and dead-letter retention. See [state retention](state-retention.md).
 
 Returned by `client:acquire(...)` and by `message:state()`. The latter is an
 independently closable lease view copied from the message's borrowed state

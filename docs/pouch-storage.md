@@ -649,6 +649,34 @@ validation rechecks those exact refs before install. Whole-cache snapshot dumps,
 file fingerprints as the only validation authority, and range-obsoleting all
 segments through a maximum id are rejected.
 
+The [ordered collection contract](collections.md) defines an isolated Pouch
+journal extension. Collection catalogs live under
+`namespaces/<escaped-namespace>/collections/names/`, and each collection ID owns
+its canonical records and projections under `collections/data/<collection-id>/`.
+Whole-root backup includes these partitions and the coalesced namespace work
+references under `collection-work/`. Ordinary document export enumerates the
+ordinary state projection; collection export uses its ordered read API.
+
+Collection compaction covers the complete captured position projection,
+including tombstones, and merges its newer canonical tail before publication.
+The snapshot and each derived projection carry a matching topology identity.
+This provides ownership proof for the collection's sealed input range while
+preserving permanent positions and append retry bindings. Raw payload spans
+retain their compressed/encrypted bytes and immutable crypto context. Snapshot
+generation pins protect active reads; per-file first-obsolete timestamps keep
+the root's grace policy stable across continuing compactions. The existing root
+maintenance worker discovers coalesced collection work and reclaims dropped or
+unfinished partitions after their session owners have gone.
+
+Collection entries use ordinary canonical state retention metadata and
+`STATE_META` payload-span references for body-preserving metadata changes.
+Collection expiry removes the parent and its remaining entries through catalog
+authority. Entry expiry leaves permanent position gaps and retry tombstones.
+Both run on the existing maintenance cadence; journals without entry retention
+skip expiry traversal through a conservative derived presence hint. A metadata
+change during a compaction copy defers that replacement, preserving its input
+dependencies until a later pass can publish a consistent topology.
+
 ### Query And Scan Visibility
 
 Go disk keeps internal object surfaces out of public state/query results
@@ -1048,10 +1076,28 @@ the public API or durable format.
   from its in-memory queue after an attempt; it is never reconstructed by an
   open-time namespace scan.
 
-  `retention_seconds` and `janitor_interval_seconds` are not automatic Pouch
-  endpoint controls. The explicit
+  Per-object state expiry uses `has_retention_seconds`/`retention_seconds` on
+  C write options, or optional `retention_seconds` in Lua request tables. New
+  objects have no expiry by default; omitted updates preserve the policy,
+  explicit zero clears it, and positive durations start at commit. Expired
+  objects remain ordinary state until maintenance deletes them. The existing
+  worker uses its compaction cadence, with at most 64 parent attempts per
+  namespace pass, independently of the threshold for rewriting segments.
+  Namespace work references survive reopen, and failed startup discovery arms
+  retry at that same cadence. Disabling background compaction disables automatic
+  expiry; an explicit namespace maintenance pass can still reclaim due objects.
+  Before durably removing an empty retention hint, synchronize the canonical
+  namespace containers under the same mutation authority that established no
+  expiring state remains. This covers NoSync clears/deletes from earlier or
+  independent commit groups, including final idle-work cleanup. Sync failure
+  leaves the hint available for retry. Ordinary NoSync writes do not gain a
+  per-write sync from this maintenance barrier.
+  See [per-object state retention](state-retention.md).
+
+  Neither `retention_seconds` nor `janitor_interval_seconds` is a Pouch endpoint
+  control. The explicit
   `lc_pouch_maintenance_options.retention_updated_before_unix` operation
-  remains the deliberate whole-document TTL deletion tool for callers that
+  remains a separate deliberate age-based deletion tool for callers that
   need that distinct policy. It is intentionally opt-in, namespace-scoped, and
   may scan that named namespace; it is not used by normal Pouch initialization
   or background maintenance.
@@ -1203,6 +1249,10 @@ Representative root layout:
 root/
   manifest
   .lockdc-control-migration-v1              # completed control-record migration
+  .lockd/
+    state-retention/
+      <escaped-namespace>/
+        work                                # coalesced expiry work / cleanup XID
   namespaces/
     <escaped-namespace>/
       manifest
@@ -1932,10 +1982,17 @@ Required behavior:
 - compute reclaimable bytes;
 - enforce configurable `min_segments`, `min_reclaimable_bytes`, interval,
   delete grace, and optional IO throttle;
-- when background compaction is enabled with a non-zero interval, start an
-  idle-debounced pass only after a successful mutation and a full quiet
-  interval; never run it at open, restart the delay after every mutation, and
-  repeat it once per interval only while the root remains idle;
+- when background compaction is enabled with a non-zero interval, schedule a
+  bounded turn after a mutation or discovery of durable work at open; wait
+  the configured interval before the first turn and between later turns;
+  coalesce later mutations without postponing already scheduled work;
+- rotate fairly across queued namespace work, durable terminal-reclaim markers,
+  [per-object state-retention hints](state-retention.md), and collection discovery;
+  skip empty sources within the same turn, inspect each source at most once,
+  and maintain at most one selected namespace per turn; advance the rotation
+  before discovery so errors cannot pin a source's priority;
+- perform eligible logical expiry outside the compaction namespace guard,
+  even below snapshot thresholds;
 - run explicit namespace maintenance immediately rather than delaying it for
   the background interval;
 - honor `compaction_max_io_bytes_per_sec` while copying snapshot payload
@@ -2100,7 +2157,7 @@ insufficient. Pouch compression variants retain their own reported performance
 evidence in the complete production matrix, but are excluded from the release
 performance gate because Go disk has no transform-equivalent compression mode.
 The performance gate runs only plaintext and crypto Pouch/Go pairs, with five
-production samples each and a finite `POUCH_GO_PARITY_TIMEOUT=15m` budget.
+production samples each and a default `POUCH_GO_PARITY_TIMEOUT=90s` budget.
 Shared root has
 separate correctness, contention, handoff, and bounded-performance coverage and
 does not dilute the exclusive performance comparison.

@@ -1986,13 +1986,14 @@ static int lc_pouch_index_term_generation_decode_posting_bytes(
 int lc_pouch_index_term_generation_decode(
     const lc_allocator *allocator, const char *bytes, size_t length,
     uint64_t expected_index_seq, unsigned long expected_row_count,
-    unsigned long expected_row_hash, lc_pouch_index_term_generation *generation,
-    lc_error *error) {
+    unsigned long expected_row_hash, const lc_pouch_index_term_limits *limits,
+    lc_pouch_index_term_generation *generation, lc_error *error) {
   lc_pouch_index_term_generation decoded;
   lc_pouch_index_term_generation_cursor cursor;
   const unsigned char *magic;
   const char *ns;
   size_t namespace_length;
+  size_t term_bytes;
   uint64_t version;
   const char **field_dictionary;
   unsigned long field_count;
@@ -2019,6 +2020,7 @@ int lc_pouch_index_term_generation_decode(
   magic = NULL;
   ns = NULL;
   namespace_length = 0U;
+  term_bytes = 0U;
   rc = lc_pouch_index_term_generation_cursor_read(
       &cursor, LC_POUCH_INDEX_TERM_GENERATION_MAGIC_LEN, &magic, error);
   if (rc == LC_OK && memcmp(magic, LC_POUCH_INDEX_TERM_GENERATION_MAGIC,
@@ -2059,6 +2061,13 @@ int lc_pouch_index_term_generation_decode(
                       "pouch index term generation missing namespace", NULL,
                       NULL, "pouch");
   }
+  if (rc == LC_OK && (decoded.index_seq != expected_index_seq ||
+                      decoded.row_count != expected_row_count ||
+                      decoded.row_hash != expected_row_hash)) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch index term generation identity mismatch", NULL,
+                      NULL, "pouch");
+  }
   if (rc == LC_OK) {
     decoded.ns = lc_strdup_with_allocator(allocator, ns);
     if (decoded.ns == NULL) {
@@ -2075,8 +2084,10 @@ int lc_pouch_index_term_generation_decode(
   }
   if (rc == LC_OK && version == LC_POUCH_INDEX_TERM_GENERATION_VERSION_V2 &&
       field_count > 0UL) {
-    if (field_count >
-        (unsigned long)((size_t)-1 / sizeof(field_dictionary[0]))) {
+    if ((limits != NULL && field_count > limits->max_terms) ||
+        field_count > cursor.length - cursor.offset ||
+        field_count >
+            (unsigned long)((size_t)-1 / sizeof(field_dictionary[0]))) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index term generation field count exceeds "
                         "local limit",
@@ -2133,6 +2144,11 @@ int lc_pouch_index_term_generation_decode(
                       "match terms",
                       NULL, NULL, "pouch");
   }
+  if (rc == LC_OK && limits != NULL &&
+      (term_count > limits->max_terms || posting_count > limits->max_terms))
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch index term generation exceeds bounded term count",
+                      NULL, NULL, "pouch");
   for (index = 0UL; rc == LC_OK && index < term_count; ++index) {
     const char *field_hex;
     const char *value_hex;
@@ -2186,6 +2202,7 @@ int lc_pouch_index_term_generation_decode(
                           NULL, "pouch");
       } else {
         field_hex = field_dictionary[field_id - 1UL];
+        field_length = strlen(field_hex);
       }
     }
     if (rc == LC_OK && version == LC_POUCH_INDEX_TERM_GENERATION_VERSION_V2 &&
@@ -2210,8 +2227,19 @@ int lc_pouch_index_term_generation_decode(
     if (rc != LC_OK) {
       break;
     }
-    (void)field_length;
-    (void)value_length;
+    if (limits != NULL) {
+      if (field_length > limits->max_term_bytes - term_bytes ||
+          value_length > limits->max_term_bytes - term_bytes - field_length ||
+          2U > limits->max_term_bytes - term_bytes - field_length -
+                   value_length) {
+        rc = lc_error_set(
+            error, LC_ERR_INVALID, 0L,
+            "pouch index term generation exceeds bounded term bytes", NULL,
+            NULL, "pouch");
+        break;
+      }
+      term_bytes += field_length + value_length + 2U;
+    }
     previous_entry = decoded.terms.count > 0U
                          ? &decoded.terms.items[decoded.terms.count - 1U]
                          : NULL;
@@ -2288,7 +2316,10 @@ int lc_pouch_index_term_generation_decode(
     if (rc != LC_OK) {
       break;
     }
-    if (term_id == 0UL ||
+    if ((limits != NULL &&
+         (count > decoded.row_count ||
+          (count > 0UL && max_doc_id >= decoded.row_count))) ||
+        term_id == 0UL ||
         (kind != (unsigned char)'s' && kind != (unsigned char)'d') ||
         (previous_posting_term_id != 0UL &&
          previous_posting_term_id >= term_id) ||
@@ -2308,13 +2339,6 @@ int lc_pouch_index_term_generation_decode(
   if (rc == LC_OK && cursor.offset != cursor.length) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch index term generation has trailing records", NULL,
-                      NULL, "pouch");
-  }
-  if (rc == LC_OK && (decoded.index_seq != expected_index_seq ||
-                      decoded.row_count != expected_row_count ||
-                      decoded.row_hash != expected_row_hash)) {
-    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch index term generation identity mismatch", NULL,
                       NULL, "pouch");
   }
   lc_free_with_allocator(allocator, field_dictionary);
@@ -2346,7 +2370,7 @@ int lc_pouch_index_term_generation_load_bytes(
   lc_error_init(&decode_error);
   rc = lc_pouch_index_term_generation_decode(
       allocator, bytes, length, expected_index_seq, expected_row_count,
-      expected_row_hash, generation, &decode_error);
+      expected_row_hash, NULL, generation, &decode_error);
   if (rc == LC_OK) {
     *valid = 1;
   } else if (rc == LC_ERR_INVALID) {

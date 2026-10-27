@@ -1,4 +1,8 @@
 local core = require("lockdc.core")
+local integers = lockdc_test_integer_fields()
+assert(integers.zero == "0")
+assert(integers.above_exact == "9007199254740993")
+assert(integers.maximum == "18446744073709551615")
 local client = assert(core.open({
   endpoints = { "pouch://" .. lockdc_test_root },
   pouch = { single_writer = true },
@@ -16,6 +20,7 @@ end
 local function completed(op)
   local result, err = await(assert(op))
   assert(result, err and err.message)
+  assert(math.type(result.retired_count) == "integer" and result.retired_count >= 0)
   return result
 end
 local function begin(coordinator)

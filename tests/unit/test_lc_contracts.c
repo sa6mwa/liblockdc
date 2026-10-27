@@ -667,7 +667,7 @@ static void test_lease_wrappers_delegate_full_public_surface(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = lc_lease_load(&lease.pub, NULL, NULL, &get_opts, &get_res, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_lease_save(&lease.pub, NULL, NULL, &error);
+  rc = lc_lease_save(&lease.pub, NULL, NULL, NULL, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_lease_update(&lease.pub, &source_for_update, &update_opts, &error);
   assert_int_equal(rc, LC_OK);

@@ -174,26 +174,26 @@ pslog_version=$(resolve_cmake_cache_string LOCKDC_PSLOG_VERSION "${LOCKDC_PSLOG_
 cpkt_asset_name="cpkt-$cpkt_version-${preset#deps-}.tar.gz"
 cpkt_download_url="https://github.com/c89systems/cpkt/releases/download/v$cpkt_version/$cpkt_asset_name"
 case "$cpkt_asset_name" in
-  cpkt-0.5.0-x86_64-linux-gnu.tar.gz)
-    cpkt_asset_hash=d58e7fff2fd4232c43687f466db4ec9a9dfdc94c0a7c016896de204d2e760846
+  cpkt-0.5.2-x86_64-linux-gnu.tar.gz)
+    cpkt_asset_hash=a8d9647afd745c158069253a958eea9935d4fd240fcb4d129e3e5a0b952a1af9
     ;;
-  cpkt-0.5.0-x86_64-linux-musl.tar.gz)
-    cpkt_asset_hash=c36a236039701fe5d6d89c572c7a8d906880fcb33787659c213fdfa3181a15c2
+  cpkt-0.5.2-x86_64-linux-musl.tar.gz)
+    cpkt_asset_hash=ea8684f6d0cbc6dfbda5f05113bd0397c5146c4d3f17bc3c5667261608f1a2f0
     ;;
-  cpkt-0.5.0-aarch64-linux-gnu.tar.gz)
-    cpkt_asset_hash=29aa58f4e68e8aa00ed5f652017018f003afdc10c8455be26030217bd3288d93
+  cpkt-0.5.2-aarch64-linux-gnu.tar.gz)
+    cpkt_asset_hash=0a1fd5a7226880bac6235585fe4111f67c0db521a9fd0cd0d4376201621b12e4
     ;;
-  cpkt-0.5.0-aarch64-linux-musl.tar.gz)
-    cpkt_asset_hash=a9f7f021a7430a3dbc7290b6cebd667800bb26d546bd73c157b764aa73f17996
+  cpkt-0.5.2-aarch64-linux-musl.tar.gz)
+    cpkt_asset_hash=8f6b4d815d0e23cb4073ad2fad9354240e22aff27b241faf0854a6be89ee9898
     ;;
-  cpkt-0.5.0-armhf-linux-gnu.tar.gz)
-    cpkt_asset_hash=343fefa462c559a14ed6d53b3ef2c05b2f4700f36c86ab6b3186e185254430d4
+  cpkt-0.5.2-armhf-linux-gnu.tar.gz)
+    cpkt_asset_hash=cf595c01e85b9aba058be56d2f0100fb68c8f6b2e56ff2a3c4e93e03e560affd
     ;;
-  cpkt-0.5.0-armhf-linux-musl.tar.gz)
-    cpkt_asset_hash=ac767725d3ab63eeb38677925516aece2e95986d53b77a124bf9679d76117672
+  cpkt-0.5.2-armhf-linux-musl.tar.gz)
+    cpkt_asset_hash=1ecdbab12f42544f140de25914202cfb4f6c4b9e0079976209d791387a626567
     ;;
-  cpkt-0.5.0-arm64-apple-darwin.tar.gz)
-    cpkt_asset_hash=46d20a8f471f48532134fa293d50003b63a5a20019f80486b6452b67cb611cdb
+  cpkt-0.5.2-arm64-apple-darwin.tar.gz)
+    cpkt_asset_hash=8775bddc17c7f61ebb37211a5a821ccbab628f3d6f3783b56ccb549cf67ed29d
     ;;
   *)
     printf 'unsupported cpkt release asset: %s\n' "$cpkt_asset_name" >&2
@@ -206,26 +206,26 @@ if [ "$build_postgres" = ON ]; then
   cpktdb_asset_name="cpktdb-$cpktdb_version-${preset#deps-}.tar.gz"
   cpktdb_download_url="https://github.com/c89systems/cpktdb/releases/download/v$cpktdb_version/$cpktdb_asset_name"
   case "$cpktdb_asset_name" in
-    cpktdb-0.3.0-x86_64-linux-gnu.tar.gz)
-      cpktdb_asset_hash=2ce49dca2f79be9d6fb22d3d318a8b304f343e3d797ba4657938483d8fff1385
+    cpktdb-0.3.1-x86_64-linux-gnu.tar.gz)
+      cpktdb_asset_hash=e18d96e0c7cc5456ec963a068075a2e3dc25966e81d11cb9beea6faf11273f3a
       ;;
-    cpktdb-0.3.0-x86_64-linux-musl.tar.gz)
-      cpktdb_asset_hash=a2ef89e84fac33dd019f965777e8600c812dfb305c1e24db1072d539361d60e0
+    cpktdb-0.3.1-x86_64-linux-musl.tar.gz)
+      cpktdb_asset_hash=d2299b9cd5c66037c68875ae4bf0b77ef89c22fb6f3372d9c08ff7f9d988fa90
       ;;
-    cpktdb-0.3.0-aarch64-linux-gnu.tar.gz)
-      cpktdb_asset_hash=60429dba503290b4648d28143e823d5f03a8adbf2f01e112441fcf99f53d2ee9
+    cpktdb-0.3.1-aarch64-linux-gnu.tar.gz)
+      cpktdb_asset_hash=08614da32caca445c3813c60a6e0ea81dad54467b8539adb213e61fefbea2db3
       ;;
-    cpktdb-0.3.0-aarch64-linux-musl.tar.gz)
-      cpktdb_asset_hash=0bcef6312a74923b755eb1658a801036b6f99fa39ed191a30ef93a3c0eda91fd
+    cpktdb-0.3.1-aarch64-linux-musl.tar.gz)
+      cpktdb_asset_hash=d027eb9f77e37c84c835172a535a2fabbd01e59124a88237ab7fbc85f045dc61
       ;;
-    cpktdb-0.3.0-armhf-linux-gnu.tar.gz)
-      cpktdb_asset_hash=448a6f1d000b6874b0b574a8edad30d50fadb2a8449be1d1b4510da8b2b3b17f
+    cpktdb-0.3.1-armhf-linux-gnu.tar.gz)
+      cpktdb_asset_hash=5215fffc8009019f748a60d51fc5e85f9f476c2c9b55a55ee444ec1bf43c0b51
       ;;
-    cpktdb-0.3.0-armhf-linux-musl.tar.gz)
-      cpktdb_asset_hash=0958789b65ef20da41232ba5f45ab46ebb9fdecdb5fc6f0c5d3069320a71bb72
+    cpktdb-0.3.1-armhf-linux-musl.tar.gz)
+      cpktdb_asset_hash=33e47b891988f638433fcc65eb79e621999396eba902d9927eb26eb851dd8c6c
       ;;
-    cpktdb-0.3.0-arm64-apple-darwin.tar.gz)
-      cpktdb_asset_hash=01d1b212e7b96c7389cc91fa24c756dd0e1e00648cf42daef42a8b4b75e4bbe7
+    cpktdb-0.3.1-arm64-apple-darwin.tar.gz)
+      cpktdb_asset_hash=f6483a79d768eb09e3258b404b6e5ced84f5b5b5e3c4be6500834f79957be919
       ;;
     *)
       printf 'unsupported cpktdb release asset: %s\n' "$cpktdb_asset_name" >&2

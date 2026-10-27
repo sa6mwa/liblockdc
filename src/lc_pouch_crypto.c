@@ -97,7 +97,6 @@ typedef struct lc_pouch_zlib_source {
   z_stream stream;
   unsigned char input[LC_POUCH_ZLIB_CHUNK_BYTES];
   uint64_t input_total;
-  int deflate_mode;
   int close_inner;
   int input_done;
   int stream_done;
@@ -2080,7 +2079,6 @@ static size_t lc_pouch_zlib_source_read(lc_source *self, void *buffer,
     source->stream.next_out = (unsigned char *)buffer + total;
     source->stream.avail_out = (uInt)output_chunk;
     while (source->stream.avail_out > 0U && !source->stream_done) {
-      int flush;
       int zrc;
 
       if (source->stream.avail_in == 0U && !source->input_done) {
@@ -2109,66 +2107,51 @@ static size_t lc_pouch_zlib_source_read(lc_source *self, void *buffer,
           source->stream.avail_in = (uInt)got;
         }
       }
-      flush = source->input_done ? Z_FINISH : Z_NO_FLUSH;
-      if (source->deflate_mode) {
-        zrc = deflate(&source->stream, flush);
-        if (zrc == Z_STREAM_END) {
-          source->stream_done = 1;
-          break;
-        }
-        if (zrc != Z_OK) {
-          (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                             "failed to compress pouch payload", NULL, NULL,
-                             "pouch");
-          return total + output_chunk - source->stream.avail_out;
-        }
-      } else {
-        zrc = inflate(&source->stream, Z_NO_FLUSH);
-        if (zrc == Z_STREAM_END) {
-          size_t got;
+      zrc = inflate(&source->stream, Z_NO_FLUSH);
+      if (zrc == Z_STREAM_END) {
+        size_t got;
 
-          if (source->stream.avail_in != 0U) {
-            (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                               "compressed pouch payload has trailing bytes",
-                               NULL, NULL, "pouch");
-            return total + output_chunk - source->stream.avail_out;
-          }
-          /* Do not expose a completed compressed stream before the wrapped
-           * source has reached EOF. In particular, encrypted sources only
-           * authenticate their terminal zero-length frame while being drained.
-           */
-          got = source->inner->read(source->inner, source->input,
-                                    sizeof(source->input), error);
-          if (error != NULL && error->code != LC_OK) {
-            return total + output_chunk - source->stream.avail_out;
-          }
-          if (got != 0U) {
-            (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                               "compressed pouch payload has trailing bytes",
-                               NULL, NULL, "pouch");
-            return total + output_chunk - source->stream.avail_out;
-          }
-          source->input_done = 1;
-          source->stream_done = 1;
-          break;
-        }
-        if (zrc == Z_BUF_ERROR && source->input_done &&
-            source->stream.avail_in == 0U) {
+        if (source->stream.avail_in != 0U) {
           (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                             "compressed pouch payload is truncated", NULL,
-                             NULL, "pouch");
+                             "compressed pouch payload has trailing bytes",
+                             NULL, NULL, "pouch");
           return total + output_chunk - source->stream.avail_out;
         }
-        if (zrc != Z_OK && zrc != Z_BUF_ERROR) {
-          (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                             "failed to decompress pouch payload", NULL, NULL,
-                             "pouch");
+        /* Do not expose a completed compressed stream before the wrapped
+         * source has reached EOF. In particular, encrypted sources only
+         * authenticate their terminal zero-length frame while being drained.
+         */
+        got = source->inner->read(source->inner, source->input,
+                                  sizeof(source->input), error);
+        if (error != NULL && error->code != LC_OK) {
           return total + output_chunk - source->stream.avail_out;
         }
-        if (zrc == Z_BUF_ERROR &&
-            source->stream.avail_out == (uInt)output_chunk) {
-          break;
+        if (got != 0U) {
+          (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                             "compressed pouch payload has trailing bytes",
+                             NULL, NULL, "pouch");
+          return total + output_chunk - source->stream.avail_out;
         }
+        source->input_done = 1;
+        source->stream_done = 1;
+        break;
+      }
+      if (zrc == Z_BUF_ERROR && source->input_done &&
+          source->stream.avail_in == 0U) {
+        (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                           "compressed pouch payload is truncated", NULL, NULL,
+                           "pouch");
+        return total + output_chunk - source->stream.avail_out;
+      }
+      if (zrc != Z_OK && zrc != Z_BUF_ERROR) {
+        (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                           "failed to decompress pouch payload", NULL, NULL,
+                           "pouch");
+        return total + output_chunk - source->stream.avail_out;
+      }
+      if (zrc == Z_BUF_ERROR &&
+          source->stream.avail_out == (uInt)output_chunk) {
+        break;
       }
     }
     produced = output_chunk - source->stream.avail_out;
@@ -2199,8 +2182,7 @@ static int lc_pouch_zlib_source_reset(lc_source *self, lc_error *error) {
     return error != NULL && error->code != LC_OK ? error->code
                                                  : LC_ERR_TRANSPORT;
   }
-  zrc = source->deflate_mode ? deflateReset(&source->stream)
-                             : inflateReset(&source->stream);
+  zrc = inflateReset(&source->stream);
   if (zrc != Z_OK) {
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                         "failed to reset pouch zlib stream", NULL, NULL,
@@ -2224,11 +2206,7 @@ static void lc_pouch_zlib_source_close(lc_source *self) {
   if (source == NULL) {
     return;
   }
-  if (source->deflate_mode) {
-    (void)deflateEnd(&source->stream);
-  } else {
-    (void)inflateEnd(&source->stream);
-  }
+  (void)inflateEnd(&source->stream);
   if (source->close_inner && source->inner != NULL &&
       source->inner->close != NULL) {
     source->inner->close(source->inner);
@@ -2237,8 +2215,7 @@ static void lc_pouch_zlib_source_close(lc_source *self) {
 }
 
 static int lc_pouch_zlib_source_open(const lc_allocator *allocator,
-                                     lc_source *inner, int deflate_mode,
-                                     int close_inner,
+                                     lc_source *inner, int close_inner,
                                      lc_pouch_zlib_source **out,
                                      lc_error *error) {
   lc_pouch_zlib_source *source;
@@ -2263,12 +2240,8 @@ static int lc_pouch_zlib_source_open(const lc_allocator *allocator,
     lc_allocator_init(&source->allocator);
   }
   source->inner = inner;
-  source->deflate_mode = deflate_mode ? 1 : 0;
   source->close_inner = close_inner ? 1 : 0;
-  zrc = source->deflate_mode
-            ? deflateInit2(&source->stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
-                           MAX_WBITS, 8, Z_DEFAULT_STRATEGY)
-            : inflateInit(&source->stream);
+  zrc = inflateInit(&source->stream);
   if (zrc != Z_OK) {
     lc_free_with_allocator(&source->allocator, source);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -2372,229 +2345,432 @@ int lc_pouch_crypto_stream_to_fd(lc_pouch_crypto *crypto, const char *context,
                                                descriptor_out, 1, error);
 }
 
-static int lc_pouch_crypto_stream_to_fd_crc_impl(
-    lc_pouch_crypto *crypto, const char *context, int fd, lc_source *body,
-    uint64_t *plain_bytes, uint64_t *cipher_bytes, unsigned long *stored_crc,
-    char **descriptor_out, int allow_compression, lc_error *error) {
+typedef struct lc_pouch_crypto_output {
+  lc_sink pub;
+  const lc_allocator *allocator;
+  const char *context;
+  int fd;
   lc_pouch_crypto_desc desc;
-  lc_pouch_zlib_source *deflater;
-  lc_source *write_body;
-  EVP_CIPHER_CTX *ctx;
-  unsigned char payload_key[LC_POUCH_DEK_BYTES];
-  unsigned char descriptor_core[LC_POUCH_DESC_RAW_BYTES_V2];
-  unsigned char *plain_buffer;
-  unsigned char *frame_buffer;
+  EVP_CIPHER_CTX *cipher;
+  z_stream deflater;
+  unsigned char key[LC_POUCH_DEK_BYTES];
+  unsigned char core[LC_POUCH_DESC_RAW_BYTES_V2];
+  size_t core_length;
+  unsigned char *plain;
+  unsigned char *frame;
+  size_t fill;
+  unsigned long counter;
   uint64_t plain_total;
   uint64_t cipher_total;
-  unsigned long counter;
-  size_t descriptor_core_len;
-  char *descriptor;
-  int compressed;
-  int encrypted;
-  int rc;
+  unsigned long crc;
+  int zlib_initialized;
+  int failed;
+} lc_pouch_crypto_output;
 
-  if (fd < 0 || body == NULL || plain_bytes == NULL || cipher_bytes == NULL ||
-      descriptor_out == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch crypto stream write requires fd, body, byte "
-                        "outputs, and descriptor output",
-                        NULL, NULL, "pouch");
-  }
-  *descriptor_out = NULL;
-  if (stored_crc != NULL) {
-    *stored_crc = (unsigned long)crc32(0L, Z_NULL, 0);
-  }
-  encrypted = crypto != NULL && crypto->encryption_enabled;
-  compressed =
-      allow_compression && crypto != NULL && crypto->compression_enabled;
-  if (!encrypted && !compressed) {
-    return lc_pouch_crypto_stream_plain_to_fd(
-        crypto != NULL ? &crypto->allocator : NULL, fd, body, plain_bytes,
-        cipher_bytes, stored_crc, error);
-  }
-  if (encrypted && (context == NULL || context[0] == '\0')) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch crypto write requires context", NULL, NULL,
-                        "pouch");
-  }
-  deflater = NULL;
-  write_body = body;
-  if (compressed) {
-    rc = lc_pouch_zlib_source_open(&crypto->allocator, body, 1, 0, &deflater,
-                                   error);
-    if (rc != LC_OK) {
-      return rc;
+static int lc_pouch_crypto_output_flush(lc_pouch_crypto_output *out,
+                                        int terminal, lc_error *error) {
+  int rc;
+  if (out->desc.encrypted) {
+    if (out->counter == 0xFFFFFFFFUL) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch encrypted payload exceeds frame counter limit",
+                          NULL, NULL, "pouch");
     }
-    write_body = &deflater->pub;
-  }
-  memset(&desc, 0, sizeof(desc));
-  desc.encrypted = encrypted;
-  desc.compressed = compressed;
-  desc.frame_size = encrypted ? LC_POUCH_FRAME_PLAINTEXT_BYTES : 0UL;
-  if (encrypted && (!lc_pouch_crypto_random_bytes(
-                        desc.payload_key_salt, sizeof(desc.payload_key_salt)) ||
-                    !lc_pouch_crypto_random_bytes(desc.nonce_prefix,
-                                                  sizeof(desc.nonce_prefix)))) {
-    if (deflater != NULL) {
-      deflater->pub.close(&deflater->pub);
-    }
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to generate pouch crypto descriptor material",
-                        NULL, NULL, "pouch");
-  }
-  if (encrypted) {
-    desc.payload_key_derived = 1;
-    rc = lc_pouch_crypto_derive_payload_key(crypto, desc.payload_key_salt,
-                                            payload_key, error);
-    if (rc != LC_OK) {
-      OPENSSL_cleanse(payload_key, sizeof(payload_key));
-      if (deflater != NULL) {
-        deflater->pub.close(&deflater->pub);
-      }
-      return rc;
-    }
-    rc = lc_pouch_crypto_desc_bind(crypto, &desc, context, error);
-    if (rc != LC_OK) {
-      OPENSSL_cleanse(payload_key, sizeof(payload_key));
-      if (deflater != NULL) {
-        deflater->pub.close(&deflater->pub);
-      }
-      return rc;
+    rc = lc_pouch_crypto_encrypt_frame(
+        out->fd, out->cipher, out->key, out->desc.nonce_prefix, out->context,
+        strlen(out->context), out->core, out->core_length, out->counter,
+        out->counter == 0UL, out->plain, terminal ? 0U : out->fill,
+        &out->cipher_total, &out->crc, out->frame,
+        8U + LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES, error);
+    if (rc == LC_OK) {
+      ++out->counter;
     }
   } else {
-    memset(payload_key, 0, sizeof(payload_key));
-  }
-  descriptor = NULL;
-  rc = lc_pouch_crypto_descriptor_encode(&crypto->allocator, &desc, &descriptor,
-                                         error);
-  if (rc != LC_OK) {
-    OPENSSL_cleanse(payload_key, sizeof(payload_key));
-    if (deflater != NULL) {
-      deflater->pub.close(&deflater->pub);
-    }
-    return rc;
-  }
-  descriptor_core_len =
-      lc_pouch_crypto_descriptor_core_encode(&desc, descriptor_core);
-  if (!encrypted) {
-    uint64_t compressed_bytes;
-
-    compressed_bytes = 0UL;
-    rc = lc_pouch_crypto_stream_plain_to_fd(&crypto->allocator, fd, write_body,
-                                            &compressed_bytes, cipher_bytes,
-                                            stored_crc, error);
-    if (rc == LC_OK) {
-      *plain_bytes =
-          deflater != NULL ? deflater->input_total : compressed_bytes;
-      *descriptor_out = descriptor;
-    } else {
-      lc_free_with_allocator(&crypto->allocator, descriptor);
-    }
-    if (deflater != NULL) {
-      deflater->pub.close(&deflater->pub);
-    }
-    return rc;
-  }
-  ctx = EVP_CIPHER_CTX_new();
-  if (ctx == NULL) {
-    OPENSSL_cleanse(payload_key, sizeof(payload_key));
-    lc_free_with_allocator(&crypto->allocator, descriptor);
-    if (deflater != NULL) {
-      deflater->pub.close(&deflater->pub);
-    }
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch crypto cipher context", NULL,
-                        NULL, "pouch");
-  }
-  plain_buffer = (unsigned char *)lc_alloc_with_allocator(
-      &crypto->allocator, LC_POUCH_FRAME_PLAINTEXT_BYTES);
-  frame_buffer = (unsigned char *)lc_alloc_with_allocator(
-      &crypto->allocator,
-      8U + LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES);
-  if (plain_buffer == NULL || frame_buffer == NULL) {
-    OPENSSL_cleanse(payload_key, sizeof(payload_key));
-    lc_free_with_allocator(&crypto->allocator, plain_buffer);
-    lc_free_with_allocator(&crypto->allocator, frame_buffer);
-    EVP_CIPHER_CTX_free(ctx);
-    lc_free_with_allocator(&crypto->allocator, descriptor);
-    if (deflater != NULL) {
-      deflater->pub.close(&deflater->pub);
-    }
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch encrypted streaming buffers",
-                        NULL, NULL, "pouch");
-  }
-  plain_total = 0UL;
-  cipher_total = 0UL;
-  counter = 0UL;
-  rc = lc_pouch_crypto_encrypt_context_begin(ctx, error);
-  while (rc == LC_OK) {
-    size_t got;
-    size_t target;
-
-    target =
-        counter == 0UL ? LC_POUCH_FIRST_FRAME_PLAINTEXT_BYTES : desc.frame_size;
-    got = write_body->read(write_body, plain_buffer, target, error);
-    if (got == 0U) {
-      if (error != NULL && error->code != LC_OK) {
-        rc = error->code;
-      }
-      break;
-    }
     rc = lc_pouch_crypto_check_byte_counter(
-        plain_total, got,
-        "pouch encrypted plaintext byte count exceeds platform limit", error);
-    if (rc != LC_OK) {
-      break;
+        out->cipher_total, out->fill,
+        "pouch stored byte count exceeds platform limit", error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_crypto_write_all_fd(out->fd, out->plain, out->fill, error);
     }
-    rc = lc_pouch_crypto_encrypt_frame(
-        fd, ctx, payload_key, desc.nonce_prefix, context, strlen(context),
-        descriptor_core, descriptor_core_len, counter, counter == 0UL,
-        plain_buffer, got, &cipher_total, stored_crc, frame_buffer,
-        8U + LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES, error);
-    if (rc != LC_OK) {
-      break;
-    }
-    plain_total += (uint64_t)got;
-    ++counter;
-    if (counter == 0xFFFFFFFFUL) {
-      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch encrypted payload exceeds frame counter limit",
-                        NULL, NULL, "pouch");
-      break;
+    if (rc == LC_OK) {
+      out->crc =
+          (unsigned long)crc32((uLong)out->crc, out->plain, (uInt)out->fill);
+      out->cipher_total += out->fill;
     }
   }
-  if (rc == LC_OK) {
-    rc = lc_pouch_crypto_encrypt_frame(
-        fd, ctx, payload_key, desc.nonce_prefix, context, strlen(context),
-        descriptor_core, descriptor_core_len, counter, counter == 0UL,
-        plain_buffer, 0U, &cipher_total, stored_crc, frame_buffer,
-        8U + LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES, error);
-  }
-  EVP_CIPHER_CTX_free(ctx);
-  OPENSSL_cleanse(plain_buffer, LC_POUCH_FRAME_PLAINTEXT_BYTES);
-  OPENSSL_cleanse(frame_buffer,
-                  8U + LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES);
-  lc_free_with_allocator(&crypto->allocator, plain_buffer);
-  lc_free_with_allocator(&crypto->allocator, frame_buffer);
-  OPENSSL_cleanse(payload_key, sizeof(payload_key));
-  OPENSSL_cleanse(descriptor_core, sizeof(descriptor_core));
-  if (rc != LC_OK) {
-    lc_free_with_allocator(&crypto->allocator, descriptor);
-    if (deflater != NULL) {
-      deflater->pub.close(&deflater->pub);
+  out->fill = 0U;
+  return rc;
+}
+
+static int lc_pouch_crypto_output_feed(lc_pouch_crypto_output *out,
+                                       const unsigned char *bytes, size_t count,
+                                       lc_error *error) {
+  size_t target;
+  size_t take;
+  int rc;
+  while (count != 0U) {
+    target = out->desc.encrypted && out->counter == 0UL
+                 ? LC_POUCH_FIRST_FRAME_PLAINTEXT_BYTES
+                 : LC_POUCH_FRAME_PLAINTEXT_BYTES;
+    take = target - out->fill;
+    if (take > count) {
+      take = count;
     }
-    return rc;
-  }
-  *plain_bytes = deflater != NULL ? deflater->input_total : plain_total;
-  *cipher_bytes = cipher_total;
-  *descriptor_out = descriptor;
-  if (deflater != NULL) {
-    deflater->pub.close(&deflater->pub);
+    memcpy(out->plain + out->fill, bytes, take);
+    out->fill += take;
+    bytes += take;
+    count -= take;
+    if (out->fill == target) {
+      rc = lc_pouch_crypto_output_flush(out, 0, error);
+      if (rc != LC_OK) {
+        return rc;
+      }
+    }
   }
   return LC_OK;
 }
 
+static int lc_pouch_crypto_output_deflate(lc_pouch_crypto_output *out,
+                                          int finish, lc_error *error) {
+  size_t target;
+  size_t produced;
+  int zrc;
+  int rc;
+  do {
+    target = out->desc.encrypted && out->counter == 0UL
+                 ? LC_POUCH_FIRST_FRAME_PLAINTEXT_BYTES
+                 : LC_POUCH_FRAME_PLAINTEXT_BYTES;
+    out->deflater.next_out = out->plain + out->fill;
+    out->deflater.avail_out = (uInt)(target - out->fill);
+    zrc = deflate(&out->deflater, finish ? Z_FINISH : Z_NO_FLUSH);
+    if (zrc == Z_BUF_ERROR && !finish && out->deflater.avail_in == 0U) {
+      return LC_OK;
+    }
+    if (zrc != Z_OK && zrc != Z_STREAM_END) {
+      return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "failed to compress pouch payload", NULL, NULL,
+                          "pouch");
+    }
+    produced = target - out->fill - out->deflater.avail_out;
+    out->fill += produced;
+    if (out->fill == target) {
+      rc = lc_pouch_crypto_output_flush(out, 0, error);
+      if (rc != LC_OK) {
+        return rc;
+      }
+    }
+  } while (out->deflater.avail_in != 0U || (finish && zrc != Z_STREAM_END) ||
+           (!finish && out->deflater.avail_out == 0U));
+  return LC_OK;
+}
+
+static int lc_pouch_crypto_output_write(lc_sink *sink, const void *bytes,
+                                        size_t count, lc_error *error) {
+  lc_pouch_crypto_output *out;
+  const unsigned char *cursor;
+  size_t take;
+  size_t remaining;
+  int rc;
+  out = (lc_pouch_crypto_output *)sink;
+  if (out->failed != LC_OK) {
+    return 0;
+  }
+  rc = lc_pouch_crypto_check_byte_counter(
+      out->plain_total, count,
+      "pouch plaintext byte count exceeds platform limit", error);
+  if (rc == LC_OK && count != 0U && bytes == NULL) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch crypto sink requires bytes", NULL, NULL, "pouch");
+  }
+  if (rc == LC_OK && !out->desc.compressed) {
+    rc = lc_pouch_crypto_output_feed(out, (const unsigned char *)bytes, count,
+                                     error);
+  } else if (rc == LC_OK) {
+    cursor = (const unsigned char *)bytes;
+    remaining = count;
+    while (remaining != 0U && rc == LC_OK) {
+      take = remaining > (size_t)UINT_MAX ? (size_t)UINT_MAX : remaining;
+      out->deflater.next_in = (Bytef *)cursor;
+      out->deflater.avail_in = (uInt)take;
+      rc = lc_pouch_crypto_output_deflate(out, 0, error);
+      cursor += take;
+      remaining -= take;
+    }
+  }
+  if (rc == LC_OK) {
+    out->plain_total += count;
+  }
+  out->failed = rc;
+  return rc == LC_OK;
+}
+
+int lc_pouch_crypto_produce_to_fd(lc_pouch_crypto *crypto, const char *context,
+                                  int fd, lc_pouch_crypto_producer_fn producer,
+                                  void *producer_context, uint64_t *plain_bytes,
+                                  uint64_t *cipher_bytes,
+                                  unsigned long *stored_crc,
+                                  char **descriptor_out, int allow_compression,
+                                  lc_error *error) {
+  lc_pouch_crypto_output out;
+  char *descriptor;
+  int rc;
+  if (descriptor_out != NULL) {
+    *descriptor_out = NULL;
+  }
+  if (fd < 0 || producer == NULL || plain_bytes == NULL ||
+      cipher_bytes == NULL || descriptor_out == NULL) {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "pouch crypto producer requires fd, producer and outputs", NULL, NULL,
+        "pouch");
+  }
+  *plain_bytes = 0U;
+  *cipher_bytes = 0U;
+  if (stored_crc != NULL) {
+    *stored_crc = (unsigned long)crc32(0L, Z_NULL, 0);
+  }
+  memset(&out, 0, sizeof(out));
+  out.pub.write = lc_pouch_crypto_output_write;
+  out.allocator = crypto != NULL ? &crypto->allocator : NULL;
+  out.context = context;
+  out.fd = fd;
+  out.desc.encrypted = crypto != NULL && crypto->encryption_enabled;
+  out.desc.compressed =
+      allow_compression && crypto != NULL && crypto->compression_enabled;
+  out.desc.frame_size =
+      out.desc.encrypted ? LC_POUCH_FRAME_PLAINTEXT_BYTES : 0U;
+  out.crc = (unsigned long)crc32(0L, Z_NULL, 0);
+  descriptor = NULL;
+  rc = LC_OK;
+  if (out.desc.encrypted && (context == NULL || context[0] == '\0')) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch crypto write requires context", NULL, NULL,
+                        "pouch");
+  }
+  out.plain = (unsigned char *)lc_alloc_with_allocator(
+      out.allocator, LC_POUCH_FRAME_PLAINTEXT_BYTES);
+  if (out.plain == NULL) {
+    rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                      "failed to allocate pouch streaming buffer", NULL, NULL,
+                      "pouch");
+  }
+  if (rc == LC_OK && out.desc.compressed) {
+    if (deflateInit2(&out.deflater, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+                     MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to initialize pouch compressor", NULL, NULL,
+                        "pouch");
+    } else {
+      out.zlib_initialized = 1;
+    }
+  }
+  if (rc == LC_OK && out.desc.encrypted) {
+    if (!lc_pouch_crypto_random_bytes(out.desc.payload_key_salt,
+                                      sizeof(out.desc.payload_key_salt)) ||
+        !lc_pouch_crypto_random_bytes(out.desc.nonce_prefix,
+                                      sizeof(out.desc.nonce_prefix))) {
+      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to generate pouch crypto descriptor material",
+                        NULL, NULL, "pouch");
+    }
+    if (rc == LC_OK) {
+      out.desc.payload_key_derived = 1;
+      rc = lc_pouch_crypto_derive_payload_key(crypto, out.desc.payload_key_salt,
+                                              out.key, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_crypto_desc_bind(crypto, &out.desc, context, error);
+    }
+    if (rc == LC_OK) {
+      out.cipher = EVP_CIPHER_CTX_new();
+      out.frame = (unsigned char *)lc_alloc_with_allocator(
+          out.allocator,
+          8U + LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES);
+      if (out.cipher == NULL || out.frame == NULL) {
+        rc =
+            lc_error_set(error, LC_ERR_NOMEM, 0L,
+                         "failed to allocate pouch encrypted streaming buffers",
+                         NULL, NULL, "pouch");
+      } else {
+        rc = lc_pouch_crypto_encrypt_context_begin(out.cipher, error);
+      }
+    }
+  }
+  if (rc == LC_OK && (out.desc.encrypted || out.desc.compressed)) {
+    rc = lc_pouch_crypto_descriptor_encode(out.allocator, &out.desc,
+                                           &descriptor, error);
+    out.core_length =
+        lc_pouch_crypto_descriptor_core_encode(&out.desc, out.core);
+  }
+  if (rc == LC_OK) {
+    rc = producer(producer_context, &out.pub, error);
+    if (rc == LC_OK && out.failed != LC_OK) {
+      rc = out.failed;
+    }
+    if (rc == LC_OK && error != NULL && error->code != LC_OK) {
+      rc = error->code;
+    }
+  }
+  if (rc == LC_OK && out.desc.compressed) {
+    out.deflater.next_in = NULL;
+    out.deflater.avail_in = 0U;
+    rc = lc_pouch_crypto_output_deflate(&out, 1, error);
+  }
+  if (rc == LC_OK && out.fill != 0U) {
+    rc = lc_pouch_crypto_output_flush(&out, 0, error);
+  }
+  if (rc == LC_OK && out.desc.encrypted) {
+    rc = lc_pouch_crypto_output_flush(&out, 1, error);
+  }
+  if (out.zlib_initialized) {
+    (void)deflateEnd(&out.deflater);
+  }
+  EVP_CIPHER_CTX_free(out.cipher);
+  if (out.plain != NULL) {
+    OPENSSL_cleanse(out.plain, LC_POUCH_FRAME_PLAINTEXT_BYTES);
+  }
+  if (out.frame != NULL) {
+    OPENSSL_cleanse(out.frame, 8U + LC_POUCH_FRAME_PLAINTEXT_BYTES +
+                                   LC_POUCH_GCM_TAG_BYTES);
+  }
+  lc_free_with_allocator(out.allocator, out.plain);
+  lc_free_with_allocator(out.allocator, out.frame);
+  OPENSSL_cleanse(out.key, sizeof(out.key));
+  OPENSSL_cleanse(out.core, sizeof(out.core));
+  OPENSSL_cleanse(&out.desc, sizeof(out.desc));
+  if (rc == LC_OK) {
+    *plain_bytes = out.plain_total;
+    *cipher_bytes = out.cipher_total;
+    *descriptor_out = descriptor;
+    if (stored_crc != NULL) {
+      *stored_crc = out.crc;
+    }
+  } else {
+    lc_free_with_allocator(out.allocator, descriptor);
+  }
+  return rc;
+}
+
+typedef struct lc_pouch_crypto_pull_producer {
+  lc_source *source;
+  const lc_allocator *allocator;
+} lc_pouch_crypto_pull_producer;
+
+static int lc_pouch_crypto_produce_source(void *context, lc_sink *sink,
+                                          lc_error *error) {
+  lc_pouch_crypto_pull_producer *producer;
+  lc_pouch_crypto_output *out;
+  unsigned char *bytes;
+  size_t got;
+  size_t target;
+  size_t capacity;
+  int rc;
+  producer = (lc_pouch_crypto_pull_producer *)context;
+  out = (lc_pouch_crypto_output *)sink;
+  if (!out->desc.compressed) {
+    /* A pull source can fill the encoder's current frame directly. The push
+     * writer uses the same frame buffer without imposing another copy or
+     * allocation on existing uncompressed Pouch writes. */
+    for (;;) {
+      target = out->counter == 0UL ? LC_POUCH_FIRST_FRAME_PLAINTEXT_BYTES
+                                   : LC_POUCH_FRAME_PLAINTEXT_BYTES;
+      capacity = target - out->fill;
+      got = producer->source->read(producer->source, out->plain + out->fill,
+                                   capacity, error);
+      if (error != NULL && error->code != LC_OK) {
+        return error->code;
+      }
+      if (got > capacity) {
+        return lc_error_set(error, LC_ERR_INVALID, 0L,
+                            "pouch source exceeded requested chunk size", NULL,
+                            NULL, "pouch");
+      }
+      if (got == 0U) {
+        return LC_OK;
+      }
+      rc = lc_pouch_crypto_check_byte_counter(
+          out->plain_total, got,
+          "pouch plaintext byte count exceeds platform limit", error);
+      if (rc != LC_OK) {
+        return rc;
+      }
+      out->plain_total += got;
+      out->fill += got;
+      if (out->fill == target) {
+        rc = lc_pouch_crypto_output_flush(out, 0, error);
+        if (rc != LC_OK) {
+          return rc;
+        }
+      }
+    }
+  }
+  bytes = (unsigned char *)lc_alloc_with_allocator(
+      producer->allocator, LC_POUCH_FRAME_PLAINTEXT_BYTES);
+  if (bytes == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch source chunk", NULL, NULL,
+                        "pouch");
+  }
+  rc = LC_OK;
+  for (;;) {
+    got = producer->source->read(producer->source, bytes,
+                                 LC_POUCH_FRAME_PLAINTEXT_BYTES, error);
+    if (error != NULL && error->code != LC_OK) {
+      rc = error->code;
+      break;
+    }
+    if (got > LC_POUCH_FRAME_PLAINTEXT_BYTES) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch source exceeded requested chunk size", NULL,
+                        NULL, "pouch");
+      break;
+    }
+    if (got == 0U) {
+      break;
+    }
+    if (!sink->write(sink, bytes, got, error)) {
+      rc = error != NULL && error->code != LC_OK ? error->code
+                                                 : LC_ERR_TRANSPORT;
+      break;
+    }
+  }
+  OPENSSL_cleanse(bytes, LC_POUCH_FRAME_PLAINTEXT_BYTES);
+  lc_free_with_allocator(producer->allocator, bytes);
+  return rc;
+}
+
+static int lc_pouch_crypto_stream_to_fd_crc_impl(
+    lc_pouch_crypto *crypto, const char *context, int fd, lc_source *body,
+    uint64_t *plain_bytes, uint64_t *cipher_bytes, unsigned long *stored_crc,
+    char **descriptor_out, int allow_compression, lc_error *error) {
+  lc_pouch_crypto_pull_producer producer;
+  if (descriptor_out != NULL) {
+    *descriptor_out = NULL;
+  }
+  if (fd < 0 || body == NULL || body->read == NULL || plain_bytes == NULL ||
+      cipher_bytes == NULL || descriptor_out == NULL) {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "pouch crypto stream write requires fd, body and outputs", NULL, NULL,
+        "pouch");
+  }
+  if (stored_crc != NULL) {
+    *stored_crc = (unsigned long)crc32(0L, Z_NULL, 0);
+  }
+  if (crypto == NULL ||
+      (!crypto->encryption_enabled &&
+       (!allow_compression || !crypto->compression_enabled))) {
+    return lc_pouch_crypto_stream_plain_to_fd(
+        crypto != NULL ? &crypto->allocator : NULL, fd, body, plain_bytes,
+        cipher_bytes, stored_crc, error);
+  }
+  producer.source = body;
+  producer.allocator = &crypto->allocator;
+  return lc_pouch_crypto_produce_to_fd(
+      crypto, context, fd, lc_pouch_crypto_produce_source, &producer,
+      plain_bytes, cipher_bytes, stored_crc, descriptor_out, allow_compression,
+      error);
+}
 int lc_pouch_crypto_stream_to_fd_crc(lc_pouch_crypto *crypto,
                                      const char *context, int fd,
                                      lc_source *body, uint64_t *plain_bytes,
@@ -2962,7 +3138,7 @@ int lc_pouch_crypto_source_from_file(lc_pouch_crypto *crypto,
     }
     inflater = NULL;
     rc = lc_pouch_zlib_source_open(crypto != NULL ? &crypto->allocator : NULL,
-                                   base, 0, 1, &inflater, error);
+                                   base, 1, &inflater, error);
     if (rc != LC_OK) {
       if (base->close != NULL) {
         base->close(base);
@@ -3048,7 +3224,7 @@ int lc_pouch_crypto_source_from_file(lc_pouch_crypto *crypto,
   source->pub.impl = source;
   if (desc.compressed) {
     inflater = NULL;
-    rc = lc_pouch_zlib_source_open(&crypto->allocator, &source->pub, 0, 1,
+    rc = lc_pouch_zlib_source_open(&crypto->allocator, &source->pub, 1,
                                    &inflater, error);
     if (rc != LC_OK) {
       source->pub.close(&source->pub);
@@ -3164,7 +3340,7 @@ int lc_pouch_crypto_source_from_fd_span(lc_pouch_crypto *crypto,
     }
     inflater = NULL;
     rc = lc_pouch_zlib_source_open(crypto != NULL ? &crypto->allocator : NULL,
-                                   base, 0, 1, &inflater, error);
+                                   base, 1, &inflater, error);
     if (rc != LC_OK) {
       base->close(base);
       return rc;
@@ -3249,7 +3425,7 @@ int lc_pouch_crypto_source_from_fd_span(lc_pouch_crypto *crypto,
   source->pub.impl = source;
   if (desc.compressed) {
     inflater = NULL;
-    rc = lc_pouch_zlib_source_open(&crypto->allocator, &source->pub, 0, 1,
+    rc = lc_pouch_zlib_source_open(&crypto->allocator, &source->pub, 1,
                                    &inflater, error);
     if (rc != LC_OK) {
       source->pub.close(&source->pub);

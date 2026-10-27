@@ -903,6 +903,11 @@ int lc_engine_client_get(lc_engine_client *client,
   if (rc == LC_ENGINE_OK) {
     response->version = stream_response.version;
     response->fencing_token = stream_response.fencing_token;
+    response->retention_support = stream_response.retention_support;
+    response->has_retention_expires_at_unix =
+        stream_response.has_retention_expires_at_unix;
+    response->retention_expires_at_unix =
+        stream_response.retention_expires_at_unix;
   }
   if (rc == LC_ENGINE_OK && stream_response.correlation_id != NULL) {
     response->correlation_id =
@@ -1098,7 +1103,8 @@ int lc_engine_client_update(lc_engine_client *client,
   lc_engine_buffer path;
   lc_engine_buffer fence_value;
   lc_engine_buffer version_value;
-  lc_engine_header_pair headers[6];
+  lc_engine_header_pair headers[7];
+  char retention_value[32];
   lc_engine_http_result result;
   lc_engine_update_response_json response_json;
   size_t header_count;
@@ -1117,6 +1123,11 @@ int lc_engine_client_update(lc_engine_client *client,
         "update requires key, txn_id, and fencing_token");
   }
 
+  rc = lc_engine_retention_validate(client, request->has_retention_seconds,
+                                    request->retention_seconds, request->ns,
+                                    request->key, error);
+  if (rc != LC_ENGINE_OK)
+    return rc;
   lc_engine_update_response_cleanup(response);
   rc = lc_engine_build_update_path(client, request, &path);
   if (rc != LC_ENGINE_OK) {
@@ -1151,6 +1162,12 @@ int lc_engine_client_update(lc_engine_client *client,
     ++header_count;
   }
 
+  if (request->has_retention_seconds) {
+    snprintf(retention_value, sizeof(retention_value), "%ld",
+             request->retention_seconds);
+    headers[header_count].name = "X-State-Retention-Seconds";
+    headers[header_count++].value = retention_value;
+  }
   memset(&result, 0, sizeof(result));
   rc = lc_engine_http_json_request(client, "POST", path.data, request->body,
                                    request->body_length, headers, header_count,
@@ -1169,6 +1186,9 @@ int lc_engine_client_update(lc_engine_client *client,
   }
 
   response->new_version = response_json.new_version;
+  response->retention_support = result.retention.support;
+  response->has_retention_expires_at_unix = result.retention.has_expiry;
+  response->retention_expires_at_unix = result.retention.expiry;
   response->new_state_etag =
       lc_engine_strdup_local(response_json.new_state_etag);
   if (response_json.new_state_etag != NULL &&
@@ -1205,7 +1225,8 @@ int lc_engine_client_update_stream(lc_engine_client *client,
   lc_engine_buffer path;
   lc_engine_buffer fence_value;
   lc_engine_buffer version_value;
-  lc_engine_header_pair headers[6];
+  lc_engine_header_pair headers[7];
+  char retention_value[32];
   lc_engine_http_result result;
   lc_engine_update_response_json response_json;
   size_t header_count;
@@ -1229,6 +1250,11 @@ int lc_engine_client_update_stream(lc_engine_client *client,
         "update requires key, txn_id, and fencing_token");
   }
 
+  rc = lc_engine_retention_validate(client, request->has_retention_seconds,
+                                    request->retention_seconds, request->ns,
+                                    request->key, error);
+  if (rc != LC_ENGINE_OK)
+    return rc;
   lc_engine_update_response_cleanup(response);
   rc = lc_engine_build_update_path(client, request, &path);
   if (rc != LC_ENGINE_OK) {
@@ -1263,6 +1289,12 @@ int lc_engine_client_update_stream(lc_engine_client *client,
     ++header_count;
   }
 
+  if (request->has_retention_seconds) {
+    snprintf(retention_value, sizeof(retention_value), "%ld",
+             request->retention_seconds);
+    headers[header_count].name = "X-State-Retention-Seconds";
+    headers[header_count++].value = retention_value;
+  }
   memset(&result, 0, sizeof(result));
   rc = lc_engine_http_json_request_stream(
       client, "POST", path.data, body_map, body_src, headers, header_count,
@@ -1280,6 +1312,9 @@ int lc_engine_client_update_stream(lc_engine_client *client,
   }
 
   response->new_version = response_json.new_version;
+  response->retention_support = result.retention.support;
+  response->has_retention_expires_at_unix = result.retention.has_expiry;
+  response->retention_expires_at_unix = result.retention.expiry;
   response->new_state_etag =
       lc_engine_strdup_local(response_json.new_state_etag);
   if (response_json.new_state_etag != NULL &&
@@ -1327,7 +1362,8 @@ int lc_engine_client_mutate(lc_engine_client *client,
   lonejson_map body_map = {0};
   lc_engine_buffer fence_value;
   lc_engine_buffer version_value;
-  lc_engine_header_pair headers[6];
+  lc_engine_header_pair headers[7];
+  char retention_value[32];
   lc_engine_http_result result;
   lc_engine_update_response_json response_json;
   size_t body_field_count;
@@ -1340,6 +1376,11 @@ int lc_engine_client_mutate(lc_engine_client *client,
         "client, request, and response are required");
   }
 
+  rc = lc_engine_retention_validate(client, request->has_retention_seconds,
+                                    request->retention_seconds, request->ns,
+                                    request->key, error);
+  if (rc != LC_ENGINE_OK)
+    return rc;
   lc_engine_mutate_response_cleanup(response);
   rc = lc_engine_build_mutate_path(client, request, &path);
   if (rc != LC_ENGINE_OK) {
@@ -1383,6 +1424,12 @@ int lc_engine_client_mutate(lc_engine_client *client,
     ++header_count;
   }
 
+  if (request->has_retention_seconds) {
+    snprintf(retention_value, sizeof(retention_value), "%ld",
+             request->retention_seconds);
+    headers[header_count].name = "X-State-Retention-Seconds";
+    headers[header_count++].value = retention_value;
+  }
   memset(&result, 0, sizeof(result));
   rc = lc_engine_http_json_request_stream(
       client, "POST", path.data, &body_map, &body_src, headers, header_count,
@@ -1400,6 +1447,9 @@ int lc_engine_client_mutate(lc_engine_client *client,
   }
 
   response->new_version = response_json.new_version;
+  response->retention_support = result.retention.support;
+  response->has_retention_expires_at_unix = result.retention.has_expiry;
+  response->retention_expires_at_unix = result.retention.expiry;
   response->new_state_etag =
       lc_engine_strdup_local(response_json.new_state_etag);
   if (response_json.new_state_etag != NULL &&
@@ -1446,7 +1496,8 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
   lonejson_map body_map = {0};
   lc_engine_buffer fence_value;
   lc_engine_buffer version_value;
-  lc_engine_header_pair headers[5];
+  lc_engine_header_pair headers[6];
+  char retention_value[32];
   lc_engine_http_result result;
   lc_engine_metadata_response_json response_json;
   size_t body_field_count;
@@ -1459,6 +1510,11 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
         "client, request, and response are required");
   }
 
+  rc = lc_engine_retention_validate(client, request->has_retention_seconds,
+                                    request->retention_seconds, request->ns,
+                                    request->key, error);
+  if (rc != LC_ENGINE_OK)
+    return rc;
   lc_engine_metadata_response_cleanup(response);
   rc = lc_engine_build_metadata_path(client, request, &path);
   if (rc != LC_ENGINE_OK) {
@@ -1508,6 +1564,12 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
   }
   lc_engine_lonejson_map_init(&body_map, "lc_engine_metadata_request",
                               body_fields, body_field_count, sizeof(*request));
+  if (request->has_retention_seconds) {
+    snprintf(retention_value, sizeof(retention_value), "%ld",
+             request->retention_seconds);
+    headers[header_count].name = "X-State-Retention-Seconds";
+    headers[header_count++].value = retention_value;
+  }
   memset(&result, 0, sizeof(result));
   rc = lc_engine_http_json_request_stream(
       client, "POST", path.data, &body_map, request, headers, header_count,
@@ -1531,6 +1593,9 @@ int lc_engine_client_update_metadata(lc_engine_client *client,
     rc = LC_ENGINE_ERROR_NO_MEMORY;
   }
   response->version = response_json.version;
+  response->retention_support = result.retention.support;
+  response->has_retention_expires_at_unix = result.retention.has_expiry;
+  response->retention_expires_at_unix = result.retention.expiry;
   response->has_query_hidden = 1;
   response->query_hidden = response_json.metadata.query_hidden;
   if (result.correlation_id != NULL) {
@@ -1737,6 +1802,9 @@ int lc_engine_client_describe(lc_engine_client *client,
   }
   response->expires_at_unix = response_json.expires_at_unix;
   response->version = response_json.version;
+  response->retention_support = result.retention.support;
+  response->has_retention_expires_at_unix = result.retention.has_expiry;
+  response->retention_expires_at_unix = result.retention.expiry;
   response->state_etag = lc_engine_strdup_local(response_json.state_etag);
   if (response_json.state_etag != NULL && response->state_etag == NULL) {
     rc = LC_ENGINE_ERROR_NO_MEMORY;

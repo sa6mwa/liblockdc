@@ -35,7 +35,26 @@ typedef struct lc_engine_json_reader_source {
   size_t remaining;
 } lc_engine_json_reader_source;
 
+/* Retention is response-local. An expiry alone advertises support; an absent
+ * header never proves the backend accepted a requested policy. */
+typedef struct lc_engine_retention_headers {
+  lc_state_retention_support support;
+  int has_support;
+  int has_expiry;
+  lc_unix_seconds expiry;
+} lc_engine_retention_headers;
+
+/* Returns one for a parsed field, zero for another header, minus one if
+ * invalid. */
+int lc_engine_retention_header(lc_engine_retention_headers *headers,
+                               const char *name, size_t name_length,
+                               const char *value, size_t value_length);
+int lc_engine_retention_validate(lc_engine_client *client, int selected,
+                                 long seconds, const char *ns, const char *key,
+                                 lc_engine_error *error);
+
 typedef struct lc_engine_http_result {
+  lc_engine_retention_headers retention;
   long http_status;
   char *correlation_id;
   char *etag;

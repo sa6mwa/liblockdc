@@ -23,11 +23,36 @@ typedef struct lc_pouch_query_index_active_operation
     lc_pouch_query_index_active_operation;
 typedef struct lc_pouch_fsync_request lc_pouch_fsync_request;
 typedef struct lc_pouch_fsync_batcher lc_pouch_fsync_batcher;
+typedef struct lc_pouch_state_commit_group lc_pouch_state_commit_group;
 typedef struct lc_pouch_state_metadata_append_batcher
     lc_pouch_state_metadata_append_batcher;
 typedef struct lc_pouch_writer_root_lock_entry lc_pouch_writer_root_lock_entry;
 typedef struct lc_pouch_indexer_pending_namespace
     lc_pouch_indexer_pending_namespace;
+
+/* Shared wall clock for lease validation, retention publication and cleanup.
+ * Failure is explicit; a retention deadline must never use a guessed clock. */
+int lc_pouch_now_unix(lc_pouch_unix_seconds *out, lc_error *error);
+/* Canonical nonnegative deadlines pass through; a negative staged duration
+ * is resolved once against the chosen immutable commit timestamp. */
+int lc_pouch_retention_resolve(lc_pouch_unix_seconds retention,
+                               lc_pouch_unix_seconds commit_at_unix,
+                               lc_pouch_unix_seconds *out, lc_error *error);
+/* Internal cleanup reuses append commit groups, forcing their barriers even
+ * for NoSync roots before fsynced work references advance or are retired.
+ * A scope owns the calling thread's group and must be ended on every path. */
+int lc_pouch_state_durable_scope_begin(lc_pouch *pouch,
+                                       lc_pouch_state_commit_group **out,
+                                       lc_error *error);
+int lc_pouch_state_durable_scope_barrier(lc_pouch_state_commit_group *scope,
+                                         lc_error *error);
+/* Recovery includes containers written before this thread/process's group.
+ * Requires namespace mutation authority; never reads application bodies. */
+int lc_pouch_state_durable_scope_include_namespace_locked(lc_pouch *pouch,
+                                                          const char *ns,
+                                                          lc_error *error);
+int lc_pouch_state_durable_scope_end(lc_pouch_state_commit_group *scope,
+                                     int operation_rc, lc_error *error);
 
 /* Exclusive roots have one in-process writer. These bounded stripes retain
  * conflicting-key serialization through durable completion without shared
@@ -46,6 +71,9 @@ typedef struct lc_pouch_state_change_visit_entry {
   uint64_t cipher_bytes;
   const char *descriptor;
   lc_pouch_unix_seconds updated_at_unix;
+  /* Zero disables expiry; positive values are Unix deadlines; negative
+   * values are transaction-staged durations pending commit. */
+  lc_pouch_unix_seconds retention;
   int has_query_hidden;
   int query_hidden;
   /* A found record can still be lease metadata or a tombstone without a
@@ -67,6 +95,9 @@ typedef struct lc_pouch_state_scan_summary_entry {
   uint64_t bytes;
   uint64_t cipher_bytes;
   lc_pouch_unix_seconds updated_at_unix;
+  /* Zero disables expiry; positive values are Unix deadlines; negative
+   * values are transaction-staged durations pending commit. */
+  lc_pouch_unix_seconds retention;
   int has_query_hidden;
   int query_hidden;
   const void *opaque;
@@ -83,6 +114,7 @@ typedef struct lc_pouch_state_metadata_view {
   const char *etag;
   const char *content_type;
   lc_pouch_generation version;
+  lc_pouch_unix_seconds retention;
   const unsigned char *metadata;
   size_t metadata_length;
   int has_query_hidden;
@@ -203,7 +235,12 @@ struct lc_pouch {
   int compaction_thread_started;
   int compaction_stop;
   int compaction_pending;
-  int compaction_marker_turn;
+  /* Next background work source, protected by compaction_mutex. Discovery
+   * cursors below retain the single maintenance worker's per-source progress.
+   */
+  int compaction_source_turn;
+  char *collection_namespace_cursor;
+  char *state_retention_marker_cursor;
   /* Last terminal-reclaim marker selected by the background worker. The
    * durable marker remains until maintenance completes; this cursor prevents
    * one failing marker from starving the other pending namespaces. */
@@ -307,6 +344,10 @@ extern void *lc_pouch_test_after_queue_batch_message_build_context;
  * before its multi-key terminal decision exists. */
 extern lc_pouch_test_hook lc_pouch_test_before_txn_decision_hook;
 extern void *lc_pouch_test_before_txn_decision_context;
+extern lc_pouch_test_hook lc_pouch_test_after_txn_decision_hook;
+extern void *lc_pouch_test_after_txn_decision_context;
+extern lc_pouch_test_hook lc_pouch_test_cleanup_fsync_hook;
+extern void *lc_pouch_test_cleanup_fsync_context;
 /* Crash barrier between decision fencing and replacement owner publication. */
 extern lc_pouch_test_hook lc_pouch_test_before_xa_owner_write_hook;
 extern lc_pouch_test_hook lc_pouch_test_after_xa_retire_owner_hook;
@@ -547,7 +588,9 @@ int lc_pouch_state_write_prepared(lc_pouch *pouch, const char *ns,
 int lc_pouch_state_commit_staged_locked(lc_pouch *pouch, const char *ns,
                                         const char *key, const char *txn_id,
                                         lc_pouch_state_write_result *out,
-                                        int operation_active, lc_error *error);
+                                        int operation_active,
+                                        lc_pouch_unix_seconds commit_at_unix,
+                                        lc_error *error);
 /** Discards staged state under target mutation authority. */
 int lc_pouch_state_discard_staged_locked(lc_pouch *pouch, const char *ns,
                                          const char *key, const char *txn_id,

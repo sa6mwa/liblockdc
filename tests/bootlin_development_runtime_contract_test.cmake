@@ -24,6 +24,11 @@ if(NOT LOCKDC_DEVELOPMENT_RUNTIME_EXECUTABLES)
 endif()
 
 function(lockdc_assert_development_runtime binary_path target_kind)
+    get_filename_component(binary_name "${binary_path}" NAME)
+    if(binary_name STREQUAL "lockdc_collection_read_compare")
+        message(FATAL_ERROR
+            "manual collection comparison must not be a development runtime gate")
+    endif()
     if(NOT EXISTS "${binary_path}")
         message(FATAL_ERROR "missing development ${target_kind}: ${binary_path}")
     endif()

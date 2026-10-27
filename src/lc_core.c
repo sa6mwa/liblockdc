@@ -295,6 +295,36 @@ char *lc_client_strdup(lc_client_handle *client, const char *value) {
                                   value);
 }
 
+int lc_state_retention_validate(int selected, long seconds, const char *ns,
+                                const char *key, lc_error *error) {
+  if (!selected)
+    return LC_OK;
+  if (seconds < 0)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "state retention seconds must be nonnegative", NULL,
+                        NULL, NULL);
+  if ((ns != NULL &&
+       (strcmp(ns, ".txns") == 0 || strcmp(ns, ".xa") == 0 ||
+        strncmp(ns, ".xa/", 4) == 0 || strcmp(ns, ".lockd") == 0 ||
+        strncmp(ns, ".lockd/", 7) == 0)) ||
+      (key != NULL &&
+       (strncmp(key, "__lockdc_io/", 12) == 0 || strncmp(key, "q/", 2) == 0 ||
+        strncmp(key, "config/", 7) == 0 || strncmp(key, ".staging/", 9) == 0 ||
+        strstr(key, "/.staging/") != NULL)))
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "state retention cannot target SDK lifecycle records",
+                        NULL, NULL, NULL);
+  return LC_OK;
+}
+
+void lc_lease_retention_observe(lc_lease *lease,
+                                lc_state_retention_support support,
+                                int has_expiry, lc_unix_seconds expiry) {
+  lease->retention_support = support;
+  lease->has_retention_expires_at_unix = has_expiry;
+  lease->retention_expires_at_unix = has_expiry ? expiry : 0;
+}
+
 int lc_error_set(lc_error *error, int code, long http_status,
                  const char *message, const char *detail,
                  const char *server_code, const char *correlation_id) {
@@ -1016,6 +1046,9 @@ lc_lease *lc_lease_clone(const lc_lease *source) {
   copy_handle->lease_expires_at_unix = source_handle->lease_expires_at_unix;
   copy_handle->has_query_hidden = source_handle->has_query_hidden;
   copy_handle->query_hidden = source_handle->query_hidden;
+  lc_lease_retention_observe(copy, source->retention_support,
+                             source->has_retention_expires_at_unix,
+                             source->retention_expires_at_unix);
   copy_handle->pouch_commit_immediately =
       source_handle->pouch_commit_immediately;
   copy_handle->pouch_state_removed = source_handle->pouch_state_removed;
@@ -2647,6 +2680,11 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->http_json_response_limit_bytes =
       config->http_json_response_limit_bytes;
   client->pub.acquire = lc_client_acquire_method;
+  client->pub.create_collection = lc_client_create_collection_method;
+  client->pub.open_collection = lc_client_open_collection_method;
+  client->pub.list_collections = lc_client_list_collections_method;
+  client->pub.collection_capabilities =
+      lc_client_collection_capabilities_method;
   client->pub.acquire_for_update = lc_client_acquire_for_update_method;
   client->pub.describe = lc_client_describe_method;
   client->pub.get = lc_client_get_method;

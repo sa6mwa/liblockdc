@@ -1,4 +1,4 @@
-#include "lockdc_lua.h"
+#include "lockdc_lua_internal.h"
 #include <lauxlib.h>
 #include <lualib.h>
 #include <poll.h>
@@ -8,6 +8,59 @@
 #include <time.h>
 
 static int allocated, freed;
+
+/* The production converter backs collection positions and XA borrow identity.
+ * Exercise its full unsigned range without manufacturing native transactions.
+ */
+static int integer_fields(lua_State *L) {
+  lua_newtable(L);
+  lcdc_set_u64_decimal(L, "zero", 0U);
+  lcdc_set_u64_decimal(L, "above_exact", ((uint64_t)1U << 53U) + 1U);
+  lcdc_set_u64_decimal(L, "maximum", (uint64_t)-1);
+  return 1;
+}
+typedef struct lua_heap_probe {
+  lua_Alloc allocate;
+  void *context;
+  unsigned int failures;
+  size_t limit;
+} lua_heap_probe;
+
+static void *probe_allocate(void *context, void *pointer, size_t old_size,
+                            size_t new_size) {
+  lua_heap_probe *probe = context;
+  if (new_size != 0 && (pointer == NULL || new_size > old_size) &&
+      probe->failures != 0) {
+    --probe->failures;
+    return NULL;
+  }
+  if (probe->limit != 0 && new_size > probe->limit &&
+      (pointer == NULL || new_size > old_size))
+    return NULL;
+  return probe->allocate(probe->context, pointer, old_size, new_size);
+}
+
+static int heap_fail(lua_State *L) {
+  void *context;
+  (void)lua_getallocf(L, &context);
+  lua_heap_probe *probe = context;
+  lua_Integer failures = luaL_checkinteger(L, 1);
+  if (failures < 0 || failures > 100)
+    return luaL_error(L, "invalid test allocation failure count");
+  probe->failures = (unsigned int)failures;
+  return 0;
+}
+
+static int heap_limit(lua_State *L) {
+  void *context;
+  (void)lua_getallocf(L, &context);
+  lua_heap_probe *probe = context;
+  lua_Integer limit = luaL_checkinteger(L, 1);
+  if (limit < 0 || (uintmax_t)limit > (uintmax_t)(size_t)-1)
+    return luaL_error(L, "invalid test allocation ceiling");
+  probe->limit = (size_t)limit;
+  return 0;
+}
 static int invalid_borrow(lua_State *L) {
   lc_xa_borrow *borrow = NULL;
   lc_error error;
@@ -80,6 +133,7 @@ static int wait_ready(lua_State *L) {
 }
 int main(int argc, char **argv) {
   lua_State *L;
+  lua_heap_probe heap = {0};
   lc_xa_driver driver;
   lc_error error;
   int rc;
@@ -88,6 +142,8 @@ int main(int argc, char **argv) {
   L = luaL_newstate();
   if (L == NULL)
     return 2;
+  heap.allocate = lua_getallocf(L, &heap.context);
+  lua_setallocf(L, probe_allocate, &heap);
   luaL_openlibs(L);
   luaL_requiref(L, "lockdc.core", luaopen_lockdc_core, 0);
   lua_pop(L, 1);
@@ -113,6 +169,12 @@ int main(int argc, char **argv) {
   lua_setglobal(L, "lockdc_test_counters");
   lua_pushcfunction(L, invalid_borrow);
   lua_setglobal(L, "lockdc_test_invalid_borrow");
+  lua_pushcfunction(L, integer_fields);
+  lua_setglobal(L, "lockdc_test_integer_fields");
+  lua_pushcfunction(L, heap_fail);
+  lua_setglobal(L, "lockdc_test_lua_heap_fail");
+  lua_pushcfunction(L, heap_limit);
+  lua_setglobal(L, "lockdc_test_lua_heap_limit");
   lua_pushcfunction(L, traceback);
   rc = luaL_loadfile(L, argv[1]);
   if (rc == LUA_OK)

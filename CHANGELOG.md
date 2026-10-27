@@ -1,5 +1,65 @@
 # Release notes
 
+## 0.22.0
+
+- Add ordered Pouch collections to C and Lua: immutable JSON bodies, permanent
+  positions, idempotent append/status, individual deletion, indexed LQL filters,
+  raw JSONL delivery with separate metadata, resume and incremental checkpoints.
+  Permanent-position ranges and first-N input windows select entries before
+  LQL; resume preserves the unconsumed input budget and checkpoints start the
+  next window after its accepted boundary.
+  Optional collection and entry retention use metadata-only changes and lazy
+  maintenance cleanup. Remote collection operations report unsupported.
+  Durable concurrent appends share fsync groups without retaining append or
+  shared-root mutation locks during synchronization; a commit barrier preserves
+  snapshot visibility and compaction safety while callers wait.
+
+- Add optional per-object state retention across C and Lua state APIs. Preserve
+  omitted policy, support explicit clearing, and anchor staged durations to the
+  durable commit time. Reclaim expired Pouch parents and owned attachments in
+  bounded, recoverable passes on the existing maintenance worker. Forward
+  explicit retention to remote lockd and expose response-local capability and
+  deadline observations. Core shared-library ABI advances from 5 to **6**;
+  mapped C `save` now accepts update options. PostgreSQL provider ABI stays 0.
+
+- Preserve automatic retention discovery across NoSync power loss by syncing
+  canonical state before retiring an empty namespace hint. Cover retention
+  clears, deletes, rotation, independent writers and synchronization failures.
+
+- Reduce repeated prerelease checks with explicit portability selections,
+  shared Lua E2E setup, controlled expiry clocks and an early AFL compiler check.
+
+- Upgrade cpkt to 0.5.2 and cpktdb to 0.3.1 for faster SDK validation. The
+  database SDK requires core 0.5.1 within its declared compatibility span.
+
+- Compile public headers independently as C89 in normal test builds, giving
+  clangd exact core/provider commands when opening headers directly. Verify
+  native editor discovery through the normal Debug compilation database.
+
+- Report deferred Pouch obsolete-file cleanup in completion diagnostics instead
+  of duplicate warnings. Label deleted artifacts correctly and distinguish
+  deliberate query-index invalidation from unexpected index corruption.
+
+### Upgrading from 0.21.x
+
+Recompile all C consumers against the new headers and core library: public
+request, result, and receiver structures have changed layout. Core shared
+libraries now use ABI **6** (`liblockdc.so.6` or `liblockdc.6.dylib`). Rebuild
+the optional PostgreSQL provider against that core; its own ABI remains **0**.
+
+Both `lc_lease_save()` and `lease->save()` take `const lc_update_opts *opts`
+immediately before the error argument. Pass `NULL` to retain the previous
+mapped-save behavior. Lua call signatures remain unchanged; retention is an
+optional request-table field.
+
+Existing state has no expiry by default. Omitted retention preserves the
+current policy; explicit zero clears it. Expiry only makes Pouch state eligible
+for deletion by maintenance, whose default cadence is 30 minutes. Disabling
+background compaction also disables automatic state expiry cleanup. Older
+remote lockd servers remain supported for ordinary calls; successful explicit
+retention requests require support/deadline observations to confirm application.
+See [state retention](docs/state-retention.md) for the complete contract.
+
 ## 0.21.0
 
 - Upgrade cpkt to 0.5.0 with OpenSSL 3.6.5 initialization-failure and

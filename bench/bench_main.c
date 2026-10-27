@@ -1,4 +1,5 @@
 #include "../tests/support/lc_test_tmp.h"
+#include "bench_collections.h"
 #include "lc/lc.h"
 #include "lc_api_internal.h"
 #include "lc_pouch.h"
@@ -2462,6 +2463,7 @@ BENCH_POUCH_LQL_FUNC(
 static const bench_case *bench_cases(void) {
   static const bench_case cases[] = {
       {"stream-copy", 1000L, bench_stream_copy},
+      {"collections", 1024L, bench_collections},
       {"pouch-open", 1000L, bench_pouch_open},
       {"pouch-namespace", 1000L, bench_pouch_namespace},
       {"pouch-perf-index-docs", 128L, bench_pouch_perf_index_docs},

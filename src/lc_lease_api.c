@@ -211,6 +211,9 @@ int lc_lease_describe_method(lc_lease *self, lc_error *error) {
   lease->pub.version = lease->version;
   lease->pub.has_query_hidden = lease->has_query_hidden;
   lease->pub.query_hidden = lease->query_hidden;
+  lc_lease_retention_observe(self, engine_res.retention_support,
+                             engine_res.has_retention_expires_at_unix,
+                             engine_res.retention_expires_at_unix);
   {
     pslog_field fields[5];
 
@@ -299,6 +302,13 @@ int lc_lease_get_method(lc_lease *self, lc_sink *dst, const lc_get_opts *opts,
   out->no_content = engine_res.no_content;
   out->version = engine_res.version;
   out->fencing_token = engine_res.fencing_token;
+  out->retention_support = engine_res.retention_support;
+  out->has_retention_expires_at_unix = engine_res.has_retention_expires_at_unix;
+  out->retention_expires_at_unix = engine_res.retention_expires_at_unix;
+  if (opts == NULL || !opts->public_read)
+    lc_lease_retention_observe(self, engine_res.retention_support,
+                               engine_res.has_retention_expires_at_unix,
+                               engine_res.retention_expires_at_unix);
   if (!engine_res.no_content) {
     rc = lc_lease_refresh_state_view(lease, engine_res.etag, engine_res.version,
                                      engine_res.fencing_token, 0L, error);
@@ -469,6 +479,13 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
   out->etag = etag;
   out->version = version;
   out->fencing_token = fencing_token;
+  out->retention_support = engine_res.retention_support;
+  out->has_retention_expires_at_unix = engine_res.has_retention_expires_at_unix;
+  out->retention_expires_at_unix = engine_res.retention_expires_at_unix;
+  if (opts == NULL || !opts->public_read)
+    lc_lease_retention_observe(self, engine_res.retention_support,
+                               engine_res.has_retention_expires_at_unix,
+                               engine_res.retention_expires_at_unix);
   out->correlation_id = correlation_id;
   if (!no_content) {
     rc = lc_lease_refresh_state_view(lease, engine_res.etag, engine_res.version,
@@ -486,7 +503,8 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
 }
 
 int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
-                         const void *src, lc_error *error) {
+                         const void *src, const lc_update_opts *opts,
+                         lc_error *error) {
   lc_lease_handle *lease;
   lc_engine_update_request engine_req;
   lc_engine_update_response engine_res;
@@ -504,7 +522,10 @@ int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
   memset(&update_opts, 0, sizeof(update_opts));
-  update_opts.content_type = "application/json";
+  if (opts != NULL)
+    update_opts = *opts;
+  if (update_opts.content_type == NULL)
+    update_opts.content_type = "application/json";
   engine_req.ns = lease->ns;
   engine_req.key = lease->key;
   engine_req.lease_id = lease->lease_id;
@@ -518,9 +539,12 @@ int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
     engine_req.has_if_version = 1;
   }
   engine_req.content_type = update_opts.content_type;
+  engine_req.has_retention_seconds = update_opts.has_retention_seconds;
+  engine_req.retention_seconds = update_opts.retention_seconds;
   rc = lc_engine_client_update_stream(lease->client->engine, &engine_req, map,
                                       src, &engine_res, &engine_error);
   if (rc != LC_OK) {
+    lc_lease_retention_observe(self, LC_STATE_RETENTION_UNKNOWN, 0, 0);
     rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[4];
@@ -544,6 +568,12 @@ int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
   rc = lc_lease_refresh_new_state_etag(lease, engine_res.new_state_etag,
                                        engine_res.new_version, error);
   if (rc != LC_OK) {
+
+    lc_lease_retention_observe(
+        self,
+        rc == LC_OK ? engine_res.retention_support : LC_STATE_RETENTION_UNKNOWN,
+        rc == LC_OK ? engine_res.has_retention_expires_at_unix : 0,
+        engine_res.retention_expires_at_unix);
     lc_engine_update_response_cleanup(&engine_res);
     lc_engine_error_cleanup(&engine_error);
     return rc;
@@ -559,6 +589,12 @@ int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
     fields[5] = lc_log_str_field("content_type", update_opts.content_type);
     lc_log_trace(lease->client->logger, "update.success", fields, 6U);
   }
+
+  lc_lease_retention_observe(
+      self,
+      rc == LC_OK ? engine_res.retention_support : LC_STATE_RETENTION_UNKNOWN,
+      rc == LC_OK ? engine_res.has_retention_expires_at_unix : 0,
+      engine_res.retention_expires_at_unix);
   lc_engine_update_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
   return LC_OK;
@@ -600,6 +636,9 @@ int lc_lease_update_method(lc_lease *self, lc_source *src,
   engine_req.if_state_etag = opts != NULL ? opts->if_state_etag : NULL;
   engine_req.if_version = opts != NULL ? opts->if_version : 0L;
   engine_req.has_if_version = opts != NULL ? opts->has_if_version : 0;
+  engine_req.has_retention_seconds =
+      opts != NULL ? opts->has_retention_seconds : 0;
+  engine_req.retention_seconds = opts != NULL ? opts->retention_seconds : 0;
   if (!engine_req.has_if_version && lease->version > 0L) {
     engine_req.if_version = lease->version;
     engine_req.has_if_version = 1;
@@ -610,6 +649,7 @@ int lc_lease_update_method(lc_lease *self, lc_source *src,
                                     lc_engine_read_bridge, &bridge, &engine_res,
                                     &engine_error);
   if (rc != LC_ENGINE_OK) {
+    lc_lease_retention_observe(self, LC_STATE_RETENTION_UNKNOWN, 0, 0);
     rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[7];
@@ -630,6 +670,12 @@ int lc_lease_update_method(lc_lease *self, lc_source *src,
   rc = lc_lease_refresh_new_state_etag(lease, engine_res.new_state_etag,
                                        engine_res.new_version, error);
   if (rc != LC_OK) {
+
+    lc_lease_retention_observe(
+        self,
+        rc == LC_OK ? engine_res.retention_support : LC_STATE_RETENTION_UNKNOWN,
+        rc == LC_OK ? engine_res.has_retention_expires_at_unix : 0,
+        engine_res.retention_expires_at_unix);
     lc_engine_update_response_cleanup(&engine_res);
     lc_engine_error_cleanup(&engine_error);
     return rc;
@@ -645,6 +691,12 @@ int lc_lease_update_method(lc_lease *self, lc_source *src,
     fields[5] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(lease->client->logger, "update.success", fields, 6U);
   }
+
+  lc_lease_retention_observe(
+      self,
+      rc == LC_OK ? engine_res.retention_support : LC_STATE_RETENTION_UNKNOWN,
+      rc == LC_OK ? engine_res.has_retention_expires_at_unix : 0,
+      engine_res.retention_expires_at_unix);
   lc_engine_update_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
   return LC_OK;
@@ -683,6 +735,8 @@ int lc_lease_mutate_method(lc_lease *self, const lc_mutate_req *req,
   engine_req.if_state_etag = req->if_state_etag;
   engine_req.if_version = req->if_version;
   engine_req.has_if_version = req->has_if_version;
+  engine_req.has_retention_seconds = req->has_retention_seconds;
+  engine_req.retention_seconds = req->retention_seconds;
   if (!engine_req.has_if_version && lease->version > 0L) {
     engine_req.if_version = lease->version;
     engine_req.has_if_version = 1;
@@ -692,6 +746,7 @@ int lc_lease_mutate_method(lc_lease *self, const lc_mutate_req *req,
   rc = lc_engine_client_mutate(lease->client->engine, &engine_req, &engine_res,
                                &engine_error);
   if (rc != LC_ENGINE_OK) {
+    lc_lease_retention_observe(self, LC_STATE_RETENTION_UNKNOWN, 0, 0);
     rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[4];
@@ -715,6 +770,12 @@ int lc_lease_mutate_method(lc_lease *self, const lc_mutate_req *req,
   rc = lc_lease_refresh_new_state_etag(lease, engine_res.new_state_etag,
                                        engine_res.new_version, error);
   if (rc != LC_OK) {
+
+    lc_lease_retention_observe(
+        self,
+        rc == LC_OK ? engine_res.retention_support : LC_STATE_RETENTION_UNKNOWN,
+        rc == LC_OK ? engine_res.has_retention_expires_at_unix : 0,
+        engine_res.retention_expires_at_unix);
     lc_engine_mutate_response_cleanup(&engine_res);
     lc_engine_error_cleanup(&engine_error);
     return rc;
@@ -730,6 +791,12 @@ int lc_lease_mutate_method(lc_lease *self, const lc_mutate_req *req,
     fields[5] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(lease->client->logger, "mutate.success", fields, 6U);
   }
+
+  lc_lease_retention_observe(
+      self,
+      rc == LC_OK ? engine_res.retention_support : LC_STATE_RETENTION_UNKNOWN,
+      rc == LC_OK ? engine_res.has_retention_expires_at_unix : 0,
+      engine_res.retention_expires_at_unix);
   lc_engine_mutate_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
   return LC_OK;
@@ -767,6 +834,8 @@ int lc_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
   if (req != NULL) {
     engine_req.if_version = req->if_version;
     engine_req.has_if_version = req->has_if_version;
+    engine_req.has_retention_seconds = req->has_retention_seconds;
+    engine_req.retention_seconds = req->retention_seconds;
     engine_req.has_query_hidden = req->has_query_hidden;
     engine_req.query_hidden = req->query_hidden;
   }
@@ -777,6 +846,7 @@ int lc_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
   rc = lc_engine_client_update_metadata(lease->client->engine, &engine_req,
                                         &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {
+    lc_lease_retention_observe(self, LC_STATE_RETENTION_UNKNOWN, 0, 0);
     rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[3];
@@ -812,6 +882,12 @@ int lc_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
     fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
     lc_log_trace(lease->client->logger, "metadata.success", fields, 5U);
   }
+
+  lc_lease_retention_observe(
+      self,
+      rc == LC_OK ? engine_res.retention_support : LC_STATE_RETENTION_UNKNOWN,
+      rc == LC_OK ? engine_res.has_retention_expires_at_unix : 0,
+      engine_res.retention_expires_at_unix);
   lc_engine_metadata_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
   return LC_OK;
@@ -856,6 +932,7 @@ int lc_lease_remove_method(lc_lease *self, const lc_remove_req *req,
   rc = lc_engine_client_remove(lease->client->engine, &engine_req, &engine_res,
                                &engine_error);
   if (rc != LC_ENGINE_OK) {
+    lc_lease_retention_observe(self, LC_STATE_RETENTION_UNKNOWN, 0, 0);
     rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[3];
@@ -882,6 +959,7 @@ int lc_lease_remove_method(lc_lease *self, const lc_remove_req *req,
     lease->pub.state_etag = lease->state_etag;
     lease->pub.version = lease->version;
   }
+  lc_lease_retention_observe(self, self->retention_support, 0, 0);
   {
     pslog_field fields[5];
 

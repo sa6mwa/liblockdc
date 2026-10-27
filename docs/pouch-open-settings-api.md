@@ -54,7 +54,7 @@ local client, err = lockdc.open({
 })
 ```
 
-Supported Lua keys exactly match the C fields: `single_writer`,
+Supported Lua keys map to the C settings: `single_writer`,
 `durable_sync`, `fsync_batch_max_ops`, `segment_target_bytes`,
 `indexer_flush_docs`, `indexer_flush_interval_seconds`,
 `background_compaction`, `disable_compaction_throttling`,
@@ -63,6 +63,22 @@ Supported Lua keys exactly match the C fields: `single_writer`,
 `crypto_generate_key_file`, and `compression`. Unknown keys and wrong Lua
 types are rejected. Backend and value failures return the normal structured
 `lockdc.open` error.
+
+Three Lua names are shorter deployment names: `background_compaction` maps to
+C `background_compaction_enabled`, `disable_compaction_throttling` maps to
+`compaction_throttling_disabled`, and `query_indexing` maps to
+`query_indexing_enabled`. Numeric settings require exact nonnegative Lua
+integers; unlike collection positions, these settings do not accept decimal
+strings.
+
+Root defaults are exclusive writing and NoSync (`single_writer=true`,
+`durable_sync=false`). Enabling durable sync waits for the root's shared commit
+group before acknowledging a mutation. NoSync does not guarantee persistence
+across power loss, and does not disable durability barriers needed for recovery
+or safe retirement of retention work. Background compaction defaults to enabled
+and also drives state/collection expiry and dropped-partition cleanup, normally
+on a 30-minute cadence. Outbox receipt/dead-letter reclamation instead belongs
+to its explicitly acquired dispatcher.
 
 ## Resolution rules
 

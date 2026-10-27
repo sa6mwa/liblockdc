@@ -19,6 +19,7 @@ repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 build_root="${LOCKDC_LUAROCKS_BUILD_ROOT:-${repo_root}/.luarocks-build}"
 module_dir="${build_root}/lockdc"
 object_path="${build_root}/lockdc_lua.${obj_ext}"
+collections_object_path="${build_root}/lockdc_collections_lua.${obj_ext}"
 xa_object_path="${build_root}/lockdc_xa_lua.${obj_ext}"
 resource_object_path="${build_root}/lockdc_xa_resource_lua.${obj_ext}"
 provider_object_path="${build_root}/lockdc_xa_provider_lua.${obj_ext}"
@@ -31,6 +32,7 @@ lockdc_release_base_url="https://github.com/sa6mwa/liblockdc/releases/download/v
 lockdc_assert_generated_path "$repo_root" "$build_root"
 lockdc_assert_generated_path "$repo_root" "$module_dir"
 lockdc_assert_generated_path "$repo_root" "$object_path"
+lockdc_assert_generated_path "$repo_root" "$collections_object_path"
 lockdc_assert_generated_path "$repo_root" "$xa_object_path"
 lockdc_assert_generated_path "$repo_root" "$resource_object_path"
 lockdc_assert_generated_path "$repo_root" "$provider_object_path"
@@ -164,7 +166,7 @@ run_cc() {
 }
 
 mkdir -p "${module_dir}"
-rm -f "${object_path}" "${xa_object_path}" "${resource_object_path}" "${provider_object_path}" "${module_path}" "${rock_install_module_path}"
+rm -f "${object_path}" "${collections_object_path}" "${xa_object_path}" "${resource_object_path}" "${provider_object_path}" "${module_path}" "${rock_install_module_path}"
 
 common_cflags="${cflags} -I${repo_root}/include -I${repo_root}/src -I${lua_incdir}"
 linkflags="${LDFLAGS:-}"
@@ -202,10 +204,11 @@ lockdc_cflags="${lockdc_cflags}${LOCKDC_CFLAGS_EXTRA:+ ${LOCKDC_CFLAGS_EXTRA}}"
 lockdc_libs="${lockdc_libs}${LOCKDC_LIBS_EXTRA:+ ${LOCKDC_LIBS_EXTRA}}"
 
 run_cc ${common_cflags} ${lockdc_cflags} -c "${repo_root}/src/lua/lockdc_lua.c" -o "${object_path}"
+run_cc ${common_cflags} ${lockdc_cflags} -c "${repo_root}/src/lua/lockdc_collections_lua.c" -o "${collections_object_path}"
 run_cc ${common_cflags} ${lockdc_cflags} -c "${repo_root}/src/lua/lockdc_xa_lua.c" -o "${xa_object_path}"
 run_cc ${common_cflags} ${lockdc_cflags} -c "${repo_root}/src/lua/lockdc_xa_resource_lua.c" -o "${resource_object_path}"
 run_cc ${common_cflags} ${lockdc_cflags} -c "${repo_root}/src/lua/lockdc_xa_provider_lua.c" -o "${provider_object_path}"
-run_cc ${libflag} -o "${module_path}" "${object_path}" "${xa_object_path}" "${resource_object_path}" "${provider_object_path}" ${linkflags} ${lockdc_libs}
+run_cc ${libflag} -o "${module_path}" "${object_path}" "${collections_object_path}" "${xa_object_path}" "${resource_object_path}" "${provider_object_path}" ${linkflags} ${lockdc_libs}
 if [ "${module_path}" != "${rock_install_module_path}" ]; then
   cp "${module_path}" "${rock_install_module_path}"
 fi

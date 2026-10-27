@@ -142,11 +142,12 @@ static int mock_lease_load(lc_lease *self, const lonejson_map *map, void *dst,
 }
 
 static int mock_lease_save(lc_lease *self, const lonejson_map *map,
-                           const void *src, lc_error *error) {
+                           const void *src, const lc_update_opts *opts,
+                           lc_error *error) {
   lc_public_mock_lease *mock;
 
   mock = (lc_public_mock_lease *)self;
-  lc_public_mock_record(&mock->save_call, self, map, src, error, NULL, NULL);
+  lc_public_mock_record(&mock->save_call, self, map, src, opts, error, NULL);
   return mock->rc;
 }
 

@@ -330,6 +330,11 @@ typedef struct lc_subscribe_bridge {
   lc_message *message;
 } lc_subscribe_bridge;
 
+int lc_state_retention_validate(int selected, long seconds, const char *ns,
+                                const char *key, lc_error *error);
+void lc_lease_retention_observe(lc_lease *lease,
+                                lc_state_retention_support support,
+                                int has_expiry, lc_unix_seconds expiry);
 int lc_error_set(lc_error *error, int code, long http_status,
                  const char *message, const char *detail,
                  const char *server_code, const char *correlation_id);
@@ -741,6 +746,20 @@ int lc_client_watch_queue_method(lc_client *self, const lc_watch_queue_req *req,
                                  const lc_watch_handler *handler,
                                  lc_error *error);
 void lc_client_handle_retain(lc_client_handle *client);
+/* Resolves the default and rejects namespaces reserved for internal state. */
+int lc_pouch_client_public_namespace(lc_client_handle *client, const char *ns,
+                                     const char **out, lc_error *error);
+int lc_client_create_collection_method(lc_client *,
+                                       const lc_collection_config *,
+                                       lc_collection **, lc_error *);
+int lc_client_open_collection_method(lc_client *, const lc_collection_config *,
+                                     lc_collection **, lc_error *);
+int lc_client_list_collections_method(lc_client *, const char *,
+                                      lc_collection_visit_fn, void *,
+                                      lc_error *);
+int lc_client_collection_capabilities_method(lc_client *,
+                                             lc_collection_capabilities *,
+                                             lc_error *);
 void lc_client_handle_release(lc_client_handle *client);
 void lc_client_close_method(lc_client *self);
 void lc_outbox_dispatchers_stop_for_client(lc_client_handle *client);
@@ -752,7 +771,8 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
                          const lc_get_opts *opts, lc_get_res *out,
                          lc_error *error);
 int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
-                         const void *src, lc_error *error);
+                         const void *src, const lc_update_opts *opts,
+                         lc_error *error);
 int lc_lease_update_method(lc_lease *self, lc_source *src,
                            const lc_update_opts *opts, lc_error *error);
 int lc_lease_mutate_method(lc_lease *self, const lc_mutate_req *req,

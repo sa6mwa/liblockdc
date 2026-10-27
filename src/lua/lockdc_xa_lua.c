@@ -1,9 +1,7 @@
 #include "lockdc_lua_internal.h"
 
-#include <inttypes.h>
 #include <lauxlib.h>
 #include <limits.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -654,6 +652,7 @@ static int operation_result(lua_State *L) {
   operation_ud *ud = luaL_testudata(L, 1, OP_MT);
   const lc_xa_coordinator_result *result;
   lc_xa_coordinator_result snapshot;
+  lua_Integer retired_count;
   if (ud == NULL || ud->handle == NULL)
     return bad(L, "XA operation is closed");
   result = lc_xa_coordinator_operation_result(ud->handle);
@@ -661,14 +660,15 @@ static int operation_result(lua_State *L) {
     return bad(L, "XA operation belongs to another process/thread");
   snapshot = *result;
   result = &snapshot;
-  if ((uint64_t)result->retired_count > (uint64_t)LUA_MAXINTEGER)
+  retired_count = (lua_Integer)result->retired_count;
+  if (retired_count < 0 || (size_t)retired_count != result->retired_count)
     return bad(L, "XA retired count exceeds Lua's integer range");
   lua_newtable(L);
   string_field(L, "txn_id", result->txn_id);
   string_field(L, "resource_id", result->resource_id);
   string_field(L, "sqlstate", result->sqlstate);
   number_field(L, "decision", result->decision);
-  number_field(L, "retired_count", (lua_Integer)result->retired_count);
+  number_field(L, "retired_count", retired_count);
   lua_pushboolean(L, result->done);
   lua_setfield(L, -2, "done");
   lua_pushboolean(L, result->applied);
@@ -744,7 +744,6 @@ static int borrow_view(lua_State *L) {
   lc_xa_connection_view view;
   lc_error *error;
   int rc;
-  char decimal[21];
   error = error_scope(L, 1);
   if (ud == NULL || ud->handle == NULL)
     return bad(L, "XA borrow is closed");
@@ -760,10 +759,8 @@ static int borrow_view(lua_State *L) {
   number_field(L, "resource_kind", view.resource_kind);
   number_field(L, "abi_version", view.abi_version);
   number_field(L, "size", (lua_Integer)view.size);
-  (void)snprintf(decimal, sizeof(decimal), "%" PRIu64, view.owner_process);
-  string_field(L, "owner_process", decimal);
-  (void)snprintf(decimal, sizeof(decimal), "%" PRIu64, view.generation);
-  string_field(L, "generation", decimal);
+  lcdc_set_u64_decimal(L, "owner_process", view.owner_process);
+  lcdc_set_u64_decimal(L, "generation", view.generation);
   /* Native pointers are deliberately available only through checked C interop.
    */
   return 1;

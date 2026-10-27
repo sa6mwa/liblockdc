@@ -28,11 +28,13 @@ typedef struct lc_pouch_open_options {
   unsigned long compaction_min_segment_count;
   uint64_t compaction_min_reclaimable_bytes;
   /**
-   * Idle delay for background compaction. The worker starts its delay only
-   * after a successful mutation and restarts it after every later mutation;
-   * it never sweeps at open. Continuous mutation deliberately defers automatic
-   * compaction, so callers requiring a maintenance deadline use
-   * `lc_pouch_maintenance_run` explicitly.
+   * Cadence for bounded background maintenance. A mutation or durable work
+   * rediscovered at open schedules the first turn after this interval.
+   * Later writes coalesce without postponing an already scheduled turn.
+   * Retention uses this same worker; expiry never promises exact deletion.
+   * Queued work, terminal markers, state-retention hints and collections share
+   * one fair rotation, with at most one selected namespace per turn.
+   * Explicit `lc_pouch_maintenance_run` starts its work immediately.
    */
   uint64_t compaction_interval_seconds;
   uint64_t compaction_delete_grace_seconds;
@@ -152,8 +154,8 @@ typedef struct lc_pouch_maintenance_options {
    * used by Pouch's background reclaimer; ordinary callers normally leave it
    * zero and use `force` for explicit full maintenance. */
   int terminal_reclaim;
-  /** Explicit, namespace-scoped whole-document TTL maintenance. This is never
-   * run automatically by Pouch's background reclaimer. */
+  /** Explicit namespace age sweep using the last update time. This is distinct
+   * from per-object expiry and is never enabled automatically. */
   lc_pouch_unix_seconds retention_updated_before_unix;
 } lc_pouch_maintenance_options;
 
@@ -165,6 +167,7 @@ typedef struct lc_pouch_maintenance_result {
   uint64_t compacted_segment_id;
   unsigned long cleanup_deleted_count;
   unsigned long cleanup_pending_count;
+  unsigned long compacted_collection_count;
   unsigned long retention_scanned_count;
   unsigned long retention_expired_count;
   unsigned long retention_deleted_state_count;
@@ -181,6 +184,7 @@ typedef int (*lc_pouch_state_precondition_fn)(void *context, lc_error *error);
 typedef struct lc_pouch_state_precondition_view {
   int found;
   lc_pouch_generation version;
+  lc_pouch_unix_seconds retention;
   const unsigned char *metadata;
   size_t metadata_length;
   int has_query_hidden;
@@ -198,6 +202,10 @@ typedef struct lc_pouch_state_write_options {
   const unsigned char *metadata;
   size_t metadata_length;
   int has_metadata;
+  /* Selected retention overrides the current state policy. A negative value
+   * requests a commit-relative duration; only staged records retain it. */
+  int has_retention;
+  lc_pouch_unix_seconds retention;
   /* Evaluates against the selected target-key projection without a reread. */
   lc_pouch_state_view_precondition_fn view_precondition;
   void *view_precondition_context;
@@ -239,6 +247,7 @@ typedef struct lc_pouch_state_write_options {
 } lc_pouch_state_write_options;
 
 typedef struct lc_pouch_state_write_result {
+  int has_body;
   char *etag;
   lc_pouch_generation index_seq;
   lc_pouch_generation version;
@@ -248,6 +257,9 @@ typedef struct lc_pouch_state_write_result {
   unsigned char *metadata;
   size_t metadata_length;
   lc_pouch_unix_seconds updated_at_unix;
+  /* Zero disables expiry; positive values are Unix deadlines; negative
+   * values are transaction-staged durations pending commit. */
+  lc_pouch_unix_seconds retention;
   int has_query_hidden;
   int query_hidden;
   /* Internal state-layer handoff: the enclosing durable commit cancels this
@@ -267,6 +279,9 @@ typedef struct lc_pouch_state_read_result {
   unsigned char *metadata;
   size_t metadata_length;
   lc_pouch_unix_seconds updated_at_unix;
+  /* Zero disables expiry; positive values are Unix deadlines; negative
+   * values are transaction-staged durations pending commit. */
+  lc_pouch_unix_seconds retention;
   int has_query_hidden;
   int query_hidden;
   int has_body;
@@ -286,6 +301,9 @@ typedef struct lc_pouch_state_visit_entry {
   const unsigned char *metadata;
   size_t metadata_length;
   lc_pouch_unix_seconds updated_at_unix;
+  /* Zero disables expiry; positive values are Unix deadlines; negative
+   * values are transaction-staged durations pending commit. */
+  lc_pouch_unix_seconds retention;
   int has_query_hidden;
   int query_hidden;
   /* Non-zero when this record owns a readable state payload (including an

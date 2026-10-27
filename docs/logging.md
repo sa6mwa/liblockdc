@@ -145,6 +145,45 @@ Pouch storage logs may use these storage-specific fields when relevant:
 - `elapsed_ms`
 - `error`
 
+## Pouch maintenance completion
+
+`compaction.complete` reports `cleanup_deleted` as the number of obsolete
+storage artifacts unlinked, and `pending` as artifacts awaiting a later cleanup
+pass. `maintenance.complete` carries the same cleanup counts. Pending artifacts
+are commonly within the configured deletion grace period; they are not failed
+state objects and do not generate a separate warning. Actual cleanup failures
+still return their filesystem error and follow the error-reporting path.
+
+`cache.load.index.invalidated` at debug level identifies the exact intentional
+invalidation marker written before compaction retires a derived query index.
+The next index flush/query still rebuilds that index from canonical state.
+Unexpected malformed index data continues to produce `cache.load.index.error`;
+intentional invalidation does not make a damaged index valid.
+
+## Per-object retention failures
+
+Retention maintenance uses `sys=storage.pouch`. These warnings describe failed
+work, not ordinary expiry or a parent protected by a live lease:
+
+| Event | Fields | Meaning |
+| --- | --- | --- |
+| `compaction.retention.hint.scan.error` | `error`, `code` | Startup could not discover durable namespace work hints; the existing maintenance cadence remains armed to retry. |
+| `retention.cleanup.error` | `ns`, `key`, `error`, `code` | A cleanup attempt failed. Unfinished durable work remains discoverable for recovery. `key` can be absent if failure preceded parent selection. |
+| `retention.rollback.error` | `ns`, `key`, `error` | Immediate recovery of an unfinished cleanup failed; subsequent maintenance must resume its recorded outcome. |
+
+Retention reuses the configured compaction cadence and processes a bounded
+number of parents per pass. Its journal and control-file durability barriers
+can involve multiple filesystem synchronizations per parent, even with
+`durable_sync=0`; the parent limit is not an elapsed-time limit. Reads do not
+run cleanup. Normal obsolete-file cleanup completion counts above describe
+storage artifacts, not the number of expired state objects.
+
+Retiring an empty discovery hint also requires a canonical-data sync under
+namespace authority. A failure there reports `retention.cleanup.error`, can
+omit `key` because no due parent was selected, and preserves the hint for retry.
+NoSync therefore permits these maintenance barriers without adding per-write
+retention synchronization.
+
 ## Data Safety
 
 Logs must never include production payload data: no state JSON, queue payload,

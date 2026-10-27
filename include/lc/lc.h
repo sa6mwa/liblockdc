@@ -77,6 +77,8 @@ typedef struct lc_message lc_message;
 typedef struct lc_consumer_service lc_consumer_service;
 /** Opaque durable Pouch history-retention consumer. */
 typedef struct lc_history_consumer lc_history_consumer;
+/** Ordered owner of immutable JSON state objects. */
+typedef struct lc_collection lc_collection;
 /** Opaque transactional outbox handle. */
 typedef struct lc_outbox lc_outbox;
 /** Opaque process-local outbox dispatcher. */
@@ -85,7 +87,7 @@ typedef struct lc_outbox_dispatcher lc_outbox_dispatcher;
 typedef struct lc_outbox_transaction lc_outbox_transaction;
 /** Restricted non-terminal lease view owned by an outbox transaction. */
 typedef struct lc_outbox_participant lc_outbox_participant;
-/** Owned, claimed outbox delivery returned from an outbox. */
+/** Owned, claimed outbox delivery returned from a dispatcher. */
 typedef struct lc_outbox_job lc_outbox_job;
 /** Opaque byte source used for uploads and streamed request bodies. */
 typedef struct lc_source lc_source;
@@ -113,11 +115,23 @@ typedef uint64_t lc_index_seq;
  */
 typedef uint64_t lc_tc_term;
 
-/** Snapshot fetched by `acquire_for_update()` before invoking the handler. */
+/** Backend support advertised by this state observation. UNKNOWN is not proof
+ * that a requested policy was applied: older remote servers may ignore it.
+ * A known expiry value of zero confirms no expiry; a positive duration staged
+ * in a transaction has no final deadline until commit. */
+typedef enum lc_state_retention_support {
+  LC_STATE_RETENTION_UNKNOWN = 0,
+  LC_STATE_RETENTION_SUPPORTED = 1,
+  LC_STATE_RETENTION_UNSUPPORTED = 2
+} lc_state_retention_support;
+
+/** Private snapshot fully captured in a temporary file before the handler.
+ * The reader is file-backed, rather than a live producer-to-handler stream.
+ * Its fields and reader are borrowed only for the handler invocation. */
 typedef struct lc_state_snapshot {
-  /** Streamed private state payload. `NULL` when `has_state` is zero. */
+  /** File-backed private state reader. NULL when has_state is zero. */
   lc_source *reader;
-  /** Non-zero when the key currently has a committed state document. */
+  /** Non-zero when the lease's private view contains a state body. */
   int has_state;
   /** State content type returned by lockd. */
   const char *content_type;
@@ -129,6 +143,13 @@ typedef struct lc_state_snapshot {
   long fencing_token;
   /** Correlation id for the snapshot read. */
   const char *correlation_id;
+  /** Backend support for per-object state retention. */
+  lc_state_retention_support retention_support;
+  /** Non-zero when the returned body has a known retention deadline. */
+  int has_retention_expires_at_unix;
+  /** Expiry eligibility boundary; zero confirms no expiry. Deletion is
+   * deferred. */
+  lc_unix_seconds retention_expires_at_unix;
 } lc_state_snapshot;
 
 /** Context passed to `lc_acquire_for_update_handler_fn`. */
@@ -157,7 +178,8 @@ typedef struct lc_error {
   char *message;
   /** Optional longer diagnostic detail. Owned by the error object. */
   char *detail;
-  /** Optional remote server error code. Owned by the error object. */
+  /** Optional stable backend reason code, including local Pouch reasons.
+   * Owned by the error object. */
   char *server_code;
   /** Optional request correlation id. Owned by the error object. */
   char *correlation_id;
@@ -294,9 +316,11 @@ typedef struct lc_pouch_endpoint_option {
 typedef struct lc_pouch_settings {
   /** Bitwise OR of the `LC_POUCH_SETTING_*` fields selected below. */
   uint64_t set_mask;
-  /** Explicit exclusive-writer policy. */
+  /** Exclusive root writer by default; zero selects shared-root writers. */
   int single_writer;
-  /** Wait for durable root fsync at each public mutation. */
+  /** Nonzero waits for root group-sync at public mutation boundaries.
+   * Default zero is NoSync. Recovery/retirement barriers can still force sync.
+   */
   int durable_sync;
   /** Maximum durable group-commit requests; zero leaves it unbounded. */
   uint64_t fsync_batch_max_ops;
@@ -306,7 +330,8 @@ typedef struct lc_pouch_settings {
   uint64_t indexer_flush_docs;
   /** Index flush interval in seconds; zero uses the default. */
   uint64_t indexer_flush_interval_seconds;
-  /** Enables or disables background Pouch compaction. */
+  /** Default enabled: root compaction, state/collection expiry and partition
+   * cleanup. Outbox receipt/dead-letter reclamation uses its dispatcher. */
   int background_compaction_enabled;
   /** Disables the background compaction I/O throttle. */
   int compaction_throttling_disabled;
@@ -476,13 +501,18 @@ enum {
   LC_ERR_TRANSPORT = 3,
   /** A remote response or durable local value violated its protocol. */
   LC_ERR_PROTOCOL = 4,
-  /** The lockd server rejected an otherwise valid request. */
+  /** The backend rejected the request, including local Pouch conflicts or
+   * missing records. Inspect http_status and server_code for the reason. */
   LC_ERR_SERVER = 5,
-  /** A caller-supplied local wait deadline elapsed before completion. */
+  /** An operation or local wait reached its deadline before completion. */
   LC_ERR_TIMEOUT = 6,
-  /** A durable transaction is awaiting participant completion. Preserve its
-   * identity and decision; retry recovery rather than application work. */
-  LC_ERR_PENDING = 7
+  /** Work is incomplete or temporarily blocked. Inspect operation done/wait
+   * information for asynchronous progress. For a durable transaction decision,
+   * preserve identity/decision and recover rather than replay application work.
+   */
+  LC_ERR_PENDING = 7,
+  /** The backend or selected execution mode does not support this feature. */
+  LC_ERR_UNSUPPORTED = 8
 };
 
 /**
@@ -520,6 +550,304 @@ struct lc_sink {
   /** Private implementation pointer owned by the sink. */
   void *impl;
 };
+
+/** Collection creation/open options. Names are nonempty UTF-8, at most 255
+ * bytes. An absent namespace selects the client's default namespace.
+ * Collection expiry drops the owner and all remaining entries; it does not
+ * assign a maximum age to each entry. New collections default to no expiry. */
+typedef struct lc_collection_config {
+  const char *ns;
+  const char *name;
+  /** Creation-only retention metadata. Omission creates without expiry.
+   * Opening with this flag selected is invalid. */
+  int has_retention_seconds;
+  /** Seconds from creation commit; zero disables expiry. */
+  long retention_seconds;
+} lc_collection_config;
+
+/** Collection identity and current counts. Strings are borrowed from the
+ * collection receiver, or for the duration of a list callback. Counts describe
+ * one committed observation and can change after the call returns. */
+typedef struct lc_collection_info {
+  const char *ns;
+  const char *name;
+  const char *collection_id;
+  uint64_t upper_position;
+  uint64_t live_count;
+  int query_indexing;
+  lc_state_retention_support retention_support;
+  int has_retention_expires_at_unix;
+  /** Collection's own expiry; lazy removal drops all its entries as well. */
+  lc_unix_seconds retention_expires_at_unix;
+} lc_collection_info;
+
+/** Endpoint-local capabilities, queried without a network request. Pouch
+ * supports LQL, both cursors, ranges and first-N; last-N and position selection
+ * are currently false. Remote clients currently return all fields as zero. */
+typedef struct lc_collection_capabilities {
+  int collections;
+  int lql_filter;
+  int resume;
+  int checkpoint;
+  int ranges;
+  int first_n;
+  int last_n;
+  int position_selection;
+} lc_collection_capabilities;
+
+/** Required retry identity, scoped to a collection incarnation. Supply 1..128
+ * ASCII letters, digits, '-', '_', '.', or '~'; retain it before uploading.
+ * Append accepts exactly one JSON object and compacts structural whitespace
+ * incrementally. Retry identity compares the compact bytes, not JSON meaning.
+ * Appends commit independently and do not participate in implicit/managed XA.
+ */
+typedef struct lc_collection_append_req {
+  const char *append_id;
+  int has_retention_seconds;
+  /** Entry retention from commit. Omission/zero means no expiry for a new
+   * entry. An identical retry preserves the existing deadline. */
+  long retention_seconds;
+} lc_collection_append_req;
+
+/** Retention-only state metadata. Omission preserves, zero clears, positive
+ * seconds replace the deadline from this metadata commit. Expired objects
+ * remain ordinary objects until maintenance deletes them. */
+typedef struct lc_collection_metadata_req {
+  int has_retention_seconds;
+  long retention_seconds;
+} lc_collection_metadata_req;
+
+/** One append outcome. Fixed-size metadata needs no cleanup. etag is the
+ * lowercase SHA-256 of the compact stored JSON, excluding the output LF.
+ * A deleted duplicate returns its original identity without recreating it. */
+typedef struct lc_collection_append_res {
+  uint64_t position;
+  uint64_t bytes;
+  char etag[65];
+  int duplicate;
+  int deleted;
+  lc_state_retention_support retention_support;
+  /** A deleted binding has no current state deadline. */
+  int has_retention_expires_at_unix;
+  lc_unix_seconds retention_expires_at_unix;
+} lc_collection_append_res;
+
+typedef enum lc_collection_append_state {
+  LC_COLLECTION_APPEND_ABSENT = 0,
+  LC_COLLECTION_APPEND_COMMITTED = 1,
+  LC_COLLECTION_APPEND_DELETED = 2
+} lc_collection_append_state;
+
+/** An absent observation neither cancels nor resolves an upload still running.
+ * entry facts are zero when state is ABSENT. */
+typedef struct lc_collection_append_status_res {
+  lc_collection_append_state state;
+  lc_collection_append_res entry;
+} lc_collection_append_status_res;
+
+typedef struct lc_collection_delete_res {
+  uint64_t position;
+  int deleted;
+  int already_deleted;
+} lc_collection_delete_res;
+
+typedef enum lc_collection_read_metadata_kind {
+  LC_COLLECTION_READ_METADATA_ENTRY = 1,
+  LC_COLLECTION_READ_METADATA_PROGRESS = 2
+} lc_collection_read_metadata_kind;
+
+/** Borrowed record/progress metadata, never injected into the JSON sink.
+ * ENTRY arrives after the stored JSON bytes and LF reached the sink. PROGRESS
+ * has no payload and only last_examined_position/resume_cursor are meaningful.
+ * Copy strings before retaining them beyond the callback. */
+typedef struct lc_collection_read_metadata {
+  lc_collection_read_metadata_kind kind;
+  uint64_t position;
+  const char *append_id;
+  const char *etag;
+  uint64_t bytes;
+  uint64_t last_examined_position;
+  const char *resume_cursor;
+  lc_state_retention_support retention_support;
+  int has_retention_expires_at_unix;
+  lc_unix_seconds retention_expires_at_unix;
+} lc_collection_read_metadata;
+
+/** Returns LC_OK to accept this boundary or an error to stop. An unsuccessful
+ * callback leaves the previous cursor accepted even if payload bytes arrived.
+ * Do not re-enter the same collection receiver. Deferred close is permitted. */
+typedef int (*lc_collection_read_metadata_fn)(
+    void *context, const lc_collection_read_metadata *metadata,
+    lc_error *error);
+typedef int (*lc_collection_visit_fn)(void *context,
+                                      const lc_collection_info *collection,
+                                      lc_error *error);
+
+/** Position bounds and an optional first-N window, followed by synchronous
+ * raw JSONL delivery. Repeat selection fields with either cursor purpose.
+ * Scalar/callback fields are copied at entry; strings and contexts remain
+ * borrowed for the call.
+ * No projection, reverse output, last-N or explicit position lists. */
+typedef struct lc_collection_read_opts {
+  const char *selector_lql;
+  const char *cursor;
+  lc_collection_read_metadata_fn on_metadata;
+  void *metadata_context;
+  /** Nonzero requests cooperative cancellation, checked between bounded chunks.
+   */
+  int (*cancelled)(void *context);
+  void *cancel_context;
+  /** Selects after; zero preserves the default start at the beginning. */
+  int has_after;
+  /** Exclusive permanent position. A start beyond current EOD is empty. */
+  uint64_t after;
+  /** Selects through; omission uses the captured committed EOD. */
+  int has_through;
+  /** Inclusive permanent position; must not precede selected after. */
+  uint64_t through;
+  /** Selects first_n; omission is unlimited, explicit zero is empty. */
+  int has_first_n;
+  /** Maximum live input entries in this logical window, across resumes.
+   * Counts before LQL filtering; nonmatches consume this budget, deleted
+   * entries do not. Output remains in ascending position order. */
+  uint64_t first_n;
+} lc_collection_read_opts;
+
+typedef enum lc_collection_read_stop_reason {
+  LC_COLLECTION_READ_FINISHED = 0,
+  LC_COLLECTION_READ_CANCELLED = 1,
+  LC_COLLECTION_READ_ERROR = 2
+} lc_collection_read_stop_reason;
+
+/** Owned read progress, also populated after an error once a view exists.
+ * Initialize before use and cleanup before reuse. resume_cursor is retained on
+ * incomplete reads; checkpoint_cursor starts a fresh read after completing the
+ * selected window.
+ * A first-N checkpoint starts the next window after its last safely examined
+ * input, including filtered-out inputs. Its resume cursor preserves the
+ * unconsumed input budget. Store cursors only after durably accepting the
+ * referenced output. Resume captures a new visibility view, so intervening
+ * deletes/expiry can remove entries; an individual deletion does not invalidate
+ * the cursor. A partial final object must be discarded before resuming into
+ * the same sink. */
+typedef struct lc_collection_read_res {
+  /** Captured EOD capped by through. A first-N window may complete earlier;
+   * an empty future range can start beyond this position. */
+  uint64_t upper_position;
+  uint64_t completed_records;
+  uint64_t last_examined_position;
+  int complete;
+  lc_collection_read_stop_reason stop_reason;
+  char *resume_cursor;
+  char *checkpoint_cursor;
+} lc_collection_read_res;
+
+/** Bound collection incarnation. Entry bodies and positions are immutable;
+ * retention metadata may change and entries may be deleted. All streams are
+ * borrowed. Closing a client or this receiver from a callback defers
+ * reclamation until the active call unwinds. Each returned collection must
+ * still be closed separately. */
+struct lc_collection {
+  int (*describe)(lc_collection *self, lc_collection_info *out,
+                  lc_error *error);
+  /** Changes the collection's own retention without visiting its entries. */
+  int (*metadata)(lc_collection *self, const lc_collection_metadata_req *req,
+                  lc_collection_info *out, lc_error *error);
+  int (*append)(lc_collection *self, const lc_collection_append_req *req,
+                lc_source *source, lc_collection_append_res *out,
+                lc_error *error);
+  int (*append_status)(lc_collection *self, const char *append_id,
+                       lc_collection_append_status_res *out, lc_error *error);
+  /** Changes only a live entry's retention; reads/writes no payload bytes. */
+  int (*entry_metadata)(lc_collection *self, uint64_t position,
+                        const lc_collection_metadata_req *req,
+                        lc_collection_append_res *out, lc_error *error);
+  /** Streams original compact JSON + LF, with separate per-object cursor
+   * metadata. A captured committed EOD bounds this invocation. */
+  int (*read)(lc_collection *self, const lc_collection_read_opts *opts,
+              lc_sink *sink, lc_collection_read_res *out, lc_error *error);
+  int (*delete_entry)(lc_collection *self, uint64_t position,
+                      lc_collection_delete_res *out, lc_error *error);
+  int (*drop)(lc_collection *self, lc_error *error);
+  void (*close)(lc_collection *self);
+  const char *ns;
+  const char *name;
+  const char *collection_id;
+  void *impl;
+};
+
+/** Initializes a creation/open config with no selected retention policy. */
+void lc_collection_config_init(lc_collection_config *config);
+void lc_collection_append_req_init(lc_collection_append_req *req);
+void lc_collection_metadata_req_init(lc_collection_metadata_req *req);
+void lc_collection_read_opts_init(lc_collection_read_opts *opts);
+void lc_collection_read_res_init(lc_collection_read_res *result);
+void lc_collection_read_res_cleanup(lc_collection_read_res *result);
+/** Creates a new collection incarnation; an existing name is a conflict.
+ * The returned receiver is owned and must be closed separately from client. */
+int lc_client_create_collection(lc_client *client,
+                                const lc_collection_config *config,
+                                lc_collection **out, lc_error *error);
+/** Opens an existing incarnation without creating or renewing it. Selecting
+ * creation retention here, even zero, is invalid. Returns an owned receiver. */
+int lc_client_open_collection(lc_client *client,
+                              const lc_collection_config *config,
+                              lc_collection **out, lc_error *error);
+/** Lists one namespace in name order, without state payloads. The visitor is
+ * synchronous and runs outside mutation locks. NULL ns selects the default. */
+int lc_client_list_collections(lc_client *client, const char *ns,
+                               lc_collection_visit_fn visitor, void *context,
+                               lc_error *error);
+/** Returns local capability facts even for a remote client with no collection
+ * support. Other remote collection operations return LC_ERR_UNSUPPORTED. */
+int lc_client_collection_capabilities(lc_client *client,
+                                      lc_collection_capabilities *out,
+                                      lc_error *error);
+int lc_collection_describe(lc_collection *collection, lc_collection_info *out,
+                           lc_error *error);
+/** Updates only the collection's own expiry; existing entries inherit no new
+ * per-entry age limit. Omission preserves, zero clears, positive seconds reset.
+ */
+int lc_collection_metadata(lc_collection *collection,
+                           const lc_collection_metadata_req *req,
+                           lc_collection_info *out, lc_error *error);
+/** Changes a live entry's expiry without payload I/O or changes to its body,
+ * ETag, append ID or permanent position. A deleted entry cannot be revived. */
+int lc_collection_entry_metadata(lc_collection *collection, uint64_t position,
+                                 const lc_collection_metadata_req *req,
+                                 lc_collection_append_res *out,
+                                 lc_error *error);
+/** Consumes a borrowed source once; never automatically replays an upload.
+ * A post-publication error may be ambiguous: use append_status or explicitly
+ * retry the same ID with a fresh source. An identical retry preserves expiry.
+ */
+int lc_collection_append(lc_collection *collection,
+                         const lc_collection_append_req *req, lc_source *source,
+                         lc_collection_append_res *out, lc_error *error);
+/** Observes ABSENT/COMMITTED/DELETED without a body. ABSENT returns LC_OK and
+ * does not cancel an upload in progress. Deleted retry identities are retained.
+ */
+int lc_collection_append_status(lc_collection *collection,
+                                const char *append_id,
+                                lc_collection_append_status_res *out,
+                                lc_error *error);
+/** Streams compact JSON objects plus LF into a required borrowed sink; metadata
+ * uses opts->on_metadata instead of the payload. NULL opts selects a full read.
+ * Bounds and first_n select inputs before LQL. Initialize out before calling
+ * and clean it up even on failure; it can contain accepted partial progress.
+ */
+int lc_collection_read(lc_collection *collection,
+                       const lc_collection_read_opts *opts, lc_sink *sink,
+                       lc_collection_read_res *out, lc_error *error);
+/** Deletes one entry while preserving its position gap and append retry
+ * identity. Repeating a known deletion reports already_deleted. */
+int lc_collection_delete_entry(lc_collection *collection, uint64_t position,
+                               lc_collection_delete_res *out, lc_error *error);
+/** Removes the incarnation logically. Physical reclamation is deferred;
+ * old handles/cursors cannot address a replacement with the same name. */
+int lc_collection_drop(lc_collection *collection, lc_error *error);
+/** Releases this receiver; active callback close defers reclamation. */
+void lc_collection_close(lc_collection *collection);
 
 /**
  * Callback used to resolve a file-backed local-mutate input into a new source.
@@ -621,6 +949,13 @@ typedef struct lc_describe_res {
   int query_hidden;
   /** Server correlation id for the describe response. */
   char *correlation_id;
+  /** Backend support for per-object state retention. */
+  lc_state_retention_support retention_support;
+  /** Non-zero when the returned body has a known retention deadline. */
+  int has_retention_expires_at_unix;
+  /** Expiry eligibility boundary; zero confirms no expiry. Deletion is
+   * deferred. */
+  lc_unix_seconds retention_expires_at_unix;
 } lc_describe_res;
 
 /** Optional flags that control state reads. */
@@ -643,6 +978,13 @@ typedef struct lc_get_res {
   long fencing_token;
   /** Server correlation id for the read response. */
   char *correlation_id;
+  /** Backend support for per-object state retention. */
+  lc_state_retention_support retention_support;
+  /** Non-zero when the returned body has a known retention deadline. */
+  int has_retention_expires_at_unix;
+  /** Expiry eligibility boundary; zero confirms no expiry. Deletion is
+   * deferred. */
+  lc_unix_seconds retention_expires_at_unix;
 } lc_get_res;
 
 /** Optional controls for streamed JSON state updates. */
@@ -655,6 +997,11 @@ typedef struct lc_update_opts {
   int has_if_version;
   /** Content type sent with the JSON state body. */
   const char *content_type;
+  /** Selects retention_seconds; omission preserves the existing policy. */
+  int has_retention_seconds;
+  /** Seconds from commit; zero clears expiry. Must be nonnegative if selected.
+   */
+  long retention_seconds;
 } lc_update_opts;
 
 /** Client-level update operation for an existing, credentialed lease reference.
@@ -670,6 +1017,11 @@ typedef struct lc_update_req {
   int has_if_version;
   /** Content type sent with the JSON state body. */
   const char *content_type;
+  /** Selects retention_seconds; omission preserves the existing policy. */
+  int has_retention_seconds;
+  /** Seconds from commit; zero clears expiry. Must be nonnegative if selected.
+   */
+  long retention_seconds;
 } lc_update_req;
 
 /** Metadata returned by a successful state update. */
@@ -682,6 +1034,13 @@ typedef struct lc_update_res {
   long bytes;
   /** Owned server correlation id for the update response. */
   char *correlation_id;
+  /** Backend support for per-object state retention. */
+  lc_state_retention_support retention_support;
+  /** Non-zero when the returned body has a known retention deadline. */
+  int has_retention_expires_at_unix;
+  /** Expiry eligibility boundary; zero confirms no expiry. Deletion is
+   * deferred. */
+  lc_unix_seconds retention_expires_at_unix;
 } lc_update_res;
 
 /** Request that applies one or more server-side state mutations. */
@@ -696,6 +1055,11 @@ typedef struct lc_mutate_req {
   lc_version if_version;
   /** Enables `if_version` when non-zero so version `0` stays representable. */
   int has_if_version;
+  /** Selects retention_seconds; omission preserves the existing policy. */
+  int has_retention_seconds;
+  /** Seconds from commit; zero clears expiry. Must be nonnegative if selected.
+   */
+  long retention_seconds;
 } lc_mutate_req;
 
 /**
@@ -734,6 +1098,11 @@ typedef struct lc_mutate_op {
   lc_version if_version;
   /** Enables `if_version` when non-zero so version `0` stays representable. */
   int has_if_version;
+  /** Selects retention_seconds; omission preserves the existing policy. */
+  int has_retention_seconds;
+  /** Seconds from commit; zero clears expiry. Must be nonnegative if selected.
+   */
+  long retention_seconds;
 } lc_mutate_op;
 
 /** Metadata returned by a successful mutate operation. */
@@ -746,6 +1115,13 @@ typedef struct lc_mutate_res {
   long bytes;
   /** Owned server correlation id for the mutate response. */
   char *correlation_id;
+  /** Backend support for per-object state retention. */
+  lc_state_retention_support retention_support;
+  /** Non-zero when the returned body has a known retention deadline. */
+  int has_retention_expires_at_unix;
+  /** Expiry eligibility boundary; zero confirms no expiry. Deletion is
+   * deferred. */
+  lc_unix_seconds retention_expires_at_unix;
 } lc_mutate_res;
 
 /** Request used to update lease metadata without replacing state bytes. */
@@ -758,6 +1134,11 @@ typedef struct lc_metadata_req {
   lc_version if_version;
   /** Enables `if_version` when non-zero so version `0` stays representable. */
   int has_if_version;
+  /** Selects retention_seconds; omission preserves the existing policy. */
+  int has_retention_seconds;
+  /** Seconds from commit; zero clears expiry. Must be nonnegative if selected.
+   */
+  long retention_seconds;
 } lc_metadata_req;
 
 /** Client-level metadata update operation for an existing, credentialed lease
@@ -773,6 +1154,11 @@ typedef struct lc_metadata_op {
   lc_version if_version;
   /** Enables `if_version` when non-zero so version `0` stays representable. */
   int has_if_version;
+  /** Selects retention_seconds; omission preserves the existing policy. */
+  int has_retention_seconds;
+  /** Seconds from commit; zero clears expiry. Must be nonnegative if selected.
+   */
+  long retention_seconds;
 } lc_metadata_op;
 
 /** Metadata returned by a successful metadata update. */
@@ -789,6 +1175,13 @@ typedef struct lc_metadata_res {
   int query_hidden;
   /** Server correlation id for the metadata response. */
   char *correlation_id;
+  /** Backend support for per-object state retention. */
+  lc_state_retention_support retention_support;
+  /** Non-zero when the returned body has a known retention deadline. */
+  int has_retention_expires_at_unix;
+  /** Expiry eligibility boundary; zero confirms no expiry. Deletion is
+   * deferred. */
+  lc_unix_seconds retention_expires_at_unix;
 } lc_metadata_res;
 
 /** Request used to remove state bytes while keeping the lease. */
@@ -2753,9 +3146,12 @@ struct lc_lease {
    * or byte values, use lonejson source-backed fields so serialization can read
    * from files or file descriptors without first materializing those bytes in
    * memory.
+   * `opts` uses the same retention and precondition controls as `update()`;
+   * `NULL` preserves retention and uses the normal fetched-version
+   * precondition.
    */
   int (*save)(lc_lease *self, const lonejson_map *map, const void *src,
-              lc_error *error);
+              const lc_update_opts *opts, lc_error *error);
   /**
    * Replaces the state document from a streamed JSON source.
    *
@@ -2861,6 +3257,14 @@ struct lc_lease {
   int has_query_hidden;
   /** Whether the state is hidden from normal query results. */
   int query_hidden;
+
+  /** Retention from the latest private observation; unknown after uncertain
+   * writes. */
+  lc_state_retention_support retention_support;
+  /** Non-zero when retention_expires_at_unix describes the observed body. */
+  int has_retention_expires_at_unix;
+  /** Expiry eligibility boundary; zero confirms no expiry. */
+  lc_unix_seconds retention_expires_at_unix;
 
   /** Private implementation pointer; callers must not inspect or modify it. */
   void *impl;
@@ -3188,6 +3592,12 @@ struct lc_outbox_participant {
   lc_version version;
   /** Borrowed staged state ETag, or `NULL`; valid until the next operation. */
   const char *state_etag;
+  /** Retention from the latest private state observation. */
+  lc_state_retention_support retention_support;
+  /** Non-zero when retention_expires_at_unix describes an existing body. */
+  int has_retention_expires_at_unix;
+  /** Expiry eligibility boundary; zero confirms no expiry. */
+  lc_unix_seconds retention_expires_at_unix;
   /** Private implementation pointer; callers must not inspect or modify it. */
   void *impl;
 };
@@ -3703,8 +4113,9 @@ struct lc_client {
   /** Private implementation pointer; callers must not inspect or modify it. */
   void *impl;
   /**
-   * Acquires a lease, fetches the private state snapshot, invokes `handler`,
-   * closes the snapshot, and releases the lease before returning.
+   * Acquires a lease, spools the complete private state snapshot to a temporary
+   * file, invokes `handler`, closes the snapshot, and releases the lease before
+   * returning.
    *
    * The `lc_acquire_for_update_context`, its `lease`, and its `state.reader`
    * are borrowed and valid only for the duration of the handler call. The
@@ -3751,6 +4162,18 @@ struct lc_client {
    * inspect or modify them.
    */
   void *reserved_extension_slots[7];
+  /** Creates an independently atomic journal collection. Pouch is supported;
+   * remote lockd returns LC_ERR_UNSUPPORTED until it implements collections. */
+  int (*create_collection)(lc_client *self, const lc_collection_config *config,
+                           lc_collection **out, lc_error *error);
+  int (*open_collection)(lc_client *self, const lc_collection_config *config,
+                         lc_collection **out, lc_error *error);
+  int (*list_collections)(lc_client *self, const char *ns,
+                          lc_collection_visit_fn visitor, void *context,
+                          lc_error *error);
+  int (*collection_capabilities)(lc_client *self,
+                                 lc_collection_capabilities *out,
+                                 lc_error *error);
 };
 
 /**
@@ -4233,10 +4656,12 @@ void lc_attachment_get_res_cleanup(lc_attachment_get_res *response);
 int lc_acquire(lc_client *client, const lc_acquire_req *req, lc_lease **out,
                lc_error *error);
 /**
- * Acquires a lease, fetches the private state snapshot, runs `handler`, and
- * always attempts to release the lease before returning. The handler receives a
- * borrowed lease and must not close or release it. Handler success commits
- * staged changes; handler failure releases with rollback.
+ * Acquires a lease, spools the complete private snapshot to a temporary file,
+ * runs `handler`, and always attempts to release the lease before returning.
+ * The handler receives a borrowed lease and must not close or release it.
+ * Handler success commits staged changes; handler failure releases with
+ * rollback. Use lc_acquire() and lc_lease_get() with a sink for transfer
+ * without snapshot staging.
  */
 int lc_acquire_for_update(lc_client *client, const lc_acquire_req *req,
                           lc_acquire_for_update_handler_fn handler,
@@ -4469,9 +4894,11 @@ int lc_lease_get(lc_lease *lease, lc_sink *dst, const lc_get_opts *opts,
 int lc_lease_load(lc_lease *lease, const lonejson_map *map, void *dst,
                   const lc_get_opts *opts, lc_get_res *out, lc_error *error);
 /** Convenience mapped-struct `update()` variant for lonejson-compatible data.
+ * `opts` may be `NULL`; selected retention is applied in the same streamed
+ * write.
  */
 int lc_lease_save(lc_lease *lease, const lonejson_map *map, const void *src,
-                  lc_error *error);
+                  const lc_update_opts *opts, lc_error *error);
 /** Streams a replacement state document into a bound lease. */
 int lc_lease_update(lc_lease *lease, lc_source *src, const lc_update_opts *opts,
                     lc_error *error);

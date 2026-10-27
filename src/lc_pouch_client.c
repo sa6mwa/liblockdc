@@ -1,10 +1,13 @@
 #include "lc_api_internal.h"
+#include "lc_log.h"
 #include "lc_mutate_stream.h"
 #include "lc_pouch.h"
 #include "lc_pouch_internal.h"
 #include "lc_pouch_namespace.h"
 #include "lc_pouch_path.h"
 #include "lc_pouch_query_index.h"
+#include "lc_pouch_query_plan.h"
+#include "lc_pouch_retention.h"
 #include "lc_pouch_xa.h"
 
 #include "lc_internal.h"
@@ -113,6 +116,8 @@ lc_pouch_test_hook lc_pouch_test_after_queue_batch_message_build_hook = NULL;
 void *lc_pouch_test_after_queue_batch_message_build_context = NULL;
 lc_pouch_test_hook lc_pouch_test_before_txn_decision_hook = NULL;
 void *lc_pouch_test_before_txn_decision_context = NULL;
+lc_pouch_test_hook lc_pouch_test_after_txn_decision_hook = NULL;
+void *lc_pouch_test_after_txn_decision_context = NULL;
 lc_pouch_test_hook lc_pouch_test_before_xa_owner_write_hook = NULL;
 void *lc_pouch_test_before_xa_owner_write_context = NULL;
 lc_pouch_test_hook lc_pouch_test_after_xa_retire_owner_hook = NULL;
@@ -160,12 +165,17 @@ static int lc_pouch_txn_metadata_has_lease_record(const unsigned char *bytes,
                                                   size_t length);
 static int lc_pouch_txn_apply_state_participant(
     lc_client_handle *client, const lc_lease_ref *lease, const char *ns,
-    const char *key, const char *txn_id, const char *state, lc_error *error);
+    const char *key, const char *txn_id, const char *state,
+    lc_pouch_unix_seconds commit_at_unix, lc_error *error);
 static int lc_pouch_txn_validate_participants(const lc_txn_decision_req *req,
                                               lc_error *error);
 static void lc_pouch_txn_trim_bounds(const char *value, const char **start,
                                      size_t *length);
-static int lc_pouch_now_unix(lc_pouch_unix_seconds *out, lc_error *error);
+static int
+lc_pouch_txn_validate_retention(lc_client_handle *client, const char *txn_id,
+                                const lc_txn_participant *participants,
+                                size_t count, lc_pouch_unix_seconds commit_at,
+                                lc_error *error);
 static int lc_pouch_binary_cursor_magic(lc_pouch_binary_cursor *cursor,
                                         const char magic[4], lc_error *error);
 static int lc_pouch_binary_cursor_string(lc_pouch_binary_cursor *cursor,
@@ -312,12 +322,14 @@ typedef struct lc_pouch_txn_queue_participant_context {
 } lc_pouch_txn_queue_participant_context;
 
 typedef struct lc_pouch_txn_state_participant_context {
-  lc_client_handle *client;
+  lc_pouch *pouch;
   const lc_lease_ref *lease;
   const char *ns;
   const char *key;
   const char *txn_id;
   const char *state;
+  lc_pouch_unix_seconds commit_at_unix;
+  int retention_cleanup;
 } lc_pouch_txn_state_participant_context;
 
 typedef struct lc_pouch_tc_endpoint_list {
@@ -397,6 +409,7 @@ typedef struct lc_pouch_queue_scan {
 typedef struct lc_pouch_txn_record {
   char *state;
   lc_pouch_unix_seconds expires_at_unix;
+  lc_pouch_unix_seconds commit_at_unix;
   lc_tc_term tc_term;
   char *target_backend_hash;
   lc_txn_participant *participants;
@@ -417,6 +430,7 @@ typedef struct lc_pouch_txn_decision_context {
   lc_pouch_state_write_result write_result;
   lc_pouch_generation response_index;
   int apply_decision;
+  lc_pouch_unix_seconds commit_at_unix;
 } lc_pouch_txn_decision_context;
 
 typedef struct lc_pouch_txn_vote_context {
@@ -431,6 +445,7 @@ typedef struct lc_pouch_txn_vote_context {
   lc_pouch_state_write_result write_result;
   lc_pouch_generation response_index;
   int apply_decision;
+  lc_pouch_unix_seconds commit_at_unix;
 } lc_pouch_txn_vote_context;
 
 typedef struct lc_pouch_txn_guard {
@@ -468,8 +483,15 @@ static int lc_pouch_client_txn_replay_impl(lc_client *self,
 static int
 lc_pouch_xa_decision_authority(lc_pouch_txn_decision_context *context,
                                int *sealed, lc_error *error);
-static int lc_pouch_xa_read_txn(lc_client_handle *client, const char *txn_id,
+static int lc_pouch_xa_read_txn(lc_pouch *pouch, const char *txn_id,
                                 lc_pouch_txn_record *record, lc_error *error);
+static int
+lc_pouch_retention_stage_begin(lc_client_handle *client,
+                               const lc_lease_ref *lease, const char *ns,
+                               const char *key, const char *txn_id,
+                               const lc_pouch_state_write_options *options,
+                               lc_pouch_txn_guard *guard, lc_error *error);
+static void lc_pouch_txn_guard_release(lc_pouch_txn_guard *guard);
 
 typedef struct lc_pouch_query_source_reader {
   lc_source *source;
@@ -879,9 +901,8 @@ static int lc_pouch_client_namespace_reserved(const char *ns) {
           strncmp(ns, ".xa/", 4U) == 0);
 }
 
-static int lc_pouch_client_public_namespace(lc_client_handle *client,
-                                            const char *ns, const char **out,
-                                            lc_error *error) {
+int lc_pouch_client_public_namespace(lc_client_handle *client, const char *ns,
+                                     const char **out, lc_error *error) {
   const char *resolved;
 
   if (out == NULL) {
@@ -3631,6 +3652,35 @@ static int lc_pouch_query_collect_selector_scalars(
   return LC_OK;
 }
 
+int lc_pouch_query_selector_exact_key(lql *runtime,
+                                      const lql_selector *selector,
+                                      const char *field,
+                                      const lc_allocator *allocator,
+                                      lc_pouch_index_term_key **out,
+                                      size_t *count, lc_error *error) {
+  lc_pouch_query_selector_scalar_list scalars;
+  lc_pouch_index_plain_term term;
+  int rc;
+  *out = NULL;
+  *count = 0U;
+  rc = lc_pouch_query_collect_selector_scalars(runtime, selector, &scalars,
+                                               error);
+  if (rc == LC_OK && scalars.count != 1U)
+    rc = lc_error_set(
+        error, LC_ERR_UNSUPPORTED, 0L,
+        "collection exact lookup requires one typed selector value", NULL, NULL,
+        NULL);
+  if (rc == LC_OK) {
+    term.field = field;
+    term.value = scalars.items[0].value;
+    term.value_type = scalars.items[0].value_type;
+    rc = lc_pouch_query_index_build_exact_terms(&term, 1U, out, count,
+                                                allocator, error);
+  }
+  lc_pouch_query_selector_scalar_list_cleanup(&scalars);
+  return rc;
+}
+
 static const lc_pouch_query_selector_scalar *
 lc_pouch_query_selector_scalar_next(lc_pouch_query_selector_scalar_list *list,
                                     lc_error *error) {
@@ -5399,6 +5449,8 @@ static int lc_pouch_lease_refresh_state(lc_lease_handle *lease,
   lease->version = version;
   lease->pub.state_etag = lease->state_etag;
   lease->pub.version = lease->version;
+  if (etag == NULL && version == 0)
+    lc_lease_retention_observe(&lease->pub, LC_STATE_RETENTION_SUPPORTED, 0, 0);
   return LC_OK;
 }
 
@@ -5414,7 +5466,7 @@ static void lc_pouch_lease_refresh_query_metadata(lc_lease_handle *lease,
   lease->pub.query_hidden = lease->query_hidden;
 }
 
-static int lc_pouch_now_unix(lc_pouch_unix_seconds *out, lc_error *error) {
+int lc_pouch_now_unix(lc_pouch_unix_seconds *out, lc_error *error) {
   struct timespec now;
 
   if (out == NULL) {
@@ -5499,6 +5551,27 @@ lc_pouch_lease_refresh_expiration(lc_lease_handle *lease,
   lease->pub.lease_expires_at_unix = lease_expires_at_unix;
 }
 
+static int lc_pouch_retention_options(lc_pouch_state_write_options *options,
+                                      int selected, long seconds,
+                                      const char *ns, const char *key,
+                                      lc_error *error) {
+  int rc = lc_state_retention_validate(selected, seconds, ns, key, error);
+  if (rc == LC_OK && selected) {
+    options->has_retention = 1;
+    options->retention = -(lc_pouch_unix_seconds)seconds;
+  }
+  return rc;
+}
+
+static void lc_pouch_lease_refresh_retention(lc_lease_handle *lease,
+                                             int has_body,
+                                             lc_pouch_unix_seconds policy) {
+  lease->pub.retention_support = LC_STATE_RETENTION_SUPPORTED;
+  lease->pub.has_retention_expires_at_unix = has_body && policy >= 0;
+  lease->pub.retention_expires_at_unix =
+      lease->pub.has_retention_expires_at_unix ? policy : 0;
+}
+
 static int lc_pouch_client_copy_state_metadata(
     const lc_pouch_state_read_result *read_result, lc_get_res *out,
     lc_error *error) {
@@ -5524,6 +5597,12 @@ static int lc_pouch_client_copy_state_metadata(
     return error != NULL ? error->code : LC_ERR_INVALID;
   }
   out->no_content = !read_result->found;
+  out->retention_support = LC_STATE_RETENTION_SUPPORTED;
+  out->has_retention_expires_at_unix = read_result->has_body &&
+                                       !read_result->staged_delete_marker &&
+                                       read_result->retention >= 0;
+  out->retention_expires_at_unix =
+      out->has_retention_expires_at_unix ? read_result->retention : 0;
   return LC_OK;
 }
 
@@ -5551,6 +5630,11 @@ static int lc_pouch_client_copy_update_metadata(
   }
   out->new_state_etag = etag;
   out->bytes = public_bytes;
+  out->retention_support = LC_STATE_RETENTION_SUPPORTED;
+  out->has_retention_expires_at_unix =
+      write_result->has_body && write_result->retention >= 0;
+  out->retention_expires_at_unix =
+      out->has_retention_expires_at_unix ? write_result->retention : 0;
   return LC_OK;
 }
 
@@ -5578,6 +5662,11 @@ static int lc_pouch_client_copy_mutate_metadata(
   }
   out->new_state_etag = etag;
   out->bytes = public_bytes;
+  out->retention_support = LC_STATE_RETENTION_SUPPORTED;
+  out->has_retention_expires_at_unix =
+      write_result->has_body && write_result->retention >= 0;
+  out->retention_expires_at_unix =
+      out->has_retention_expires_at_unix ? write_result->retention : 0;
   return LC_OK;
 }
 
@@ -8143,8 +8232,7 @@ static void lc_pouch_generate_lease_id(char *buffer, size_t buffer_size) {
   }
 }
 
-static int lc_pouch_lease_record_parse(lc_client_handle *client,
-                                       const unsigned char *bytes,
+static int lc_pouch_lease_record_parse(const unsigned char *bytes,
                                        size_t length,
                                        lc_pouch_generation version,
                                        lc_pouch_lease_record *record,
@@ -8222,7 +8310,7 @@ static int lc_pouch_lease_record_parse(lc_client_handle *client,
   } else {
     lc_pouch_lease_record_cleanup(record);
   }
-  (void)client;
+
   return rc;
 }
 
@@ -8283,7 +8371,7 @@ static int lc_pouch_read_lease_record(lc_client_handle *client, const char *ns,
   rc =
       lc_pouch_state_read_metadata(client->pouch, ns, key, &read_result, error);
   if (rc == LC_OK) {
-    rc = lc_pouch_lease_record_parse(client, read_result.metadata,
+    rc = lc_pouch_lease_record_parse(read_result.metadata,
                                      read_result.metadata_length,
                                      read_result.version, record, error);
   }
@@ -8439,7 +8527,7 @@ static int lc_pouch_validate_lease_metadata_view(
                         "pouch lease validation requires fencing_token", NULL,
                         NULL, NULL);
   }
-  rc = lc_pouch_lease_record_parse(client, state_view->metadata,
+  rc = lc_pouch_lease_record_parse(state_view->metadata,
                                    state_view->metadata_length,
                                    state_view->version, target, error);
   if (rc == LC_OK) {
@@ -8700,7 +8788,7 @@ static int lc_pouch_client_prepare_txn_stage_write(
                                              lease_state, NULL, error);
   if (rc == LC_OK) {
     rc = lc_pouch_lease_record_parse(
-        stage->client, lease_state->metadata, lease_state->metadata_length,
+        lease_state->metadata, lease_state->metadata_length,
         lease_state->version, &lease_record, error);
   }
   if (rc == LC_OK && options->query_index_operation_expires_at_unix != NULL) {
@@ -8765,6 +8853,20 @@ static int lc_pouch_client_prepare_txn_stage_write(
      * lease's durable state-version cursor. */
     stage->projected_version = 0UL;
   }
+  if (rc == LC_OK && *apply && !options->has_retention &&
+      !options->staged_delete_marker) {
+    /* A private directive, including explicit clear, survives omitted writes.
+     * A staged delete followed by recreation starts a fresh object. */
+    const lc_pouch_state_metadata_view *policy =
+        staged->found ? staged : committed;
+    if (policy->found && policy->has_body && !policy->is_delete_marker) {
+      options->has_retention = 1;
+      options->retention = policy->retention;
+    } else if (staged->found && staged->is_delete_marker) {
+      options->has_retention = 1;
+      options->retention = 0;
+    }
+  }
   /* Lease-only metadata must not hide its first staged body write. */
   if (rc == LC_OK && *apply && !options->has_query_hidden &&
       precondition_source->found && precondition_source->has_body &&
@@ -8787,6 +8889,7 @@ static int lc_pouch_client_stage_transaction_write(
     lc_pouch_state_write_options *options, lc_pouch_state_write_result *out,
     int *removed, lc_error *error) {
   lc_pouch_txn_stage_write_context context;
+  lc_pouch_txn_guard guard;
   lc_error discard_error;
   int discard_rc;
   int discarded;
@@ -8802,10 +8905,13 @@ static int lc_pouch_client_stage_transaction_write(
   context.key = key;
   context.txn_id = txn_id;
   context.removed = removed;
-  rc = lc_pouch_state_stage_write_prepared(
-      client != NULL ? client->pouch : NULL, ns, key, txn_id,
-      lease != NULL ? lease->key : NULL, source, options,
-      lc_pouch_client_prepare_txn_stage_write, &context, NULL, out, error);
+  rc = lc_pouch_retention_stage_begin(client, lease, ns, key, txn_id, options,
+                                      &guard, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_state_stage_write_prepared(
+        client != NULL ? client->pouch : NULL, ns, key, txn_id,
+        lease != NULL ? lease->key : NULL, source, options,
+        lc_pouch_client_prepare_txn_stage_write, &context, NULL, out, error);
   if (rc == LC_OK) {
     out->version = context.projected_version;
     if (context.projected_version != 0UL && lease != NULL &&
@@ -8860,6 +8966,7 @@ static int lc_pouch_client_stage_transaction_write(
       }
     }
   }
+  lc_pouch_txn_guard_release(&guard);
   lc_error_cleanup(&discard_error);
   return rc;
 }
@@ -8869,6 +8976,8 @@ static int lc_pouch_client_stage_transaction_metadata(
     const char *key, const char *txn_id, lc_pouch_state_write_options *options,
     lc_pouch_state_write_result *out, lc_error *error) {
   lc_pouch_txn_stage_write_context context;
+  lc_pouch_txn_guard guard;
+  int rc;
 
   memset(&context, 0, sizeof(context));
   context.client = client;
@@ -8876,10 +8985,15 @@ static int lc_pouch_client_stage_transaction_metadata(
   context.ns = ns;
   context.key = key;
   context.txn_id = txn_id;
-  return lc_pouch_state_stage_metadata_prepared(
-      client != NULL ? client->pouch : NULL, ns, key, txn_id,
-      lease != NULL ? lease->key : NULL, options,
-      lc_pouch_client_prepare_txn_stage_write, &context, out, error);
+  rc = lc_pouch_retention_stage_begin(client, lease, ns, key, txn_id, options,
+                                      &guard, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_state_stage_metadata_prepared(
+        client != NULL ? client->pouch : NULL, ns, key, txn_id,
+        lease != NULL ? lease->key : NULL, options,
+        lc_pouch_client_prepare_txn_stage_write, &context, out, error);
+  lc_pouch_txn_guard_release(&guard);
+  return rc;
 }
 
 static int lc_pouch_client_prepare_txn_mutation_stage_write(
@@ -8923,17 +9037,25 @@ static int lc_pouch_client_stage_transaction_mutation(
     lc_pouch_txn_mutation_context *mutation,
     lc_pouch_state_write_options *options, lc_pouch_state_write_result *out,
     lc_error *error) {
+  lc_pouch_txn_guard guard;
+  int rc;
   if (mutation == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch transaction mutation requires context", NULL,
                         NULL, "pouch");
   }
-  return lc_pouch_state_stage_write_prepared(
-      mutation->stage.client != NULL ? mutation->stage.client->pouch : NULL,
-      mutation->stage.ns, mutation->stage.key, mutation->stage.txn_id,
-      mutation->stage.lease != NULL ? mutation->stage.lease->key : NULL, NULL,
-      options, lc_pouch_client_prepare_txn_mutation_stage_write, mutation,
-      lc_pouch_client_prepare_txn_mutation_source, out, error);
+  rc = lc_pouch_retention_stage_begin(
+      mutation->stage.client, mutation->stage.lease, mutation->stage.ns,
+      mutation->stage.key, mutation->stage.txn_id, options, &guard, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_state_stage_write_prepared(
+        mutation->stage.client != NULL ? mutation->stage.client->pouch : NULL,
+        mutation->stage.ns, mutation->stage.key, mutation->stage.txn_id,
+        mutation->stage.lease != NULL ? mutation->stage.lease->key : NULL, NULL,
+        options, lc_pouch_client_prepare_txn_mutation_stage_write, mutation,
+        lc_pouch_client_prepare_txn_mutation_source, out, error);
+  lc_pouch_txn_guard_release(&guard);
+  return rc;
 }
 
 static int lc_pouch_client_stage_transaction_remove(
@@ -8999,7 +9121,7 @@ static int lc_pouch_queue_lease_acquire_prepare_metadata(
   memset(options, 0, sizeof(*options));
   ctx->write_prepared = 0;
   *apply = 1;
-  rc = lc_pouch_lease_record_parse(ctx->client, state_view->metadata,
+  rc = lc_pouch_lease_record_parse(state_view->metadata,
                                    state_view->metadata_length,
                                    state_view->version, &lease_record, error);
   if (rc == LC_OK && lease_record.found &&
@@ -10652,6 +10774,15 @@ static int lc_pouch_txn_parse_record(const char *bytes, size_t length,
                       "pouch transaction participant count does not match",
                       NULL, NULL, NULL);
   }
+  if (rc == LC_OK && cursor.length - cursor.offset == 8U) {
+    rc = lc_pouch_binary_cursor_i64(&cursor, &signed_value, error);
+    if (rc == LC_OK &&
+        (signed_value <= 0 || strcmp(record->state, "commit") != 0))
+      rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "pouch transaction commit timestamp is invalid", NULL,
+                        NULL, "pouch");
+    record->commit_at_unix = signed_value;
+  }
   if (rc == LC_OK && cursor.offset != cursor.length) {
     rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                       "pouch transaction record has trailing bytes", NULL, NULL,
@@ -10692,23 +10823,29 @@ static char *lc_pouch_txn_key(const char *txn_id, lc_error *error) {
  * In shared mode the root durable-mutation guard is acquired first, then this
  * root-local transaction lock coordinates joins and terminal releases. The
  * ordering prevents a transaction guard/root cycle across processes. */
-static int lc_pouch_txn_guard_acquire(lc_client_handle *client,
-                                      const char *txn_id,
-                                      lc_pouch_txn_guard *guard,
-                                      lc_error *error) {
+static size_t lc_pouch_txn_guard_stripe(const char *txn_id) {
+  uint64_t hash = ((uint64_t)0xcbf29ce4UL << 32U) | (uint64_t)0x84222325UL;
+  const unsigned char *cursor;
+  for (cursor = (const unsigned char *)txn_id; *cursor != '\0'; ++cursor) {
+    hash ^= (uint64_t)*cursor;
+    hash *= ((uint64_t)0x00000100UL << 32U) | (uint64_t)0x000001b3UL;
+  }
+  return (size_t)(hash % LC_POUCH_TXN_GUARD_STRIPES);
+}
+
+static int lc_pouch_txn_guard_lock(lc_pouch *pouch, const char *txn_id,
+                                   int wait, lc_pouch_txn_guard *guard,
+                                   lc_error *error) {
   char leaf[sizeof("pouch.implicit-txn-00.lock")];
   char *path;
   struct flock lock;
-  uint64_t hash;
   size_t stripe;
-  const unsigned char *cursor;
   int pthread_rc;
   int rc;
 
-  if (client == NULL || client->pouch == NULL || txn_id == NULL ||
-      txn_id[0] == '\0' || guard == NULL) {
+  if (pouch == NULL || txn_id == NULL || txn_id[0] == '\0' || guard == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch transaction guard requires client, xid, and "
+                        "pouch transaction guard requires pouch, xid, and "
                         "output",
                         NULL, NULL, "pouch");
   }
@@ -10716,17 +10853,12 @@ static int lc_pouch_txn_guard_acquire(lc_client_handle *client,
   guard->mutex = NULL;
   guard->mutex_locked = 0;
   guard->shared_mutation = NULL;
-  rc = lc_pouch_state_shared_mutation_enter(client->pouch,
-                                            &guard->shared_mutation, error);
+  rc = lc_pouch_state_shared_mutation_enter(pouch, &guard->shared_mutation,
+                                            error);
   if (rc != LC_OK) {
     return rc;
   }
-  hash = ((uint64_t)0xcbf29ce4UL << 32U) | (uint64_t)0x84222325UL;
-  for (cursor = (const unsigned char *)txn_id; *cursor != '\0'; ++cursor) {
-    hash ^= (uint64_t)*cursor;
-    hash *= ((uint64_t)0x00000100UL << 32U) | (uint64_t)0x000001b3UL;
-  }
-  stripe = (size_t)(hash % LC_POUCH_TXN_GUARD_STRIPES);
+  stripe = lc_pouch_txn_guard_stripe(txn_id);
   pthread_rc =
       pthread_once(&lc_pouch_txn_guard_once, lc_pouch_txn_guard_mutexes_init);
   if (pthread_rc != 0) {
@@ -10736,12 +10868,14 @@ static int lc_pouch_txn_guard_acquire(lc_client_handle *client,
                         strerror(pthread_rc), NULL, "pouch");
   }
   guard->mutex = &lc_pouch_txn_guard_mutexes[stripe];
-  pthread_rc = pthread_mutex_lock(guard->mutex);
+  pthread_rc = wait ? pthread_mutex_lock(guard->mutex)
+                    : pthread_mutex_trylock(guard->mutex);
   if (pthread_rc != 0) {
     guard->mutex = NULL;
     lc_pouch_state_shared_mutation_leave(&guard->shared_mutation);
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to lock pouch transaction guard",
+    return lc_error_set(error,
+                        pthread_rc == EBUSY ? LC_ERR_PENDING : LC_ERR_TRANSPORT,
+                        0L, "failed to lock pouch transaction guard",
                         strerror(pthread_rc), NULL, "pouch");
   }
   guard->mutex_locked = 1;
@@ -10755,8 +10889,7 @@ static int lc_pouch_txn_guard_acquire(lc_client_handle *client,
                         "failed to format pouch transaction guard", NULL, NULL,
                         "pouch");
   }
-  path = lc_pouch_path_join(&client->pouch->allocator, client->pouch->root_path,
-                            leaf);
+  path = lc_pouch_path_join(&pouch->allocator, pouch->root_path, leaf);
   if (path == NULL) {
     (void)pthread_mutex_unlock(guard->mutex);
     guard->mutex = NULL;
@@ -10767,7 +10900,7 @@ static int lc_pouch_txn_guard_acquire(lc_client_handle *client,
                         NULL, "pouch");
   }
   guard->fd = open(path, O_CREAT | O_RDWR, 0666);
-  lc_free_with_allocator(&client->pouch->allocator, path);
+  lc_free_with_allocator(&pouch->allocator, path);
   if (guard->fd < 0) {
     (void)pthread_mutex_unlock(guard->mutex);
     guard->mutex = NULL;
@@ -10780,7 +10913,8 @@ static int lc_pouch_txn_guard_acquire(lc_client_handle *client,
   memset(&lock, 0, sizeof(lock));
   lock.l_type = F_WRLCK;
   lock.l_whence = SEEK_SET;
-  while (fcntl(guard->fd, F_SETLKW, &lock) != 0) {
+  while (fcntl(guard->fd, wait ? F_SETLKW : F_SETLK, &lock) != 0) {
+    int lock_error = errno;
     if (errno == EINTR) {
       continue;
     }
@@ -10790,11 +10924,20 @@ static int lc_pouch_txn_guard_acquire(lc_client_handle *client,
     guard->mutex = NULL;
     guard->mutex_locked = 0;
     lc_pouch_state_shared_mutation_leave(&guard->shared_mutation);
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to lock pouch transaction guard",
-                        strerror(errno), NULL, "pouch");
+    return lc_error_set(error,
+                        !wait && (lock_error == EAGAIN || lock_error == EACCES)
+                            ? LC_ERR_PENDING
+                            : LC_ERR_TRANSPORT,
+                        0L, "failed to lock pouch transaction guard",
+                        strerror(lock_error), NULL, "pouch");
   }
   return LC_OK;
+}
+
+static int lc_pouch_txn_guard_acquire(lc_pouch *pouch, const char *txn_id,
+                                      lc_pouch_txn_guard *guard,
+                                      lc_error *error) {
+  return lc_pouch_txn_guard_lock(pouch, txn_id, 1, guard, error);
 }
 
 static void lc_pouch_txn_guard_release(lc_pouch_txn_guard *guard) {
@@ -10817,6 +10960,76 @@ static void lc_pouch_txn_guard_release(lc_pouch_txn_guard *guard) {
   guard->mutex = NULL;
   guard->mutex_locked = 0;
   lc_pouch_state_shared_mutation_leave(&guard->shared_mutation);
+}
+
+/* Selected private retention needs one immutable decision timestamp even for
+ * an otherwise single-participant implicit transaction. Enroll only the known
+ * lease, under existing xid authority; never search other namespaces. */
+static int
+lc_pouch_retention_stage_begin(lc_client_handle *client,
+                               const lc_lease_ref *lease, const char *ns,
+                               const char *key, const char *txn_id,
+                               const lc_pouch_state_write_options *options,
+                               lc_pouch_txn_guard *guard, lc_error *error) {
+  lc_pouch_txn_record record = {0};
+  lc_pouch_lease_record current = {0};
+  lc_txn_participant participant = {0};
+  lc_txn_decision_req request;
+  lc_txn_decision_res response = {0};
+  size_t i;
+  int enrolled = 0;
+  int rc;
+
+  memset(guard, 0, sizeof(*guard));
+  guard->fd = -1;
+  if (options == NULL || !options->has_retention)
+    return LC_OK;
+  if (client == NULL || lease == NULL || !lc_xid_is_valid(txn_id))
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "state retention staging requires an active transaction", NULL, NULL,
+        "pouch");
+  rc = lc_state_retention_validate(1, 0, ns, key, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_txn_guard_acquire(client->pouch, txn_id, guard, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_validate_lease_record(client, lease, ns, lease->key, &current,
+                                        error);
+  if (rc == LC_OK)
+    rc = lc_pouch_xa_read_txn(client->pouch, txn_id, &record, error);
+  if (rc == LC_OK && record.state != NULL &&
+      strcmp(record.state, "prepare") != 0)
+    rc =
+        lc_error_set(error, LC_ERR_INVALID, 0L,
+                     "state retention cannot change after transaction decision",
+                     NULL, NULL, "pouch");
+  for (i = 0; rc == LC_OK && i < record.participant_count; ++i) {
+    if (strcmp(record.participants[i].ns, ns) == 0 &&
+        strcmp(record.participants[i].key, lease->key) == 0) {
+      enrolled = 1;
+      if (record.votes[i] != 0)
+        rc =
+            lc_error_set(error, LC_ERR_INVALID, 0L,
+                         "state retention cannot change after participant vote",
+                         NULL, NULL, "pouch");
+    }
+  }
+  if (rc == LC_OK && !enrolled) {
+    lc_txn_decision_req_init(&request);
+    participant.ns = ns;
+    participant.key = lease->key;
+    request.txn_id = txn_id;
+    request.participants = &participant;
+    request.participant_count = 1;
+    request.expires_at_unix = current.expires_at_unix;
+    request.tc_term = record.tc_term;
+    rc = lc_pouch_client_txn_decision(&client->pub, &request, "prepare", 0,
+                                      NULL, 0, &response, error);
+  }
+  lc_txn_decision_res_cleanup(&response);
+  lc_pouch_txn_record_cleanup(&record);
+  lc_pouch_lease_record_cleanup(&current);
+  return rc;
 }
 
 static int lc_pouch_txn_record_exists(lc_client_handle *client,
@@ -10873,9 +11086,8 @@ lc_pouch_implicit_txn_leader_visit(const lc_pouch_state_visit_entry *entry,
     return LC_OK;
   }
   memset(&record, 0, sizeof(record));
-  rc = lc_pouch_lease_record_parse(leader->client, entry->metadata,
-                                   entry->metadata_length, entry->version,
-                                   &record, error);
+  rc = lc_pouch_lease_record_parse(entry->metadata, entry->metadata_length,
+                                   entry->version, &record, error);
   if (rc == LC_OK && record.found && !record.txn_explicit &&
       record.lease_id != NULL && record.lease_id[0] != '\0' &&
       record.txn_id != NULL && strcmp(record.txn_id, leader->txn_id) == 0 &&
@@ -11163,6 +11375,9 @@ static int lc_pouch_txn_build_record(const lc_pouch_txn_record *txn_record,
                                             error);
     }
   }
+  if (rc == LC_OK && txn_record->commit_at_unix > 0)
+    rc = lc_pouch_txn_buffer_append_i64(record, txn_record->commit_at_unix,
+                                        error);
   if (rc != LC_OK) {
     lc_pouch_txn_buffer_cleanup(record);
   }
@@ -11276,8 +11491,8 @@ lc_pouch_txn_collect_attachment_staged(const lc_pouch_state_visit_entry *entry,
 }
 
 static int lc_pouch_collect_staged_attachment_bases(
-    lc_client_handle *client, const char *ns, const char *key,
-    const char *txn_id, lc_pouch_txn_key_list *out, lc_error *error) {
+    lc_pouch *pouch, const char *ns, const char *key, const char *txn_id,
+    lc_pouch_txn_key_list *out, lc_error *error) {
   lc_pouch_txn_attachment_collect collect;
   char *prefix;
   char *staged_prefix;
@@ -11298,7 +11513,7 @@ static int lc_pouch_collect_staged_attachment_bases(
   collect.committed_prefix_len = strlen(prefix);
   collect.staged_prefix = staged_prefix;
   collect.staged_prefix_len = strlen(staged_prefix);
-  rc = lc_pouch_state_visit_prefix(client->pouch, ns, staged_prefix,
+  rc = lc_pouch_state_visit_prefix(pouch, ns, staged_prefix,
                                    lc_pouch_txn_collect_attachment_staged,
                                    &collect, error);
   if (rc == LC_OK) {
@@ -11311,8 +11526,7 @@ static int lc_pouch_collect_staged_attachment_bases(
   return rc;
 }
 
-static int lc_pouch_txn_commit_attachment_stage(lc_client_handle *client,
-                                                const char *ns,
+static int lc_pouch_txn_commit_attachment_stage(lc_pouch *pouch, const char *ns,
                                                 const char *base_key,
                                                 const char *txn_id,
                                                 lc_error *error) {
@@ -11330,17 +11544,16 @@ static int lc_pouch_txn_commit_attachment_stage(lc_client_handle *client,
   if (staged_key == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  rc = lc_pouch_state_read(client->pouch, ns, staged_key, &staged, error);
+  rc = lc_pouch_state_read(pouch, ns, staged_key, &staged, error);
   if (rc == LC_OK && staged.found &&
       lc_pouch_attachment_is_delete_marker(staged.content_type)) {
     options.object_record = 1;
-    rc = lc_pouch_state_delete(client->pouch, ns, base_key, &options, &result,
-                               error);
-    lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+    rc = lc_pouch_state_delete(pouch, ns, base_key, &options, &result, error);
+    lc_pouch_state_write_result_cleanup(&pouch->allocator, &result);
     if (rc == LC_OK) {
-      rc = lc_pouch_state_delete(client->pouch, ns, staged_key, &options,
-                                 &result, error);
-      lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+      rc = lc_pouch_state_delete(pouch, ns, staged_key, &options, &result,
+                                 error);
+      lc_pouch_state_write_result_cleanup(&pouch->allocator, &result);
     }
   } else if (rc == LC_OK) {
     options.content_type = staged.content_type;
@@ -11350,33 +11563,34 @@ static int lc_pouch_txn_commit_attachment_stage(lc_client_handle *client,
     options.has_query_hidden = 1;
     options.query_hidden = 1;
     options.object_record = 1;
-    rc = lc_pouch_state_write(client->pouch, ns, base_key, staged.body,
-                              &options, &result, error);
+    rc = lc_pouch_state_write(pouch, ns, base_key, staged.body, &options,
+                              &result, error);
     if (rc == LC_OK) {
-      lc_pouch_state_write_result_cleanup(&client->allocator, &result);
-      rc = lc_pouch_state_delete(client->pouch, ns, staged_key, &options,
-                                 &result, error);
+      lc_pouch_state_write_result_cleanup(&pouch->allocator, &result);
+      rc = lc_pouch_state_delete(pouch, ns, staged_key, &options, &result,
+                                 error);
     }
-    lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+    lc_pouch_state_write_result_cleanup(&pouch->allocator, &result);
   }
   lc_free_with_allocator(NULL, staged_key);
-  lc_pouch_state_read_result_cleanup(&client->allocator, &staged);
+  lc_pouch_state_read_result_cleanup(&pouch->allocator, &staged);
   return rc;
 }
 
-static int lc_pouch_txn_apply_attachment_participant(
-    lc_client_handle *client, const char *ns, const char *key,
-    const char *txn_id, const char *state, lc_error *error) {
+static int
+lc_pouch_txn_apply_attachment_participant(lc_pouch *pouch, const char *ns,
+                                          const char *key, const char *txn_id,
+                                          const char *state, lc_error *error) {
   lc_pouch_txn_key_list base_keys;
   size_t i;
   int rc;
 
   memset(&base_keys, 0, sizeof(base_keys));
-  rc = lc_pouch_collect_staged_attachment_bases(client, ns, key, txn_id,
+  rc = lc_pouch_collect_staged_attachment_bases(pouch, ns, key, txn_id,
                                                 &base_keys, error);
   for (i = 0U; rc == LC_OK && i < base_keys.count; ++i) {
     if (strcmp(state, "commit") == 0) {
-      rc = lc_pouch_txn_commit_attachment_stage(client, ns, base_keys.keys[i],
+      rc = lc_pouch_txn_commit_attachment_stage(pouch, ns, base_keys.keys[i],
                                                 txn_id, error);
     } else if (strcmp(state, "rollback") == 0) {
       char *staged_key;
@@ -11389,9 +11603,8 @@ static int lc_pouch_txn_apply_attachment_participant(
         lc_pouch_state_write_result result;
 
         memset(&result, 0, sizeof(result));
-        rc = lc_pouch_state_delete(client->pouch, ns, staged_key, NULL, &result,
-                                   error);
-        lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+        rc = lc_pouch_state_delete(pouch, ns, staged_key, NULL, &result, error);
+        lc_pouch_state_write_result_cleanup(&pouch->allocator, &result);
       }
       lc_free_with_allocator(NULL, staged_key);
     }
@@ -11484,7 +11697,7 @@ static int lc_pouch_queue_clear_lease_key_locked(lc_client_handle *client,
                                              &read_result, error);
     if (rc == LC_OK) {
       rc = lc_pouch_lease_record_parse(
-          client, read_result.metadata, read_result.metadata_length,
+          read_result.metadata, read_result.metadata_length,
           read_result.version, &lease_record, error);
     }
     lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
@@ -11641,7 +11854,7 @@ static int lc_pouch_txn_apply_queue_participant_locked(void *context,
         ctx->client->pouch, ctx->ns, ctx->lease_key, &read_result, error);
     if (rc == LC_OK) {
       rc = lc_pouch_lease_record_parse(
-          ctx->client, read_result.metadata, read_result.metadata_length,
+          read_result.metadata, read_result.metadata_length,
           read_result.version, &lease_record, error);
     }
     lc_pouch_state_read_result_cleanup(&ctx->client->allocator, &read_result);
@@ -11798,14 +12011,14 @@ static int lc_pouch_txn_metadata_has_lease_record(const unsigned char *bytes,
 }
 
 static int lc_pouch_txn_clear_lease_locked(
-    lc_client_handle *client, const char *ns, const char *key,
+    lc_pouch *pouch, const char *ns, const char *key,
     const lc_pouch_lease_record *lease_record, lc_error *error) {
   lc_pouch_txn_buffer buffer;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result result;
   int rc;
 
-  if (client == NULL || ns == NULL || key == NULL || lease_record == NULL ||
+  if (pouch == NULL || ns == NULL || key == NULL || lease_record == NULL ||
       lease_record->owner == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch transaction lease clear requires context", NULL,
@@ -11822,10 +12035,10 @@ static int lc_pouch_txn_clear_lease_locked(
     options.has_metadata = 1;
     options.metadata = (const unsigned char *)buffer.bytes;
     options.metadata_length = buffer.length;
-    rc = lc_pouch_state_update_metadata_locked(client->pouch, ns, key, &options,
+    rc = lc_pouch_state_update_metadata_locked(pouch, ns, key, &options,
                                                &result, error);
   }
-  lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+  lc_pouch_state_write_result_cleanup(&pouch->allocator, &result);
   lc_pouch_txn_buffer_cleanup(&buffer);
   return rc;
 }
@@ -11843,7 +12056,7 @@ static int lc_pouch_txn_apply_state_participant_locked(void *context,
   int rc;
 
   ctx = (lc_pouch_txn_state_participant_context *)context;
-  if (ctx == NULL || ctx->client == NULL || ctx->ns == NULL ||
+  if (ctx == NULL || ctx->pouch == NULL || ctx->ns == NULL ||
       ctx->key == NULL || ctx->txn_id == NULL || ctx->state == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch transaction state participant requires context",
@@ -11856,8 +12069,8 @@ static int lc_pouch_txn_apply_state_participant_locked(void *context,
   now_seconds = 0L;
   discarded = 0;
   active_lease = 0;
-  rc = lc_pouch_state_read_metadata_view_locked(
-      ctx->client->pouch, ctx->ns, ctx->key, &state_view, &fallback, error);
+  rc = lc_pouch_state_read_metadata_view_locked(ctx->pouch, ctx->ns, ctx->key,
+                                                &state_view, &fallback, error);
   if (rc == LC_OK && ctx->lease != NULL) {
     if (ctx->lease->fencing_token <= 0L) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -11866,8 +12079,8 @@ static int lc_pouch_txn_apply_state_participant_locked(void *context,
     }
     if (rc == LC_OK) {
       rc = lc_pouch_lease_record_parse(
-          ctx->client, state_view.metadata, state_view.metadata_length,
-          state_view.version, &lease_record, error);
+          state_view.metadata, state_view.metadata_length, state_view.version,
+          &lease_record, error);
     }
     if (rc == LC_OK &&
         (!lease_record.found || strcmp(lease_record.ns, ctx->ns) != 0 ||
@@ -11884,16 +12097,16 @@ static int lc_pouch_txn_apply_state_participant_locked(void *context,
     if (rc == LC_OK && lease_record.expires_at_unix <= now_seconds) {
       /* Match lockd's expiry path: discard this expired holder's staged
        * changes, clear its lease, and report an idempotent release. */
-      rc = lc_pouch_state_discard_staged_locked(ctx->client->pouch, ctx->ns,
-                                                ctx->key, lease_record.txn_id,
-                                                &discarded, error);
+      rc = lc_pouch_state_discard_staged_locked(ctx->pouch, ctx->ns, ctx->key,
+                                                lease_record.txn_id, &discarded,
+                                                error);
       if (rc == LC_OK) {
         rc = lc_pouch_txn_apply_attachment_participant(
-            ctx->client, ctx->ns, ctx->key, lease_record.txn_id, "rollback",
+            ctx->pouch, ctx->ns, ctx->key, lease_record.txn_id, "rollback",
             error);
       }
       if (rc == LC_OK) {
-        rc = lc_pouch_txn_clear_lease_locked(ctx->client, ctx->ns, ctx->key,
+        rc = lc_pouch_txn_clear_lease_locked(ctx->pouch, ctx->ns, ctx->key,
                                              &lease_record, error);
       }
       goto cleanup;
@@ -11909,7 +12122,7 @@ static int lc_pouch_txn_apply_state_participant_locked(void *context,
   } else if (rc == LC_OK &&
              lc_pouch_txn_metadata_has_lease_record(
                  state_view.metadata, state_view.metadata_length)) {
-    rc = lc_pouch_lease_record_parse(ctx->client, state_view.metadata,
+    rc = lc_pouch_lease_record_parse(state_view.metadata,
                                      state_view.metadata_length,
                                      state_view.version, &lease_record, error);
     active_lease = lease_record.found && lease_record.lease_id != NULL &&
@@ -11921,51 +12134,59 @@ static int lc_pouch_txn_apply_state_participant_locked(void *context,
     goto cleanup;
   }
   if (rc == LC_OK && strcmp(ctx->state, "commit") == 0) {
-    rc = lc_pouch_state_commit_staged_locked(ctx->client->pouch, ctx->ns,
-                                             ctx->key, ctx->txn_id,
-                                             &write_result, 1, error);
+    rc = lc_pouch_state_commit_staged_locked(ctx->pouch, ctx->ns, ctx->key,
+                                             ctx->txn_id, &write_result, 1,
+                                             ctx->commit_at_unix, error);
   } else if (rc == LC_OK && strcmp(ctx->state, "rollback") == 0) {
-    rc = lc_pouch_state_discard_staged_locked(
-        ctx->client->pouch, ctx->ns, ctx->key, ctx->txn_id, &discarded, error);
+    rc = lc_pouch_state_discard_staged_locked(ctx->pouch, ctx->ns, ctx->key,
+                                              ctx->txn_id, &discarded, error);
   } else if (rc == LC_OK) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch transaction state is unsupported", NULL, NULL,
                       NULL);
   }
+  if (rc == LC_OK && ctx->retention_cleanup)
+    rc =
+        lc_pouch_retention_note_phase(LC_POUCH_RETENTION_PARENT_APPLIED, error);
   if (rc == LC_OK) {
     rc = lc_pouch_txn_apply_attachment_participant(
-        ctx->client, ctx->ns, ctx->key, ctx->txn_id, ctx->state, error);
+        ctx->pouch, ctx->ns, ctx->key, ctx->txn_id, ctx->state, error);
   }
+  if (rc == LC_OK && ctx->retention_cleanup)
+    rc = lc_pouch_retention_note_phase(LC_POUCH_RETENTION_ATTACHMENTS_APPLIED,
+                                       error);
   if (rc == LC_OK && active_lease) {
-    rc = lc_pouch_txn_clear_lease_locked(ctx->client, ctx->ns, ctx->key,
+    rc = lc_pouch_txn_clear_lease_locked(ctx->pouch, ctx->ns, ctx->key,
                                          &lease_record, error);
   }
 
 cleanup:
   if (rc != LC_OK && write_result.query_index_operation_guard_started) {
-    lc_pouch_query_index_operation_cancel(ctx->client->pouch, ctx->ns, ctx->key,
+    lc_pouch_query_index_operation_cancel(ctx->pouch, ctx->ns, ctx->key,
                                           ctx->txn_id);
     write_result.query_index_operation_guard_started = 0;
   }
-  lc_pouch_state_write_result_cleanup(&ctx->client->allocator, &write_result);
+  lc_pouch_state_write_result_cleanup(&ctx->pouch->allocator, &write_result);
   lc_pouch_lease_record_cleanup(&lease_record);
-  lc_pouch_state_read_result_cleanup(&ctx->client->allocator, &fallback);
+  lc_pouch_state_read_result_cleanup(&ctx->pouch->allocator, &fallback);
   return rc;
 }
 
 static int lc_pouch_txn_apply_state_participant(
     lc_client_handle *client, const lc_lease_ref *lease, const char *ns,
-    const char *key, const char *txn_id, const char *state, lc_error *error) {
+    const char *key, const char *txn_id, const char *state,
+    lc_pouch_unix_seconds commit_at_unix, lc_error *error) {
   lc_pouch_txn_state_participant_context context;
   int rc;
 
   memset(&context, 0, sizeof(context));
-  context.client = client;
+  context.pouch = client->pouch;
   context.lease = lease;
   context.ns = ns;
   context.key = key;
   context.txn_id = txn_id;
   context.state = state;
+  context.commit_at_unix = commit_at_unix;
 
   rc = lc_pouch_state_with_namespace_lock(
       client->pouch, ns, lc_pouch_txn_apply_state_participant_locked, &context,
@@ -12114,6 +12335,7 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
                                            const lc_txn_decision_req *req,
                                            const char *state,
                                            int tolerate_queue_lease_mismatch,
+                                           lc_pouch_unix_seconds commit_at_unix,
                                            lc_error *error) {
   char local_backend_hash[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U];
   size_t i;
@@ -12132,6 +12354,24 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
   rc = lc_pouch_txn_validate_participants(req, error);
   if (rc != LC_OK) {
     return rc;
+  }
+  if (req->participant_count == 1) {
+    int retention_owned = 0;
+    rc = lc_pouch_retention_owns_journal(client->pouch, req->participants[0].ns,
+                                         req->participants[0].key, req->txn_id,
+                                         &retention_owned, error);
+    if (rc != LC_OK)
+      return rc;
+    if (retention_owned)
+      return lc_error_set(error, LC_ERR_PENDING, 0L,
+                          "state retention cleanup requires root maintenance",
+                          req->txn_id, NULL, "pouch");
+  }
+  if (strcmp(state, "commit") == 0 && commit_at_unix <= 0) {
+    rc = lc_pouch_txn_validate_retention(client, req->txn_id, req->participants,
+                                         req->participant_count, -1, error);
+    if (rc != LC_OK)
+      return rc;
   }
   /* Validate every external completion before applying even the first native
    * participant. Pending SQL must never publish a partial Pouch/outbox result.
@@ -12225,13 +12465,13 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
       continue;
     }
     if (strcmp(state, "commit") == 0) {
-      rc = lc_pouch_txn_apply_state_participant(client, NULL, ns,
-                                                req->participants[i].key,
-                                                req->txn_id, state, error);
+      rc = lc_pouch_txn_apply_state_participant(
+          client, NULL, ns, req->participants[i].key, req->txn_id, state,
+          commit_at_unix > 0 ? commit_at_unix : -1, error);
     } else if (strcmp(state, "rollback") == 0) {
-      rc = lc_pouch_txn_apply_state_participant(client, NULL, ns,
-                                                req->participants[i].key,
-                                                req->txn_id, state, error);
+      rc = lc_pouch_txn_apply_state_participant(
+          client, NULL, ns, req->participants[i].key, req->txn_id, state,
+          commit_at_unix > 0 ? commit_at_unix : -1, error);
     } else {
       lc_pouch_txn_cancel_applied_operation_guards(
           client, req, local_backend_hash, requires_backend_hash, i);
@@ -12359,6 +12599,7 @@ static int lc_pouch_client_get_namespace(lc_client_handle *client,
   }
   if (!read_result.found) {
     out->no_content = 1;
+    out->retention_support = LC_STATE_RETENTION_SUPPORTED;
     lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
     return LC_OK;
   }
@@ -12399,6 +12640,7 @@ static int lc_pouch_client_load_namespace(lc_client_handle *client,
   }
   if (!read_result.found) {
     out->no_content = 1;
+    out->retention_support = LC_STATE_RETENTION_SUPPORTED;
     lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
     return LC_OK;
   }
@@ -12444,7 +12686,9 @@ static int lc_pouch_lease_load_method(lc_lease *self, const lonejson_map *map,
                                       void *dst, const lc_get_opts *opts,
                                       lc_get_res *out, lc_error *error);
 static int lc_pouch_lease_save_method(lc_lease *self, const lonejson_map *map,
-                                      const void *src, lc_error *error);
+                                      const void *src,
+                                      const lc_update_opts *opts,
+                                      lc_error *error);
 static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
                                                const lc_update_opts *opts,
                                                lc_error *error);
@@ -12572,6 +12816,12 @@ static int lc_pouch_acquire_prepare_metadata(
   memset(&lease_record, 0, sizeof(lease_record));
   memset(options, 0, sizeof(*options));
   *apply = 1;
+  if (!state_view->has_body || state_view->retention > 0) {
+    rc = lc_pouch_retention_check_reservation(ctx->client->pouch, ctx->ns,
+                                              ctx->req->key, error);
+    if (rc != LC_OK)
+      return rc;
+  }
   if (ctx->req->if_not_exists && state_view->has_body) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch acquire if_not_exists precondition failed", NULL,
@@ -12581,7 +12831,7 @@ static int lc_pouch_acquire_prepare_metadata(
   ctx->version = state_view->found ? state_view->version : 0UL;
   ctx->has_query_hidden = state_view->has_query_hidden;
   ctx->query_hidden = state_view->query_hidden;
-  rc = lc_pouch_lease_record_parse(ctx->client, state_view->metadata,
+  rc = lc_pouch_lease_record_parse(state_view->metadata,
                                    state_view->metadata_length,
                                    state_view->version, &lease_record, error);
   if (rc == LC_OK && lease_record.found) {
@@ -12743,7 +12993,7 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   for (;;) {
     lc_pouch_acquire_context_cleanup(&acquire_context);
     if (txn_explicit) {
-      rc = lc_pouch_txn_guard_acquire(client, effective_request.txn_id,
+      rc = lc_pouch_txn_guard_acquire(client->pouch, effective_request.txn_id,
                                       &txn_guard, error);
       if (rc != LC_OK) {
         break;
@@ -12847,6 +13097,9 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   lc_pouch_lease_refresh_query_metadata((lc_lease_handle *)lease,
                                         acquire_context.has_query_hidden,
                                         acquire_context.query_hidden);
+  lc_pouch_lease_refresh_retention(
+      (lc_lease_handle *)lease, acquire_context.lease_write_result.has_body,
+      acquire_context.lease_write_result.retention);
   lc_pouch_acquire_context_cleanup(&acquire_context);
   lc_pouch_txn_guard_release(&txn_guard);
   lc_pouch_patch_lease_methods(lease);
@@ -12944,6 +13197,10 @@ int lc_pouch_client_acquire_for_update_method(
   update.state.version = get_res.version;
   update.state.fencing_token = get_res.fencing_token;
   update.state.correlation_id = get_res.correlation_id;
+  update.state.retention_support = get_res.retention_support;
+  update.state.has_retention_expires_at_unix =
+      get_res.has_retention_expires_at_unix;
+  update.state.retention_expires_at_unix = get_res.retention_expires_at_unix;
   if (!get_res.no_content) {
     rc = lc_source_from_callbacks(lc_pouch_acquire_for_update_source_read,
                                   lc_pouch_acquire_for_update_source_reset,
@@ -13082,7 +13339,7 @@ int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
                         NULL);
   }
   memset(&lease_record, 0, sizeof(lease_record));
-  rc = lc_pouch_lease_record_parse(client, read_result.metadata,
+  rc = lc_pouch_lease_record_parse(read_result.metadata,
                                    read_result.metadata_length,
                                    read_result.version, &lease_record, error);
   if (rc != LC_OK) {
@@ -13129,6 +13386,11 @@ int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
   }
   out->has_query_hidden = read_result.has_query_hidden;
   out->query_hidden = read_result.query_hidden;
+  out->retention_support = LC_STATE_RETENTION_SUPPORTED;
+  out->has_retention_expires_at_unix =
+      read_result.has_body && read_result.retention >= 0;
+  out->retention_expires_at_unix =
+      out->has_retention_expires_at_unix ? read_result.retention : 0;
   if (lease_record.found && lease_record.expires_at_unix > now_seconds &&
       lc_pouch_txn_id_present(lease_record.txn_id)) {
     staged_key =
@@ -13177,6 +13439,10 @@ int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
       }
       out->has_query_hidden = staged_result.has_query_hidden;
       out->query_hidden = staged_result.query_hidden;
+      out->has_retention_expires_at_unix =
+          staged_result.has_body && staged_result.retention >= 0;
+      out->retention_expires_at_unix =
+          out->has_retention_expires_at_unix ? staged_result.retention : 0;
     }
   }
   lc_free_with_allocator(NULL, staged_key);
@@ -13359,6 +13625,11 @@ static int lc_pouch_client_update_method_impl(lc_client *self,
   }
   options.content_type =
       req->content_type != NULL ? req->content_type : "application/json";
+  rc = lc_pouch_retention_options(&options, req->has_retention_seconds,
+                                  req->retention_seconds, ns, req->lease.key,
+                                  error);
+  if (rc != LC_OK)
+    return rc;
   options.query_index_operation_active = 1;
   options.query_index_operation_id = req->lease.lease_id;
   options.expected_etag = req->if_state_etag;
@@ -13466,6 +13737,11 @@ int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
   mutation->client = client;
   mutation->ns = ns;
   mutation->key = req->lease.key;
+  rc = lc_pouch_retention_options(&options, req->has_retention_seconds,
+                                  req->retention_seconds, ns, req->lease.key,
+                                  error);
+  if (rc != LC_OK)
+    goto cleanup;
   rc = lc_mutation_plan_build(req->mutations, req->mutation_count, NULL,
                               &mutation->plan, error);
   if (rc != LC_OK) {
@@ -13545,10 +13821,11 @@ int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
                         "pouch metadata requires self, req, and out", NULL,
                         NULL, NULL);
   }
-  if (!req->has_query_hidden) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch metadata requires query_hidden", NULL, NULL,
-                        NULL);
+  if (!req->has_query_hidden && !req->has_retention_seconds) {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "pouch metadata requires query_hidden or retention_seconds", NULL, NULL,
+        NULL);
   }
   client = (lc_client_handle *)self;
   rc = lc_pouch_client_validate_lease_key(&req->lease, error);
@@ -13559,7 +13836,7 @@ int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
   memset(&lease_precondition, 0, sizeof(lease_precondition));
   memset(&options, 0, sizeof(options));
   memset(&result, 0, sizeof(result));
-  options.has_query_hidden = 1;
+  options.has_query_hidden = req->has_query_hidden;
   options.query_hidden = req->query_hidden;
   options.query_index_operation_active = 1;
   options.query_index_operation_id = req->lease.lease_id;
@@ -13581,6 +13858,11 @@ int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
     lc_pouch_state_write_result_cleanup(&client->allocator, &result);
     return rc;
   }
+  rc = lc_pouch_retention_options(&options, req->has_retention_seconds,
+                                  req->retention_seconds, ns, req->lease.key,
+                                  error);
+  if (rc != LC_OK)
+    return rc;
   lease_precondition.client = client;
   lease_precondition.lease = &req->lease;
   lease_precondition.ns = ns;
@@ -13621,6 +13903,10 @@ int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
   }
   out->has_query_hidden = result.has_query_hidden;
   out->query_hidden = result.query_hidden;
+  out->retention_support = LC_STATE_RETENTION_SUPPORTED;
+  out->has_retention_expires_at_unix = result.has_body && result.retention >= 0;
+  out->retention_expires_at_unix =
+      out->has_retention_expires_at_unix ? result.retention : 0;
   lc_pouch_state_write_result_cleanup(&client->allocator, &result);
   return LC_OK;
 }
@@ -13992,8 +14278,8 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
     return rc;
   }
   if (lc_pouch_txn_id_present(req->lease.txn_id)) {
-    rc = lc_pouch_txn_guard_acquire(client, req->lease.txn_id, &txn_guard,
-                                    error);
+    rc = lc_pouch_txn_guard_acquire(client->pouch, req->lease.txn_id,
+                                    &txn_guard, error);
     if (rc == LC_OK) {
       rc = lc_pouch_txn_record_exists(client, req->lease.txn_id,
                                       &txn_record_exists, error);
@@ -14027,7 +14313,7 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
     if (rc == LC_OK && !txn_record_exists) {
       rc = lc_pouch_txn_apply_state_participant(
           client, &req->lease, ns, req->lease.key, req->lease.txn_id,
-          req->rollback ? "rollback" : "commit", error);
+          req->rollback ? "rollback" : "commit", 0, error);
     }
     lc_pouch_txn_guard_release(&txn_guard);
     if (rc != LC_OK) {
@@ -17008,6 +17294,58 @@ static int lc_pouch_txn_validate_target_backend(lc_pouch *pouch,
   return LC_OK;
 }
 
+/* Called under xid authority, before entering .txns mutation authority. Shared
+ * roots have one projection mutex, so participant reads must finish first. */
+static int
+lc_pouch_txn_validate_retention(lc_client_handle *client, const char *txn_id,
+                                const lc_txn_participant *participants,
+                                size_t count, lc_pouch_unix_seconds commit_at,
+                                lc_error *error) {
+  size_t i;
+  int rc = LC_OK;
+  char local_hash[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U];
+
+  rc = lc_pouch_backend_hash(client->pouch, local_hash, error);
+  for (i = 0; rc == LC_OK && i < count; ++i) {
+    lc_pouch_state_read_result staged = {0};
+    lc_pouch_unix_seconds deadline;
+    const char *ns = NULL;
+    const char *backend;
+    size_t backend_length;
+    char *key;
+
+    lc_pouch_txn_trim_bounds(participants[i].backend_hash, &backend,
+                             &backend_length);
+    if ((backend_length != 0 &&
+         (backend_length != strlen(local_hash) ||
+          strncmp(backend, local_hash, backend_length) != 0)) ||
+        lc_pouch_xa_participant(&participants[i]) ||
+        lc_pouch_queue_is_message_lease_key(participants[i].key) ||
+        lc_pouch_queue_is_state_lease_key(participants[i].key))
+      continue;
+    rc = lc_pouch_client_public_namespace(client, participants[i].ns, &ns,
+                                          error);
+    if (rc != LC_OK)
+      break;
+    key = lc_pouch_staged_storage_key(participants[i].key, txn_id, error);
+    if (key == NULL)
+      return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    rc = lc_pouch_state_read_metadata(client->pouch, ns, key, &staged, error);
+    if (rc == LC_OK && staged.found && !staged.staged_delete_marker) {
+      if (staged.retention < 0 && commit_at < 0)
+        rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "retention-bearing commit is missing its timestamp",
+                          NULL, NULL, "pouch");
+      else
+        rc = lc_pouch_retention_resolve(staged.retention, commit_at, &deadline,
+                                        error);
+    }
+    lc_pouch_state_read_result_cleanup(&client->allocator, &staged);
+    lc_free_with_allocator(NULL, key);
+  }
+  return rc;
+}
+
 static int lc_pouch_txn_decision_record_locked(void *context, lc_error *error) {
   lc_pouch_txn_decision_context *ctx;
   lc_pouch_state_read_result read_result;
@@ -17020,6 +17358,7 @@ static int lc_pouch_txn_decision_record_locked(void *context, lc_error *error) {
   size_t length;
   char *record_bytes;
   int write_record;
+  int choosing_commit;
   int rc;
 
   ctx = (lc_pouch_txn_decision_context *)context;
@@ -17080,6 +17419,8 @@ static int lc_pouch_txn_decision_record_locked(void *context, lc_error *error) {
         ctx->client->pouch, ctx->record.target_backend_hash, error);
   }
   if (rc == LC_OK) {
+    choosing_commit =
+        ctx->record.state == NULL || strcmp(ctx->record.state, "commit") != 0;
     rc = lc_pouch_txn_record_merge_request(
         &ctx->record, ctx->request, ctx->state, ctx->owner_sealed,
         &write_record, &ctx->apply_decision, error);
@@ -17094,6 +17435,16 @@ static int lc_pouch_txn_decision_record_locked(void *context, lc_error *error) {
                           NULL, NULL, "pouch-xa");
         break;
       }
+  }
+  if (rc == LC_OK && write_record && choosing_commit &&
+      strcmp(ctx->record.state, "commit") == 0 &&
+      ctx->record.commit_at_unix == 0) {
+    if (ctx->commit_at_unix <= 0)
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch commit requires a validated timestamp", NULL,
+                        NULL, "pouch");
+    else
+      ctx->record.commit_at_unix = ctx->commit_at_unix;
   }
   if (rc == LC_OK && write_record) {
     rc = lc_pouch_txn_build_record(&ctx->record, &buffer, error);
@@ -17290,6 +17641,15 @@ static int lc_pouch_txn_vote_record_locked(void *context, lc_error *error) {
                       "pouch transaction vote found unsupported state", NULL,
                       NULL, NULL);
   }
+  if (rc == LC_OK && write_record && strcmp(ctx->record.state, "commit") == 0 &&
+      ctx->record.commit_at_unix == 0) {
+    if (ctx->commit_at_unix <= 0)
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch commit vote requires a validated timestamp",
+                        NULL, NULL, "pouch");
+    else
+      ctx->record.commit_at_unix = ctx->commit_at_unix;
+  }
   if (rc == LC_OK && write_record) {
     rc = lc_pouch_txn_build_record(&ctx->record, &buffer, error);
   }
@@ -17359,7 +17719,7 @@ static int lc_pouch_txn_record_vote(lc_client_handle *client,
   context.record_key = record_key;
   /* Every caller holds the xid guard. Shared roots have one non-recursive
    * projection mutex: validate/seal .xa authority before entering .txns. */
-  rc = lc_pouch_xa_read_txn(client, txn_id, &preview, error);
+  rc = lc_pouch_xa_read_txn(client->pouch, txn_id, &preview, error);
   if (rc == LC_OK && preview.state != NULL &&
       strcmp(preview.state, "prepare") == 0)
     rc = lc_pouch_xa_owner_check(client, txn_id, preview.tc_term, NULL, 0, NULL,
@@ -17367,6 +17727,25 @@ static int lc_pouch_txn_record_vote(lc_client_handle *client,
   if (rc == LC_OK && preview.state != NULL &&
       strcmp(preview.state, "prepare") == 0)
     rc = lc_pouch_xa_seal_vote(client, txn_id, preview.tc_term, error);
+  if (rc == LC_OK && !rollback && !preparing && preview.state != NULL &&
+      strcmp(preview.state, "prepare") == 0) {
+    size_t i;
+    int ready = 1;
+    for (i = 0; i < preview.participant_count; ++i) {
+      if (strcmp(preview.participants[i].ns, ns) == 0 &&
+          strcmp(preview.participants[i].key, participant_key) == 0)
+        continue;
+      if (preview.votes[i] != 1U)
+        ready = 0;
+    }
+    if (ready) {
+      rc = lc_pouch_now_unix(&context.commit_at_unix, error);
+      if (rc == LC_OK)
+        rc = lc_pouch_txn_validate_retention(
+            client, txn_id, preview.participants, preview.participant_count,
+            context.commit_at_unix, error);
+    }
+  }
   lc_pouch_txn_record_cleanup(&preview);
   if (rc == LC_OK)
     rc = lc_pouch_state_with_key_lock(
@@ -17385,7 +17764,7 @@ static int lc_pouch_txn_record_vote(lc_client_handle *client,
 /* Read the same authoritative record used by native implicit-XA releases.
  * No external participant owns a separate commit/rollback journal.
  */
-static int lc_pouch_xa_read_txn(lc_client_handle *client, const char *txn_id,
+static int lc_pouch_xa_read_txn(lc_pouch *pouch, const char *txn_id,
                                 lc_pouch_txn_record *record, lc_error *error) {
   lc_pouch_state_read_result result;
   lc_sink *sink = NULL;
@@ -17394,8 +17773,8 @@ static int lc_pouch_xa_read_txn(lc_client_handle *client, const char *txn_id,
   int rc;
   memset(record, 0, sizeof(*record));
   memset(&result, 0, sizeof(result));
-  rc = lc_pouch_state_read(client->pouch, LC_POUCH_TXN_NAMESPACE, txn_id,
-                           &result, error);
+  rc = lc_pouch_state_read(pouch, LC_POUCH_TXN_NAMESPACE, txn_id, &result,
+                           error);
   if (rc == LC_OK && result.found)
     rc = lc_sink_to_memory(&sink, error);
   if (rc == LC_OK && result.found)
@@ -17406,8 +17785,776 @@ static int lc_pouch_xa_read_txn(lc_client_handle *client, const char *txn_id,
     rc = lc_pouch_txn_parse_record((const char *)bytes, length, record, error);
   if (sink != NULL)
     sink->close(sink);
-  lc_pouch_state_read_result_cleanup(&client->allocator, &result);
+  lc_pouch_state_read_result_cleanup(&pouch->allocator, &result);
   return rc;
+}
+
+typedef struct lc_pouch_retention_cleanup {
+  lc_pouch *pouch;
+  const char *ns;
+  lc_pouch_retention_work work;
+  lc_pouch_retention_candidate candidate;
+  lc_pouch_lease_record observed;
+  lc_pouch_txn_record journal;
+  lc_pouch_unix_seconds now;
+  char new_xid[LC_XID_STRING_SIZE];
+  int skip;
+  int slot_claimed;
+  int prepare_journal;
+  int retire_journal;
+} lc_pouch_retention_cleanup;
+
+static void
+lc_pouch_retention_cleanup_dispose(lc_pouch_retention_cleanup *ctx) {
+  lc_pouch_retention_work_cleanup(ctx->pouch, &ctx->work);
+  lc_free_with_allocator(&ctx->pouch->allocator, ctx->candidate.key);
+  lc_pouch_lease_record_cleanup(&ctx->observed);
+  lc_pouch_txn_record_cleanup(&ctx->journal);
+}
+
+static int lc_pouch_retention_load_locked(void *context, lc_error *error) {
+  lc_pouch_retention_cleanup *ctx = context;
+  lc_pouch_state_metadata_view view;
+  lc_pouch_state_read_result fallback = {0};
+  int rc = lc_pouch_retention_work_read(ctx->pouch, ctx->ns, &ctx->work, error);
+  if (rc != LC_OK || !ctx->work.present ||
+      ctx->work.phase != LC_POUCH_RETENTION_IDLE)
+    return rc;
+  rc = lc_pouch_now_unix(&ctx->now, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_state_retention_select_locked(ctx->pouch, ctx->ns, ctx->now,
+                                                &ctx->candidate, error);
+  if (rc == LC_OK && ctx->candidate.key == NULL) {
+    if (!ctx->candidate.has_expiring)
+      rc = lc_pouch_state_retention_retire_hint_locked(ctx->pouch, ctx->ns,
+                                                       error);
+    return rc;
+  }
+  if (rc == LC_OK)
+    rc = lc_pouch_state_read_metadata_view_locked(
+        ctx->pouch, ctx->ns, ctx->candidate.key, &view, &fallback, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_lease_record_parse(view.metadata, view.metadata_length,
+                                     view.version, &ctx->observed, error);
+  if (rc == LC_OK && ctx->observed.found && ctx->observed.lease_id[0] != '\0' &&
+      (ctx->observed.expires_at_unix > ctx->now || ctx->observed.txn_explicit))
+    ctx->skip = 1;
+  lc_pouch_state_read_result_cleanup(&ctx->pouch->allocator, &fallback);
+  return rc;
+}
+
+static int lc_pouch_retention_write_work_locked(void *context,
+                                                lc_error *error) {
+  lc_pouch_retention_cleanup *ctx = context;
+  int rc = lc_pouch_retention_work_write(
+      ctx->pouch, ctx->ns, ctx->work.phase, ctx->work.txn_id, ctx->work.key,
+      ctx->work.fencing_token, ctx->work.state_version, error);
+  if (rc == LC_OK && ctx->work.phase == LC_POUCH_RETENTION_IDLE) {
+    int expiring = 1;
+    rc = lc_pouch_state_retention_has_expiring_locked(ctx->pouch, ctx->ns,
+                                                      &expiring, error);
+    if (rc == LC_OK && !expiring)
+      rc = lc_pouch_state_retention_retire_hint_locked(ctx->pouch, ctx->ns,
+                                                       error);
+  }
+  return rc;
+}
+
+static int lc_pouch_retention_claim_slot_locked(void *context,
+                                                lc_error *error) {
+  lc_pouch_retention_cleanup *ctx = context;
+  lc_pouch_retention_work current = {0};
+  lc_pouch_state_read_result state = {0};
+  lc_pouch_lease_record lease = {0};
+  int rc = lc_pouch_retention_work_read(ctx->pouch, ctx->ns, &current, error);
+  if (rc == LC_OK &&
+      (!current.present || current.phase != LC_POUCH_RETENTION_IDLE))
+    rc = lc_error_set(error, LC_ERR_PENDING, 0L,
+                      "state retention work slot changed", NULL, NULL, "pouch");
+  if (rc == LC_OK)
+    rc = lc_pouch_state_read_metadata_locked(ctx->pouch, ctx->ns,
+                                             ctx->candidate.key, &state, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_now_unix(&ctx->now, error);
+  if (rc == LC_OK &&
+      (!state.has_body || state.version != ctx->candidate.version ||
+       state.retention != ctx->candidate.deadline ||
+       state.retention > ctx->now))
+    ctx->skip = 1;
+  if (rc == LC_OK && !ctx->skip)
+    rc = lc_pouch_lease_record_parse(state.metadata, state.metadata_length,
+                                     state.version, &lease, error);
+  if (rc == LC_OK && !ctx->skip &&
+      (lease.found != ctx->observed.found ||
+       (lease.found && (lease.fencing_token != ctx->observed.fencing_token ||
+                        strcmp(lease.lease_id, ctx->observed.lease_id) != 0 ||
+                        strcmp(lease.txn_id, ctx->observed.txn_id) != 0))))
+    ctx->skip = 1;
+  if (rc == LC_OK && !ctx->skip) {
+    ctx->work.txn_id =
+        lc_strdup_with_allocator(&ctx->pouch->allocator, ctx->new_xid);
+    ctx->work.key =
+        lc_strdup_with_allocator(&ctx->pouch->allocator, ctx->candidate.key);
+    if (ctx->work.txn_id == NULL || ctx->work.key == NULL)
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate state cleanup reference", NULL,
+                        NULL, "pouch");
+    else {
+      ctx->work.phase = LC_POUCH_RETENTION_ACTIVE;
+      rc = lc_pouch_retention_write_work_locked(ctx, error);
+      if (rc == LC_OK)
+        ctx->slot_claimed = 1;
+    }
+  }
+  lc_pouch_retention_work_cleanup(ctx->pouch, &current);
+  lc_pouch_state_read_result_cleanup(&ctx->pouch->allocator, &state);
+  lc_pouch_lease_record_cleanup(&lease);
+  return rc;
+}
+
+static int lc_pouch_retention_journal_locked(void *context, lc_error *error) {
+  lc_pouch_retention_cleanup *ctx = context;
+  lc_pouch_state_read_result current = {0};
+  lc_pouch_state_write_result written = {0};
+  lc_pouch_state_write_options options = {0};
+  lc_pouch_txn_buffer buffer = {0};
+  lc_source *source = NULL;
+  int rc = lc_pouch_state_read_metadata_locked(
+      ctx->pouch, LC_POUCH_TXN_NAMESPACE, ctx->work.txn_id, &current, error);
+  if (rc == LC_OK && ctx->prepare_journal && current.found)
+    rc = lc_error_set(error, LC_ERR_PENDING, 0L,
+                      "state cleanup transaction already exists", NULL, NULL,
+                      "pouch");
+  if (rc == LC_OK && !ctx->prepare_journal && !ctx->retire_journal &&
+      !current.found)
+    rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                      "state cleanup transaction disappeared", NULL, NULL,
+                      "pouch");
+  options.object_record = 1;
+  if (current.found) {
+    options.has_expected_version = 1;
+    options.expected_version = current.version;
+  }
+  if (rc == LC_OK && ctx->retire_journal && current.found)
+    rc = lc_pouch_state_delete(ctx->pouch, LC_POUCH_TXN_NAMESPACE,
+                               ctx->work.txn_id, &options, &written, error);
+  if (rc == LC_OK && !ctx->retire_journal)
+    rc = lc_pouch_txn_build_record(&ctx->journal, &buffer, error);
+  if (rc == LC_OK && !ctx->retire_journal)
+    rc = lc_source_from_memory(buffer.bytes, buffer.length, &source, error);
+  if (rc == LC_OK && !ctx->retire_journal) {
+    options.content_type = "application/x-lockdc-pouch-txn";
+    options.create_if_absent = ctx->prepare_journal;
+    rc = lc_pouch_state_write_locked(ctx->pouch, LC_POUCH_TXN_NAMESPACE,
+                                     ctx->work.txn_id, source, &options,
+                                     &written, error);
+  }
+  lc_source_close(source);
+  lc_pouch_txn_buffer_cleanup(&buffer);
+  lc_pouch_state_write_result_cleanup(&ctx->pouch->allocator, &written);
+  lc_pouch_state_read_result_cleanup(&ctx->pouch->allocator, &current);
+  return rc;
+}
+
+static int lc_pouch_retention_write_journal(lc_pouch_retention_cleanup *ctx,
+                                            int prepare, int retire,
+                                            lc_error *error) {
+  ctx->prepare_journal = prepare;
+  ctx->retire_journal = retire;
+  return lc_pouch_state_with_namespace_lock(ctx->pouch, LC_POUCH_TXN_NAMESPACE,
+                                            lc_pouch_retention_journal_locked,
+                                            ctx, error);
+}
+
+static int
+lc_pouch_retention_collect_attachment(const lc_pouch_state_visit_entry *entry,
+                                      void *context, lc_error *error) {
+  lc_pouch_txn_key_list *keys = context;
+  if (!entry->has_payload ||
+      lc_pouch_storage_key_has_staging_suffix(entry->key))
+    return LC_OK;
+  return lc_pouch_txn_key_list_append(keys, entry->key, error);
+}
+
+static int lc_pouch_retention_stage_attachments(lc_pouch_retention_cleanup *ctx,
+                                                lc_error *error) {
+  lc_pouch_txn_key_list keys = {0};
+  lc_pouch_state_write_options options = {0};
+  lc_pouch_state_write_result written = {0};
+  lc_source *empty = NULL;
+  char *prefix = lc_pouch_attachment_prefix(ctx->ns, ctx->work.key, error);
+  size_t i;
+  int rc;
+  if (prefix == NULL)
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  rc = lc_pouch_state_visit_prefix(ctx->pouch, ctx->ns, prefix,
+                                   lc_pouch_retention_collect_attachment, &keys,
+                                   error);
+  options.content_type = LC_POUCH_ATTACHMENT_DELETE_CONTENT_TYPE;
+  options.object_record = 1;
+  options.has_query_hidden = 1;
+  options.query_hidden = 1;
+  for (i = 0; rc == LC_OK && i < keys.count; ++i) {
+    char *key = lc_pouch_staged_attachment_key_from_committed(
+        keys.keys[i], ctx->work.txn_id, error);
+    if (key == NULL) {
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+      break;
+    }
+    rc = lc_source_from_memory("", 0, &empty, error);
+    if (rc == LC_OK)
+      rc = lc_pouch_state_write(ctx->pouch, ctx->ns, key, empty, &options,
+                                &written, error);
+    lc_source_close(empty);
+    empty = NULL;
+    lc_pouch_state_write_result_cleanup(&ctx->pouch->allocator, &written);
+    lc_free_with_allocator(NULL, key);
+  }
+  lc_free_with_allocator(NULL, prefix);
+  lc_pouch_txn_key_list_cleanup(&keys);
+  return rc;
+}
+
+static int lc_pouch_retention_claim_and_stage_locked(void *context,
+                                                     lc_error *error) {
+  lc_pouch_retention_cleanup *ctx = context;
+  lc_pouch_state_read_result current = {0};
+  lc_pouch_lease_record lease = {0};
+  lc_pouch_txn_state_participant_context abandoned = {0};
+  lc_pouch_txn_buffer metadata = {0};
+  lc_pouch_state_write_options options = {0};
+  lc_pouch_state_write_result written = {0};
+  lc_source *empty = NULL;
+  long fencing = 0;
+  int rc = lc_pouch_state_read_metadata_locked(ctx->pouch, ctx->ns,
+                                               ctx->work.key, &current, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_lease_record_parse(current.metadata, current.metadata_length,
+                                     current.version, &lease, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_now_unix(&ctx->now, error);
+  if (rc == LC_OK && (!current.has_body || current.retention <= 0 ||
+                      current.retention > ctx->now))
+    ctx->skip = 1;
+  if (rc == LC_OK && !ctx->skip && lease.found && lease.lease_id[0] != '\0') {
+    if (lease.expires_at_unix > ctx->now || lease.txn_explicit)
+      ctx->skip = 1;
+    else if (lease.txn_id[0] == '\0')
+      rc = lc_pouch_txn_clear_lease_locked(ctx->pouch, ctx->ns, ctx->work.key,
+                                           &lease, error);
+    else {
+      abandoned.pouch = ctx->pouch;
+      abandoned.ns = ctx->ns;
+      abandoned.key = ctx->work.key;
+      abandoned.txn_id = lease.txn_id;
+      abandoned.state = "rollback";
+      rc = lc_pouch_txn_apply_state_participant_locked(&abandoned, error);
+      lc_pouch_state_read_result_cleanup(&ctx->pouch->allocator, &current);
+      if (rc == LC_OK)
+        rc = lc_pouch_state_read_metadata_locked(
+            ctx->pouch, ctx->ns, ctx->work.key, &current, error);
+    }
+  }
+  if (rc == LC_OK && !ctx->skip &&
+      (current.version == LC_U64_MAX || ctx->now > LC_I64_MAX - 60))
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "state cleanup claim exceeds local range", NULL, NULL,
+                      "pouch");
+  if (rc == LC_OK && !ctx->skip)
+    rc = lc_pouch_next_fencing_token(lease.found ? lease.fencing_token : 0,
+                                     &fencing, error);
+  if (rc == LC_OK && !ctx->skip) {
+    ctx->work.fencing_token = (lc_u64)fencing;
+    ctx->work.state_version = current.version;
+    rc = lc_pouch_retention_write_work_locked(ctx, error);
+  }
+  if (rc == LC_OK && !ctx->skip)
+    rc = lc_pouch_lease_record_build(
+        &metadata, ctx->ns, ctx->work.key, "liblockdc-state-retention",
+        ctx->work.txn_id, ctx->work.txn_id, fencing, ctx->now + 60,
+        current.version, 1, error);
+  if (rc == LC_OK && !ctx->skip) {
+    options.has_metadata = 1;
+    options.metadata = (const unsigned char *)metadata.bytes;
+    options.metadata_length = metadata.length;
+    options.has_expected_version = 1;
+    options.expected_version = current.version;
+    rc = lc_pouch_state_update_metadata_locked(
+        ctx->pouch, ctx->ns, ctx->work.key, &options, &written, error);
+    lc_pouch_state_write_result_cleanup(&ctx->pouch->allocator, &written);
+  }
+  if (rc == LC_OK && !ctx->skip)
+    rc = lc_pouch_retention_note_phase(LC_POUCH_RETENTION_CLAIMED, error);
+  if (rc == LC_OK && !ctx->skip)
+    rc = lc_pouch_retention_stage_attachments(ctx, error);
+  if (rc == LC_OK && !ctx->skip) {
+    memset(&options, 0, sizeof(options));
+    options.staged_delete_marker = 1;
+    options.has_query_hidden = 1;
+    options.query_hidden = 1;
+    options.has_logical_version = 1;
+    options.logical_version = current.version + 1;
+    rc = lc_source_from_memory("", 0, &empty, error);
+    if (rc == LC_OK)
+      rc = lc_pouch_state_stage_write(ctx->pouch, ctx->ns, ctx->work.key,
+                                      ctx->work.txn_id, empty, &options,
+                                      &written, error);
+  }
+  lc_source_close(empty);
+  lc_pouch_state_write_result_cleanup(&ctx->pouch->allocator, &written);
+  lc_pouch_state_read_result_cleanup(&ctx->pouch->allocator, &current);
+  lc_pouch_lease_record_cleanup(&lease);
+  lc_pouch_txn_buffer_cleanup(&metadata);
+  return rc;
+}
+
+static int lc_pouch_retention_no_owned_work_locked(void *context,
+                                                   lc_error *error) {
+  lc_pouch_retention_cleanup *ctx = context;
+  lc_pouch_state_read_result parent = {0};
+  lc_pouch_state_read_result staged = {0};
+  lc_pouch_lease_record lease = {0};
+  lc_pouch_txn_key_list attachments = {0};
+  char *key =
+      lc_pouch_staged_storage_key(ctx->work.key, ctx->work.txn_id, error);
+  int owned = 0;
+  int rc;
+  if (key == NULL)
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  rc = lc_pouch_state_read_metadata_locked(ctx->pouch, ctx->ns, ctx->work.key,
+                                           &parent, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_lease_record_parse(parent.metadata, parent.metadata_length,
+                                     parent.version, &lease, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_state_read_metadata_locked(ctx->pouch, ctx->ns, key, &staged,
+                                             error);
+  if (rc == LC_OK)
+    rc = lc_pouch_collect_staged_attachment_bases(
+        ctx->pouch, ctx->ns, ctx->work.key, ctx->work.txn_id, &attachments,
+        error);
+  if (rc == LC_OK) {
+    owned = (ctx->journal.state == NULL && ctx->work.fencing_token != 0) ||
+            staged.found || attachments.count != 0 ||
+            (lease.found && strcmp(lease.txn_id, ctx->work.txn_id) == 0);
+    if (owned)
+      rc = lc_error_set(
+          error, LC_ERR_PROTOCOL, 0L,
+          "state cleanup has owned work but no transaction journal",
+          ctx->work.txn_id, NULL, "pouch");
+  }
+  lc_pouch_txn_key_list_cleanup(&attachments);
+  lc_free_with_allocator(NULL, key);
+  lc_pouch_lease_record_cleanup(&lease);
+  lc_pouch_state_read_result_cleanup(&ctx->pouch->allocator, &parent);
+  lc_pouch_state_read_result_cleanup(&ctx->pouch->allocator, &staged);
+  return rc;
+}
+
+static int lc_pouch_retention_apply_locked(void *context, lc_error *error) {
+  lc_pouch_retention_cleanup *ctx = context;
+  lc_pouch_txn_state_participant_context apply = {0};
+  lc_pouch_state_read_result current = {0};
+  lc_pouch_lease_record lease = {0};
+  lc_pouch_txn_buffer metadata = {0};
+  lc_pouch_state_write_options options = {0};
+  lc_pouch_state_write_result written = {0};
+  int rc = lc_pouch_state_read_metadata_locked(ctx->pouch, ctx->ns,
+                                               ctx->work.key, &current, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_lease_record_parse(current.metadata, current.metadata_length,
+                                     current.version, &lease, error);
+  if (rc == LC_OK && lease.found && lease.lease_id[0] != '\0' &&
+      strcmp(lease.txn_id, ctx->work.txn_id) != 0) {
+    if (strcmp(ctx->journal.state, "rollback") == 0)
+      rc = lc_pouch_retention_no_owned_work_locked(ctx, error);
+    else
+      rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "state cleanup reservation was replaced",
+                        ctx->work.txn_id, NULL, "pouch");
+    goto done;
+  }
+  if (rc == LC_OK && strcmp(ctx->journal.state, "commit") == 0 &&
+      (!lease.found || lease.lease_id[0] == '\0')) {
+    if (ctx->work.fencing_token == 0 ||
+        ctx->work.fencing_token > (lc_u64)LONG_MAX)
+      rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "state cleanup is missing its claim high-water", NULL,
+                        NULL, "pouch");
+    else {
+      /* The parent tombstone may precede attachment replay at a crash. The
+       * ACTIVE work reference fences recreation while this lease is restored.
+       */
+      rc = lc_pouch_lease_record_build(
+          &metadata, ctx->ns, ctx->work.key, "liblockdc-state-retention",
+          ctx->work.txn_id, ctx->work.txn_id, (long)ctx->work.fencing_token, 0,
+          ctx->work.state_version, 1, error);
+      if (rc == LC_OK) {
+        options.has_metadata = 1;
+        options.metadata = (const unsigned char *)metadata.bytes;
+        options.metadata_length = metadata.length;
+        rc = lc_pouch_state_update_metadata_locked(
+            ctx->pouch, ctx->ns, ctx->work.key, &options, &written, error);
+      }
+    }
+  }
+  if (rc == LC_OK) {
+    apply.pouch = ctx->pouch;
+    apply.ns = ctx->ns;
+    apply.key = ctx->work.key;
+    apply.txn_id = ctx->work.txn_id;
+    apply.state = ctx->journal.state;
+    apply.commit_at_unix = ctx->journal.commit_at_unix;
+    apply.retention_cleanup = 1;
+    rc = lc_pouch_txn_apply_state_participant_locked(&apply, error);
+  }
+done:
+  lc_pouch_state_write_result_cleanup(&ctx->pouch->allocator, &written);
+  lc_pouch_state_read_result_cleanup(&ctx->pouch->allocator, &current);
+  lc_pouch_lease_record_cleanup(&lease);
+  lc_pouch_txn_buffer_cleanup(&metadata);
+  return rc;
+}
+
+static int lc_pouch_retention_include_data_locked(void *context,
+                                                  lc_error *error) {
+  lc_pouch_retention_cleanup *ctx = context;
+  return lc_pouch_state_durable_scope_include_namespace_locked(ctx->pouch,
+                                                               ctx->ns, error);
+}
+
+static int lc_pouch_retention_include_journal_locked(void *context,
+                                                     lc_error *error) {
+  lc_pouch_retention_cleanup *ctx = context;
+  return lc_pouch_state_durable_scope_include_namespace_locked(
+      ctx->pouch, LC_POUCH_TXN_NAMESPACE, error);
+}
+
+static int lc_pouch_retention_finish(lc_pouch_retention_cleanup *ctx,
+                                     lc_pouch_state_commit_group *scope,
+                                     lc_error *error) {
+  int rc = LC_OK;
+  if (ctx->work.phase != LC_POUCH_RETENTION_FINISHED) {
+    if (!ctx->slot_claimed && ctx->work.fencing_token != 0)
+      rc = lc_pouch_state_with_namespace_lock(
+          ctx->pouch, ctx->ns, lc_pouch_retention_include_data_locked, ctx,
+          error);
+    if (rc == LC_OK)
+      rc = lc_pouch_state_durable_scope_barrier(scope, error);
+    if (rc == LC_OK)
+      rc =
+          lc_pouch_retention_note_phase(LC_POUCH_RETENTION_DATA_DURABLE, error);
+    if (rc == LC_OK) {
+      lc_pouch_indexer_note_operation_complete(ctx->pouch, ctx->ns,
+                                               ctx->work.key, ctx->work.txn_id);
+      ctx->work.phase = LC_POUCH_RETENTION_FINISHED;
+      rc = lc_pouch_state_with_namespace_lock(
+          ctx->pouch, ctx->ns, lc_pouch_retention_write_work_locked, ctx,
+          error);
+    }
+    if (rc == LC_OK)
+      rc = lc_pouch_retention_note_phase(LC_POUCH_RETENTION_WORK_FINISHED,
+                                         error);
+  }
+  if (rc == LC_OK)
+    rc = lc_pouch_retention_write_journal(ctx, 0, 1, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_state_durable_scope_barrier(scope, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_retention_note_phase(LC_POUCH_RETENTION_JOURNAL_RETIRED,
+                                       error);
+  if (rc == LC_OK) {
+    ctx->work.phase = LC_POUCH_RETENTION_IDLE;
+    rc = lc_pouch_state_with_namespace_lock(
+        ctx->pouch, ctx->ns, lc_pouch_retention_write_work_locked, ctx, error);
+  }
+  if (rc == LC_OK)
+    rc = lc_pouch_retention_note_phase(LC_POUCH_RETENTION_REF_CLEARED, error);
+  if (rc == LC_OK) {
+    lc_pouch_compaction_note_mutation(ctx->pouch, ctx->ns, 1);
+    lc_pouch_compaction_note_mutation(ctx->pouch, LC_POUCH_TXN_NAMESPACE, 1);
+  }
+  return rc;
+}
+
+static int lc_pouch_retention_validate_journal(lc_pouch_retention_cleanup *ctx,
+                                               lc_error *error) {
+  lc_pouch_txn_record *record = &ctx->journal;
+  if (record->state == NULL)
+    return LC_OK;
+  if (record->participant_count != 1 || record->tc_term != 0 ||
+      strcmp(record->participants[0].ns, ctx->ns) != 0 ||
+      strcmp(record->participants[0].key, ctx->work.key) != 0 ||
+      (strcmp(record->state, "prepare") != 0 &&
+       strcmp(record->state, "commit") != 0 &&
+       strcmp(record->state, "rollback") != 0) ||
+      (strcmp(record->state, "commit") == 0 &&
+       (record->commit_at_unix <= 0 || record->votes[0] != 1)))
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "invalid state retention cleanup journal",
+                        ctx->work.txn_id, NULL, "pouch");
+  return lc_pouch_txn_validate_target_backend(
+      ctx->pouch, record->target_backend_hash, error);
+}
+
+static int lc_pouch_retention_resume(lc_pouch_retention_cleanup *ctx,
+                                     lc_pouch_state_commit_group *scope,
+                                     lc_error *error) {
+  int rc;
+  if (ctx->work.phase == LC_POUCH_RETENTION_FINISHED)
+    return lc_pouch_retention_finish(ctx, scope, error);
+  lc_pouch_txn_record_cleanup(&ctx->journal);
+  rc = lc_pouch_xa_read_txn(ctx->pouch, ctx->work.txn_id, &ctx->journal, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_retention_validate_journal(ctx, error);
+  if (rc == LC_OK && !ctx->slot_claimed && ctx->journal.state != NULL &&
+      strcmp(ctx->journal.state, "commit") == 0) {
+    rc = lc_pouch_state_with_namespace_lock(
+        ctx->pouch, LC_POUCH_TXN_NAMESPACE,
+        lc_pouch_retention_include_journal_locked, ctx, error);
+    if (rc == LC_OK)
+      rc = lc_pouch_state_durable_scope_barrier(scope, error);
+  }
+  if (rc == LC_OK && ctx->journal.state == NULL)
+    rc = lc_pouch_state_with_namespace_lock(
+        ctx->pouch, ctx->ns, lc_pouch_retention_no_owned_work_locked, ctx,
+        error);
+  if (rc == LC_OK && ctx->journal.state != NULL &&
+      strcmp(ctx->journal.state, "prepare") == 0) {
+    rc = lc_pouch_txn_record_replace_string(&ctx->journal.state, "rollback",
+                                            error);
+    ctx->journal.votes[0] = 2;
+    if (rc == LC_OK)
+      rc = lc_pouch_retention_write_journal(ctx, 0, 0, error);
+    if (rc == LC_OK)
+      rc = lc_pouch_state_durable_scope_barrier(scope, error);
+  }
+  if (rc == LC_OK && ctx->journal.state != NULL)
+    rc = lc_pouch_state_with_namespace_lock(
+        ctx->pouch, ctx->ns, lc_pouch_retention_apply_locked, ctx, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_retention_finish(ctx, scope, error);
+  return rc;
+}
+
+static int lc_pouch_retention_start(lc_pouch_retention_cleanup *ctx,
+                                    lc_pouch_state_commit_group *scope,
+                                    lc_error *error) {
+  lc_txn_participant participant = {0};
+  lc_txn_decision_req prepare;
+  lc_pouch_unix_seconds decided_at;
+  int write_record;
+  int apply_decision;
+  int commit;
+  int rc = lc_pouch_state_with_namespace_lock(
+      ctx->pouch, ctx->ns, lc_pouch_retention_claim_slot_locked, ctx, error);
+  if (rc != LC_OK || ctx->skip)
+    return rc;
+  rc = lc_pouch_retention_note_phase(LC_POUCH_RETENTION_REF_CREATED, error);
+  lc_txn_decision_req_init(&prepare);
+  participant.ns = ctx->ns;
+  participant.key = ctx->work.key;
+  prepare.txn_id = ctx->work.txn_id;
+  prepare.participants = &participant;
+  prepare.participant_count = 1;
+  if (rc == LC_OK)
+    rc = lc_pouch_txn_record_merge_request(&ctx->journal, &prepare, "prepare",
+                                           0, &write_record, &apply_decision,
+                                           error);
+  if (rc == LC_OK)
+    rc = lc_pouch_retention_write_journal(ctx, 1, 0, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_state_durable_scope_barrier(scope, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_retention_note_phase(LC_POUCH_RETENTION_PREPARED, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_state_with_namespace_lock(
+        ctx->pouch, ctx->ns, lc_pouch_retention_claim_and_stage_locked, ctx,
+        error);
+  if (rc == LC_OK)
+    rc = lc_pouch_retention_note_phase(LC_POUCH_RETENTION_STAGED, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_now_unix(&decided_at, error);
+  if (rc == LC_OK) {
+    commit = !ctx->skip && decided_at >= ctx->candidate.deadline;
+    rc = lc_pouch_txn_record_replace_string(
+        &ctx->journal.state, commit ? "commit" : "rollback", error);
+    ctx->journal.commit_at_unix = commit ? decided_at : 0;
+    ctx->journal.votes[0] = commit ? 1 : 2;
+  }
+  if (rc == LC_OK)
+    rc = lc_pouch_retention_write_journal(ctx, 0, 0, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_state_durable_scope_barrier(scope, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_retention_note_phase(LC_POUCH_RETENTION_DECIDED, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_state_with_namespace_lock(
+        ctx->pouch, ctx->ns, lc_pouch_retention_apply_locked, ctx, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_retention_finish(ctx, scope, error);
+  return rc;
+}
+
+static int lc_pouch_retention_attempt(lc_pouch_retention_cleanup *ctx,
+                                      int fresh, lc_error *error) {
+  lc_pouch_state_commit_group *scope = NULL;
+  int rc = lc_pouch_state_durable_scope_begin(ctx->pouch, &scope, error);
+  if (rc != LC_OK)
+    return rc;
+  rc = fresh ? lc_pouch_retention_start(ctx, scope, error)
+             : lc_pouch_retention_resume(ctx, scope, error);
+  if (rc != LC_OK && ctx->work.phase == LC_POUCH_RETENTION_ACTIVE &&
+      (ctx->slot_claimed || !fresh) &&
+      (ctx->journal.state == NULL ||
+       strcmp(ctx->journal.state, "commit") != 0)) {
+    lc_error rollback_error;
+    int rollback_rc;
+    lc_error_init(&rollback_error);
+    rollback_rc = lc_pouch_retention_resume(ctx, scope, &rollback_error);
+    if (rollback_rc != LC_OK) {
+      pslog_field fields[3];
+      fields[0] = lc_log_str_field("ns", ctx->ns);
+      fields[1] = lc_log_str_field("key", ctx->work.key);
+      fields[2] = lc_log_error_field("error", &rollback_error);
+      lc_log_warn(ctx->pouch->logger, "retention.rollback.error", fields, 3);
+    }
+    lc_error_cleanup(&rollback_error);
+  }
+  return lc_pouch_state_durable_scope_end(scope, rc, error);
+}
+
+int lc_pouch_retention_run(lc_pouch *pouch, const char *ns, size_t max_attempts,
+                           lc_pouch_maintenance_result *out, lc_error *error) {
+  size_t attempts = 0;
+  char *first_key = NULL;
+  int wrapped = 0;
+  int first_rc = LC_OK;
+  lc_error first_error;
+  if (pouch == NULL || ns == NULL || ns[0] == '\0')
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "state retention maintenance requires root and namespace", NULL, NULL,
+        "pouch");
+  if (out != NULL) {
+    out->retention_scanned_count = 0;
+    out->retention_expired_count = 0;
+    out->retention_deleted_state_count = 0;
+    out->retention_failed_count = 0;
+  }
+  lc_error_init(&first_error);
+  while (attempts < max_attempts) {
+    lc_pouch_retention_cleanup ctx = {0};
+    lc_pouch_txn_guard guard = {0};
+    lc_pouch_txn_guard foreign_guard = {0};
+    lc_pouch_txn_record foreign = {0};
+    lc_error cause;
+    int fresh;
+    int stop = 0;
+    int rc;
+    ctx.pouch = pouch;
+    ctx.ns = ns;
+    guard.fd = -1;
+    foreign_guard.fd = -1;
+    lc_error_init(&cause);
+    rc = lc_pouch_state_with_namespace_lock(
+        pouch, ns, lc_pouch_retention_load_locked, &ctx, &cause);
+    fresh = ctx.work.phase == LC_POUCH_RETENTION_IDLE;
+    if (out != NULL)
+      out->retention_scanned_count += ctx.candidate.scanned;
+    if (rc == LC_OK &&
+        (!ctx.work.present || (fresh && ctx.candidate.key == NULL))) {
+      stop = 1;
+      goto attempt_done;
+    }
+    ++attempts;
+    if (rc == LC_OK && fresh) {
+      if (first_key != NULL) {
+        if ((wrapped && ctx.candidate.wrapped) ||
+            ((wrapped || ctx.candidate.wrapped) &&
+             strcmp(ctx.candidate.key, first_key) >= 0)) {
+          stop = 1;
+          goto attempt_done;
+        }
+        wrapped = wrapped || ctx.candidate.wrapped;
+      } else {
+        first_key =
+            lc_strdup_with_allocator(&pouch->allocator, ctx.candidate.key);
+        if (first_key == NULL)
+          rc = lc_error_set(&cause, LC_ERR_NOMEM, 0L,
+                            "failed to retain state retention pass cursor",
+                            NULL, NULL, "pouch");
+      }
+      if (out != NULL)
+        ++out->retention_expired_count;
+    }
+    if (rc == LC_OK && ctx.skip)
+      goto attempt_done;
+    if (rc == LC_OK && fresh && ctx.observed.found &&
+        ctx.observed.lease_id[0] != '\0' && ctx.observed.txn_id[0] != '\0') {
+      rc = lc_pouch_txn_guard_lock(pouch, ctx.observed.txn_id, 0,
+                                   &foreign_guard, &cause);
+      if (rc == LC_OK)
+        rc = lc_pouch_xa_read_txn(pouch, ctx.observed.txn_id, &foreign, &cause);
+      if (rc == LC_OK && foreign.state != NULL)
+        goto attempt_done;
+    }
+    if (rc == LC_OK && fresh)
+      rc = lc_xid_new(ctx.new_xid, &cause);
+    if (rc == LC_OK) {
+      const char *txn_id = fresh ? ctx.new_xid : ctx.work.txn_id;
+      /* An abandoned implicit xid can share this root's guard stripe with
+       * the new cleanup xid. Its already-owned mutex and file lock protect
+       * both; trying to reacquire that non-recursive stripe would skip itself.
+       */
+      if (!foreign_guard.mutex_locked ||
+          foreign_guard.mutex !=
+              &lc_pouch_txn_guard_mutexes[lc_pouch_txn_guard_stripe(txn_id)])
+        rc = lc_pouch_txn_guard_lock(pouch, txn_id, 0, &guard, &cause);
+    }
+    if (rc == LC_OK)
+      rc = lc_pouch_retention_attempt(&ctx, fresh, &cause);
+    if (rc == LC_OK && ctx.journal.state != NULL &&
+        strcmp(ctx.journal.state, "commit") == 0 && out != NULL)
+      ++out->retention_deleted_state_count;
+  attempt_done:
+    lc_pouch_txn_guard_release(&guard);
+    lc_pouch_txn_guard_release(&foreign_guard);
+    lc_pouch_txn_record_cleanup(&foreign);
+    if (rc == LC_ERR_PENDING) {
+      stop = !fresh || ctx.work.phase != LC_POUCH_RETENTION_IDLE;
+    } else if (rc != LC_OK) {
+      pslog_field fields[4];
+      fields[0] = lc_log_str_field("ns", ns);
+      fields[1] = lc_log_str_field(
+          "key", ctx.work.key != NULL ? ctx.work.key : ctx.candidate.key);
+      fields[2] = lc_log_error_field("error", &cause);
+      fields[3] = lc_log_code_field(&cause);
+      lc_log_warn(pouch->logger, "retention.cleanup.error", fields, 4);
+      if (out != NULL)
+        ++out->retention_failed_count;
+      if (first_rc == LC_OK) {
+        first_rc = rc;
+        first_error = cause;
+        lc_error_init(&cause);
+      }
+      if (ctx.candidate.key == NULL ||
+          ctx.work.phase != LC_POUCH_RETENTION_IDLE)
+        stop = 1;
+    }
+    lc_error_cleanup(&cause);
+    lc_pouch_retention_cleanup_dispose(&ctx);
+    if (stop)
+      break;
+  }
+  lc_free_with_allocator(&pouch->allocator, first_key);
+  if (first_rc != LC_OK && error != NULL) {
+    lc_error_cleanup(error);
+    *error = first_error;
+    lc_error_init(&first_error);
+  }
+  lc_error_cleanup(&first_error);
+  return first_rc;
 }
 
 int lc_pouch_client_xa_prepared(lc_client *self, const char *txn_id,
@@ -17416,8 +18563,8 @@ int lc_pouch_client_xa_prepared(lc_client *self, const char *txn_id,
   lc_pouch_txn_record record;
   char backend[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U];
   size_t index;
-  int rc =
-      lc_pouch_xa_read_txn((lc_client_handle *)self, txn_id, &record, error);
+  int rc = lc_pouch_xa_read_txn(((lc_client_handle *)self)->pouch, txn_id,
+                                &record, error);
   *prepared = 0;
   index = rc == LC_OK ? lc_pouch_txn_record_find_participant(
                             &record, LC_POUCH_XA_NAMESPACE, key)
@@ -17468,12 +18615,12 @@ int lc_pouch_client_xa_enroll(lc_client *self,
   rc = lc_pouch_xa_branch_key(branch, key, sizeof(key), error);
   if (rc != LC_OK)
     return rc;
-  rc = lc_pouch_txn_guard_acquire(client, branch->txn_id, &guard, error);
+  rc = lc_pouch_txn_guard_acquire(client->pouch, branch->txn_id, &guard, error);
   if (rc != LC_OK)
     return rc;
   memset(&result, 0, sizeof(result));
   lc_txn_decision_req_init(&request);
-  rc = lc_pouch_xa_read_txn(client, branch->txn_id, &record, error);
+  rc = lc_pouch_xa_read_txn(client->pouch, branch->txn_id, &record, error);
   if (rc == LC_OK) {
     int sealed = 0;
     rc = lc_pouch_xa_owner_check(client, branch->txn_id, record.tc_term,
@@ -17534,10 +18681,10 @@ int lc_pouch_client_xa_progress(lc_client *self,
   rc = lc_pouch_xa_branch_key(branch, key, sizeof(key), error);
   if (rc != LC_OK)
     return rc;
-  rc = lc_pouch_txn_guard_acquire(client, branch->txn_id, &guard, error);
+  rc = lc_pouch_txn_guard_acquire(client->pouch, branch->txn_id, &guard, error);
   if (rc != LC_OK)
     return rc;
-  rc = lc_pouch_xa_read_txn(client, branch->txn_id, &record, error);
+  rc = lc_pouch_xa_read_txn(client->pouch, branch->txn_id, &record, error);
   if (rc == LC_OK)
     rc = lc_pouch_xa_owner_check(client, branch->txn_id, record.tc_term,
                                  owner_id, 1, NULL, error);
@@ -17716,7 +18863,8 @@ static int lc_pouch_client_txn_replay_impl(lc_client *self,
     } else if (rc == LC_OK && (strcmp(txn_record.state, "commit") == 0 ||
                                strcmp(txn_record.state, "rollback") == 0)) {
       rc = lc_pouch_txn_apply_participants(client, &decision_req,
-                                           txn_record.state, 1, error);
+                                           txn_record.state, 1,
+                                           txn_record.commit_at_unix, error);
     } else if (rc == LC_OK) {
       rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                         "pouch transaction replay state is unsupported", NULL,
@@ -17794,7 +18942,20 @@ static int lc_pouch_client_txn_decision(
   context.key = key;
   context.owner_id = owner_id;
   context.takeover = takeover;
-  rc = lc_pouch_xa_read_txn(client, req->txn_id, &context.record, error);
+  rc = lc_pouch_xa_read_txn(client->pouch, req->txn_id, &context.record, error);
+  if (rc == LC_OK && strcmp(state, "commit") == 0 &&
+      (context.record.state == NULL ||
+       strcmp(context.record.state, "prepare") == 0)) {
+    rc = lc_pouch_now_unix(&context.commit_at_unix, error);
+    if (rc == LC_OK)
+      rc = lc_pouch_txn_validate_retention(
+          client, req->txn_id, context.record.participants,
+          context.record.participant_count, context.commit_at_unix, error);
+    if (rc == LC_OK)
+      rc = lc_pouch_txn_validate_retention(
+          client, req->txn_id, req->participants, req->participant_count,
+          context.commit_at_unix, error);
+  }
   if (rc == LC_OK)
     rc = lc_pouch_xa_decision_authority(&context, &context.owner_sealed, error);
   if (rc == LC_OK && context.owner_sealed && owner_id == NULL && !takeover &&
@@ -17812,6 +18973,12 @@ static int lc_pouch_client_txn_decision(
                                       key, lc_pouch_txn_decision_record_locked,
                                       &context, error);
   }
+#ifdef LOCKDC_TEST_BUILD
+  if (rc == LC_OK && context.apply_decision &&
+      lc_pouch_test_after_txn_decision_hook != NULL)
+    rc = lc_pouch_test_after_txn_decision_hook(
+        lc_pouch_test_after_txn_decision_context, error);
+#endif
   if (rc == LC_OK && context.apply_decision) {
     decision_req.txn_id = req->txn_id;
     decision_req.participants = context.record.participants;
@@ -17819,9 +18986,9 @@ static int lc_pouch_client_txn_decision(
     decision_req.expires_at_unix = context.record.expires_at_unix;
     decision_req.tc_term = context.record.tc_term;
     decision_req.target_backend_hash = context.record.target_backend_hash;
-    rc = lc_pouch_txn_apply_participants(client, &decision_req,
-                                         context.record.state,
-                                         tolerate_queue_lease_mismatch, error);
+    rc = lc_pouch_txn_apply_participants(
+        client, &decision_req, context.record.state,
+        tolerate_queue_lease_mismatch, context.record.commit_at_unix, error);
   }
   if ((rc == LC_OK || rc == LC_ERR_PENDING) && context.record.state != NULL) {
     int operation_rc = rc;
@@ -17847,8 +19014,8 @@ static int lc_pouch_client_txn_guarded_decision(lc_client *self,
   if (self == NULL || req == NULL || !lc_xid_is_valid(req->txn_id))
     return lc_pouch_client_txn_decision(self, req, state, 0, NULL, 0, out,
                                         error);
-  rc = lc_pouch_txn_guard_acquire((lc_client_handle *)self, req->txn_id, &guard,
-                                  error);
+  rc = lc_pouch_txn_guard_acquire(((lc_client_handle *)self)->pouch,
+                                  req->txn_id, &guard, error);
   if (rc != LC_OK)
     return rc;
   rc = lc_pouch_client_txn_decision(self, req, state, 0, NULL, 0, out, error);
@@ -17862,8 +19029,8 @@ int lc_pouch_client_txn_replay_method(lc_client *self,
   int rc;
   if (self == NULL || req == NULL || !lc_xid_is_valid(req->txn_id))
     return lc_pouch_client_txn_replay_impl(self, req, out, error);
-  rc = lc_pouch_txn_guard_acquire((lc_client_handle *)self, req->txn_id, &guard,
-                                  error);
+  rc = lc_pouch_txn_guard_acquire(((lc_client_handle *)self)->pouch,
+                                  req->txn_id, &guard, error);
   if (rc != LC_OK)
     return rc;
   rc = lc_pouch_client_txn_replay_impl(self, req, out, error);
@@ -17924,6 +19091,7 @@ int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error) {
     char *body;
     int cleanup_decision;
     int managed;
+    int retention_owned;
     lc_pouch_txn_guard guard;
 
     memset(&read_result, 0, sizeof(read_result));
@@ -17933,7 +19101,8 @@ int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error) {
     body = NULL;
     cleanup_decision = 0;
     managed = 0;
-    rc = lc_pouch_txn_guard_acquire(client, keys.keys[i], &guard, error);
+    retention_owned = 0;
+    rc = lc_pouch_txn_guard_acquire(client->pouch, keys.keys[i], &guard, error);
     if (rc != LC_OK)
       break;
     rc = lc_pouch_xa_managed(client, keys.keys[i], &managed, error);
@@ -17980,14 +19149,20 @@ int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error) {
         rc = lc_pouch_txn_validate_target_backend(
             client->pouch, req.target_backend_hash, error);
       }
-      if (rc == LC_OK && (strcmp(record.state, "commit") == 0 ||
-                          strcmp(record.state, "rollback") == 0)) {
+      if (rc == LC_OK && record.participant_count == 1)
+        rc = lc_pouch_retention_owns_journal(
+            client->pouch, record.participants[0].ns,
+            record.participants[0].key, keys.keys[i], &retention_owned, error);
+      if (rc == LC_OK && !retention_owned &&
+          (strcmp(record.state, "commit") == 0 ||
+           strcmp(record.state, "rollback") == 0)) {
         rc = lc_pouch_txn_apply_participants(client, &req, record.state, 1,
-                                             error);
+                                             record.commit_at_unix, error);
         if (rc == LC_OK) {
           cleanup_decision = 1;
         }
-      } else if (rc == LC_OK && strcmp(record.state, "prepare") == 0 &&
+      } else if (rc == LC_OK && !retention_owned &&
+                 strcmp(record.state, "prepare") == 0 &&
                  record.expires_at_unix > 0L && record.expires_at_unix <= now) {
         lc_txn_decision_res rollback_res;
 
@@ -18403,7 +19578,7 @@ static int lc_pouch_xa_snapshot_locked(lc_client_handle *client,
   lc_pouch_txn_record record;
   lc_pouch_tc_lease_record owner;
   size_t i;
-  int rc = lc_pouch_xa_read_txn(client, txn_id, &record, error);
+  int rc = lc_pouch_xa_read_txn(client->pouch, txn_id, &record, error);
   memset(&owner, 0, sizeof(owner));
   memset(out, 0, sizeof(*out));
   if (rc == LC_OK && record.state == NULL)
@@ -18478,8 +19653,8 @@ static int lc_pouch_xa_begin_guard(lc_client *self, const char *txn_id,
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "managed XA requires Pouch and a valid transaction ID",
                         NULL, NULL, "pouch-xa");
-  return lc_pouch_txn_guard_acquire((lc_client_handle *)self, txn_id, guard,
-                                    error);
+  return lc_pouch_txn_guard_acquire(((lc_client_handle *)self)->pouch, txn_id,
+                                    guard, error);
 }
 int lc_pouch_client_xa_snapshot(lc_client *self, const char *txn_id,
                                 lc_xa_snapshot *out, lc_error *error) {
@@ -18535,7 +19710,7 @@ int lc_pouch_client_xa_claim(lc_client *self, const char *owner_id,
     rc = lc_pouch_timestamp_add(now, ttl_seconds, "XA owner TTL", &expires,
                                 error);
   if (rc == LC_OK)
-    rc = lc_pouch_xa_read_txn(client, txn_id, &record, error);
+    rc = lc_pouch_xa_read_txn(client->pouch, txn_id, &record, error);
   if (rc == LC_OK)
     rc = lc_pouch_xa_owner_read(client, txn_id, &owner, error);
   if (rc == LC_OK) {
@@ -18701,7 +19876,7 @@ int lc_pouch_client_xa_decide(lc_client *self, const char *owner_id,
     return rc;
   memset(&result, 0, sizeof(result));
   lc_txn_decision_req_init(&request);
-  rc = lc_pouch_xa_read_txn(client, txn_id, &record, error);
+  rc = lc_pouch_xa_read_txn(client->pouch, txn_id, &record, error);
   if (rc == LC_OK)
     rc = lc_pouch_xa_owner_check(client, txn_id, record.tc_term, owner_id, 1,
                                  &sealed, error);
@@ -18748,7 +19923,7 @@ int lc_pouch_client_xa_prepare_pouch(lc_client *self, const char *owner_id,
   rc = lc_pouch_xa_begin_guard(self, txn_id, &guard, error);
   if (rc != LC_OK)
     return rc;
-  rc = lc_pouch_xa_read_txn(client, txn_id, &record, error);
+  rc = lc_pouch_xa_read_txn(client->pouch, txn_id, &record, error);
   if (rc == LC_OK)
     rc = lc_pouch_xa_owner_check(client, txn_id, record.tc_term, owner_id, 1,
                                  &sealed, error);
@@ -18849,7 +20024,8 @@ int lc_pouch_client_xa_retire(lc_client *self, long retention_seconds,
     char key[sizeof("completed/") + LC_XID_STRING_SIZE];
     size_t j;
     int eligible;
-    rc = lc_pouch_txn_guard_acquire(client, entries[i].txn_id, &guard, error);
+    rc = lc_pouch_txn_guard_acquire(client->pouch, entries[i].txn_id, &guard,
+                                    error);
     if (rc != LC_OK)
       break;
     memset(&owner, 0, sizeof(owner));
@@ -18865,7 +20041,8 @@ int lc_pouch_client_xa_retire(lc_client *self, long retention_seconds,
                  now - completed >= retention_seconds) ||
                 (max_records != 0U && remaining > max_records));
     if (eligible) {
-      rc = lc_pouch_xa_read_txn(client, entries[i].txn_id, &record, error);
+      rc = lc_pouch_xa_read_txn(client->pouch, entries[i].txn_id, &record,
+                                error);
       if (rc == LC_OK && owner.found && record.state == NULL)
         rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                           "XA completion lost its authoritative decision", NULL,
@@ -20498,6 +21675,9 @@ int lc_pouch_lease_describe_method(lc_lease *self, lc_error *error) {
     if (rc == LC_OK) {
       rc = lc_pouch_lease_refresh_state(
           lease, read_result.found ? read_result.etag : NULL, version, error);
+      if (rc == LC_OK)
+        lc_pouch_lease_refresh_retention(lease, read_result.has_body,
+                                         read_result.retention);
     }
   }
   lc_pouch_state_read_result_cleanup(&lease->client->allocator, &read_result);
@@ -20528,6 +21708,7 @@ int lc_pouch_lease_get_method(lc_lease *self, lc_sink *dst,
       rc = lc_pouch_lease_read_private_state(lease, &read_result, error);
       if (rc == LC_OK && !read_result.found) {
         out->no_content = 1;
+        out->retention_support = LC_STATE_RETENTION_SUPPORTED;
       }
       if (rc == LC_OK && read_result.found) {
         rc = lc_copy(read_result.body, dst, NULL, error);
@@ -20541,6 +21722,10 @@ int lc_pouch_lease_get_method(lc_lease *self, lc_sink *dst,
         rc =
             lc_pouch_lease_refresh_state(lease, out->etag, out->version, error);
       }
+      if (rc == LC_OK && (opts == NULL || !opts->public_read))
+        lc_pouch_lease_refresh_retention(lease,
+                                         out->has_retention_expires_at_unix,
+                                         out->retention_expires_at_unix);
       return rc;
     }
   }
@@ -20550,6 +21735,9 @@ int lc_pouch_lease_get_method(lc_lease *self, lc_sink *dst,
   if (rc == LC_OK && !out->no_content && (opts == NULL || !opts->public_read)) {
     rc = lc_pouch_lease_refresh_state(lease, out->etag, out->version, error);
   }
+  if (rc == LC_OK && (opts == NULL || !opts->public_read))
+    lc_pouch_lease_refresh_retention(lease, out->has_retention_expires_at_unix,
+                                     out->retention_expires_at_unix);
   return rc;
 }
 
@@ -20589,6 +21777,7 @@ static int lc_pouch_lease_load_method(lc_lease *self, const lonejson_map *map,
       rc = lc_pouch_lease_read_private_state(lease, &read_result, error);
       if (rc == LC_OK && !read_result.found) {
         out->no_content = 1;
+        out->retention_support = LC_STATE_RETENTION_SUPPORTED;
       }
       if (rc == LC_OK && read_result.found) {
         rc = lc_sink_to_memory(&memory_sink, error);
@@ -20633,6 +21822,10 @@ static int lc_pouch_lease_load_method(lc_lease *self, const lonejson_map *map,
         rc =
             lc_pouch_lease_refresh_state(lease, out->etag, out->version, error);
       }
+      if (rc == LC_OK && (opts == NULL || !opts->public_read))
+        lc_pouch_lease_refresh_retention(lease,
+                                         out->has_retention_expires_at_unix,
+                                         out->retention_expires_at_unix);
       return rc;
     }
   }
@@ -20642,13 +21835,18 @@ static int lc_pouch_lease_load_method(lc_lease *self, const lonejson_map *map,
   if (rc == LC_OK && !out->no_content && (opts == NULL || !opts->public_read)) {
     rc = lc_pouch_lease_refresh_state(lease, out->etag, out->version, error);
   }
+  if (rc == LC_OK && (opts == NULL || !opts->public_read))
+    lc_pouch_lease_refresh_retention(lease, out->has_retention_expires_at_unix,
+                                     out->retention_expires_at_unix);
   return rc;
 }
 
 static int lc_pouch_lease_save_method(lc_lease *self, const lonejson_map *map,
-                                      const void *src, lc_error *error) {
+                                      const void *src,
+                                      const lc_update_opts *opts,
+                                      lc_error *error) {
   lc_source *source;
-  lc_update_opts opts;
+  lc_update_opts update;
   int rc;
 
   if (self == NULL || map == NULL || src == NULL) {
@@ -20661,9 +21859,12 @@ static int lc_pouch_lease_save_method(lc_lease *self, const lonejson_map *map,
   if (rc != LC_OK) {
     return rc;
   }
-  memset(&opts, 0, sizeof(opts));
-  opts.content_type = "application/json";
-  rc = lc_pouch_lease_update_method(self, source, &opts, error);
+  memset(&update, 0, sizeof(update));
+  if (opts != NULL)
+    update = *opts;
+  if (update.content_type == NULL)
+    update.content_type = "application/json";
+  rc = lc_pouch_lease_update_method(self, source, &update, error);
   lc_source_close(source);
   return rc;
 }
@@ -20702,6 +21903,12 @@ static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
   memset(&options, 0, sizeof(options));
   memset(&result, 0, sizeof(result));
   options.content_type = "application/json";
+  rc = lc_pouch_retention_options(
+      &options, opts != NULL ? opts->has_retention_seconds : 0,
+      opts != NULL ? opts->retention_seconds : 0, lease->ns,
+      lc_pouch_lease_state_storage_key(lease), error);
+  if (rc != LC_OK)
+    return rc;
   options.has_query_hidden = lease->has_query_hidden;
   options.query_hidden = lease->query_hidden;
   /* Do not propagate automatic placeholder hiding into a staged first body. */
@@ -20737,6 +21944,7 @@ static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
     }
     options.has_expected_version = 1;
   }
+  lc_lease_retention_observe(self, LC_STATE_RETENTION_UNKNOWN, 0, 0);
   rc = lc_pouch_client_stage_transaction_write(
       lease->client, &lease_ref, lease->ns,
       lc_pouch_lease_state_storage_key(lease), stage_txn_id, src, &options,
@@ -20760,6 +21968,8 @@ static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
       if (rc == LC_OK) {
         lc_pouch_lease_refresh_query_metadata(lease, result.has_query_hidden,
                                               result.query_hidden);
+        lc_pouch_lease_refresh_retention(lease, result.has_body,
+                                         result.retention);
       }
     }
   }
@@ -20796,6 +22006,12 @@ int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
     memset(&options, 0, sizeof(options));
     memset(&write_result, 0, sizeof(write_result));
     state_key = lc_pouch_lease_state_storage_key(lease);
+    rc = lc_pouch_retention_options(
+        &options, opts != NULL ? opts->has_retention_seconds : 0,
+        opts != NULL ? opts->retention_seconds : 0, lease->ns, state_key,
+        error);
+    if (rc != LC_OK)
+      return rc;
     /* The write precondition validates this lease from the resident record
      * while the exact key is owned. Do not add a stale pre-read before it. */
     options.content_type = opts != NULL && opts->content_type != NULL
@@ -20834,6 +22050,7 @@ int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
     lease_ref.fencing_token = lease->fencing_token;
     if (lc_pouch_lease_stages_transaction(lease)) {
       stage_txn_id = lease->txn_id;
+      lc_lease_retention_observe(self, LC_STATE_RETENTION_UNKNOWN, 0, 0);
       rc = lc_pouch_client_stage_transaction_write(
           lease->client, &lease_ref, lease->ns, state_key, stage_txn_id, src,
           &options, &write_result, NULL, error);
@@ -20844,6 +22061,7 @@ int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
       lease_precondition.key = lease->key;
       options.precondition = lc_pouch_lease_precondition_check;
       options.precondition_context = &lease_precondition;
+      lc_lease_retention_observe(self, LC_STATE_RETENTION_UNKNOWN, 0, 0);
       rc = lc_pouch_state_write(lease->client->pouch, lease->ns, state_key, src,
                                 &options, &write_result, error);
     }
@@ -20855,6 +22073,9 @@ int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
       if (rc == LC_OK) {
         rc = lc_pouch_lease_refresh_state(lease, write_result.etag, version,
                                           error);
+        if (rc == LC_OK)
+          lc_pouch_lease_refresh_retention(lease, write_result.has_body,
+                                           write_result.retention);
       }
     }
     lc_pouch_state_write_result_cleanup(&lease->client->allocator,
@@ -20873,6 +22094,8 @@ int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
     req.if_version = opts->if_version;
     req.has_if_version = opts->has_if_version;
     req.content_type = opts->content_type;
+    req.has_retention_seconds = opts->has_retention_seconds;
+    req.retention_seconds = opts->retention_seconds;
   }
   if (!req.has_if_version && lease->version > 0L) {
     req.if_version = lease->version;
@@ -20881,11 +22104,15 @@ int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
   if (req.content_type == NULL) {
     req.content_type = "application/json";
   }
+  lc_lease_retention_observe(self, LC_STATE_RETENTION_UNKNOWN, 0, 0);
   rc = lc_pouch_client_update_method(&lease->client->pub, &req, src, &res,
                                      error);
   if (rc == LC_OK) {
     rc = lc_pouch_lease_refresh_state(lease, res.new_state_etag,
                                       res.new_version, error);
+    if (rc == LC_OK)
+      lc_pouch_lease_refresh_retention(lease, res.has_retention_expires_at_unix,
+                                       res.retention_expires_at_unix);
     if (rc == LC_OK && first_body_from_hidden_placeholder) {
       lc_pouch_lease_refresh_query_metadata(lease, 0, 0);
     }
@@ -20937,6 +22164,8 @@ static int lc_pouch_lease_mutate_method(lc_lease *self,
   opts.if_state_etag = req->if_state_etag;
   opts.if_version = req->if_version;
   opts.has_if_version = req->has_if_version;
+  opts.has_retention_seconds = req->has_retention_seconds;
+  opts.retention_seconds = req->retention_seconds;
   if (!opts.has_if_version && lease->version > 0L) {
     opts.if_version = lease->version;
     opts.has_if_version = 1;
@@ -21044,17 +22273,23 @@ int lc_pouch_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
   lease = (lc_lease_handle *)self;
   if (lease->pouch_state_key != NULL ||
       lease->pouch_commit_immediately == LC_POUCH_COMMIT_STATE_IMMEDIATELY) {
-    if (!req->has_query_hidden) {
-      return lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch lease metadata requires query_hidden", NULL,
-                          NULL, NULL);
+    if (!req->has_query_hidden && !req->has_retention_seconds) {
+      return lc_error_set(
+          error, LC_ERR_INVALID, 0L,
+          "pouch lease metadata requires query_hidden or retention_seconds",
+          NULL, NULL, NULL);
     }
     memset(&lease_precondition, 0, sizeof(lease_precondition));
     memset(&options, 0, sizeof(options));
     memset(&result, 0, sizeof(result));
-    options.has_query_hidden = 1;
+    options.has_query_hidden = req->has_query_hidden;
     options.query_hidden = req->query_hidden;
     options.object_record = 1;
+    rc = lc_pouch_retention_options(
+        &options, req->has_retention_seconds, req->retention_seconds, lease->ns,
+        lc_pouch_lease_state_storage_key(lease), error);
+    if (rc != LC_OK)
+      return rc;
     if (req->has_if_version) {
       rc = lc_pouch_version_to_generation(req->if_version,
                                           &options.expected_version, error);
@@ -21084,6 +22319,7 @@ int lc_pouch_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
     lease_precondition.key = lease->key;
     options.precondition = lc_pouch_lease_precondition_check;
     options.precondition_context = &lease_precondition;
+    lc_lease_retention_observe(self, LC_STATE_RETENTION_UNKNOWN, 0, 0);
     rc = lc_pouch_state_update_metadata(lease->client->pouch, lease->ns,
                                         lc_pouch_lease_state_storage_key(lease),
                                         &options, &result, error);
@@ -21094,6 +22330,8 @@ int lc_pouch_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
         lease->pub.version = lease->version;
         lc_pouch_lease_refresh_query_metadata(lease, result.has_query_hidden,
                                               result.query_hidden);
+        lc_pouch_lease_refresh_retention(lease, result.has_body,
+                                         result.retention);
       }
     }
     lc_pouch_state_write_result_cleanup(&lease->client->allocator, &result);
@@ -21110,16 +22348,21 @@ int lc_pouch_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
   op.query_hidden = req->query_hidden;
   op.if_version = req->if_version;
   op.has_if_version = req->has_if_version;
+  op.has_retention_seconds = req->has_retention_seconds;
+  op.retention_seconds = req->retention_seconds;
   if (!op.has_if_version && lease->version > 0L) {
     op.if_version = lease->version;
     op.has_if_version = 1;
   }
+  lc_lease_retention_observe(self, LC_STATE_RETENTION_UNKNOWN, 0, 0);
   rc = lc_pouch_client_metadata_method(&lease->client->pub, &op, &res, error);
   if (rc == LC_OK) {
     lease->version = res.version;
     lease->pub.version = lease->version;
     lc_pouch_lease_refresh_query_metadata(lease, res.has_query_hidden,
                                           res.query_hidden);
+    lc_pouch_lease_refresh_retention(lease, res.has_retention_expires_at_unix,
+                                     res.retention_expires_at_unix);
   }
   lc_metadata_res_cleanup(&res);
   return rc;
@@ -21181,6 +22424,7 @@ int lc_pouch_lease_remove_method(lc_lease *self, const lc_remove_req *req,
     lease_precondition.key = lease->key;
     options.precondition = lc_pouch_lease_precondition_check;
     options.precondition_context = &lease_precondition;
+    lc_lease_retention_observe(self, LC_STATE_RETENTION_UNKNOWN, 0, 0);
     rc = lc_pouch_state_delete(lease->client->pouch, lease->ns,
                                lc_pouch_lease_state_storage_key(lease),
                                &options, &result, error);
@@ -21191,6 +22435,8 @@ int lc_pouch_lease_remove_method(lc_lease *self, const lc_remove_req *req,
         lease->pouch_state_removed = 1;
       }
     }
+    if (rc == LC_OK)
+      lc_pouch_lease_refresh_retention(lease, 0, 0);
     lc_pouch_state_write_result_cleanup(&lease->client->allocator, &result);
     return rc;
   }
@@ -21210,10 +22456,13 @@ int lc_pouch_lease_remove_method(lc_lease *self, const lc_remove_req *req,
     op.if_version = lease->version;
     op.has_if_version = 1;
   }
+  lc_lease_retention_observe(self, LC_STATE_RETENTION_UNKNOWN, 0, 0);
   rc = lc_pouch_client_remove_method(&lease->client->pub, &op, &res, error);
   if (rc == LC_OK && res.removed) {
     rc = lc_pouch_lease_refresh_state(lease, NULL, 0L, error);
   }
+  if (rc == LC_OK)
+    lc_pouch_lease_refresh_retention(lease, 0, 0);
   lc_remove_res_cleanup(&res);
   return rc;
 }

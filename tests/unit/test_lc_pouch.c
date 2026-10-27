@@ -36,6 +36,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "../support/lc_test_cases.h"
+
 #define POUCH_UNIT_TMP_PREFIX "/tmp/liblockdc-unit-pouch-"
 #define POUCH_CRYPTO_KEY_TMP_PREFIX "liblockdc-unit-pouch-crypto-key-"
 #define POUCH_TEST_CHILD_COMMAND_MAX 20U
@@ -2742,8 +2744,8 @@ static void test_index_term_generation_roundtrips_typed_postings(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_non_null(bytes);
   assert_true(length > 0U);
-  rc = lc_pouch_index_term_generation_decode(&allocator, bytes, length, 17UL,
-                                             6UL, 12345UL, &decoded, &error);
+  rc = lc_pouch_index_term_generation_decode(
+      &allocator, bytes, length, 17UL, 6UL, 12345UL, NULL, &decoded, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(decoded.ns, "docs/exact-generation");
   assert_int_equal(decoded.index_seq, 17);
@@ -2841,7 +2843,7 @@ static void test_index_term_generation_sorts_trusted_terms_without_changing_ids(
                                              &length, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_index_term_generation_decode(&allocator, bytes, length, 23UL,
-                                             1UL, 99UL, &decoded, &error);
+                                             1UL, 99UL, NULL, &decoded, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(
       lc_pouch_index_term_table_find(&decoded.terms, "2f7a", "7a", 's', NULL));
@@ -2935,7 +2937,7 @@ static void test_index_term_generation_encodes_large_output_once(void **state) {
   assert_int_equal(sorted_bytes[sorted_length], '\0');
   rc = lc_pouch_index_term_generation_decode(&allocator, sorted_bytes,
                                              sorted_length, 77UL, 64UL, 9876UL,
-                                             &decoded, &error);
+                                             NULL, &decoded, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(decoded.terms.count, 160U);
   assert_int_equal(decoded.postings.count, 160U);
@@ -3000,7 +3002,7 @@ test_index_term_generation_validates_measured_records(void **state) {
                                              &length, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_index_term_generation_decode(&allocator, bytes, length, 0UL,
-                                             0UL, 0UL, &decoded, &error);
+                                             0UL, 0UL, NULL, &decoded, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(decoded.terms.count, 0U);
   assert_int_equal(decoded.postings.count, 0U);
@@ -3195,7 +3197,7 @@ static void test_index_term_generation_reads_v1_artifact(void **state) {
   term_id = 0UL;
   rc = lc_pouch_index_term_generation_decode(
       &allocator, (const char *)legacy_bytes, sizeof(legacy_bytes), 17UL, 1UL,
-      2UL, &generation, &error);
+      2UL, NULL, &generation, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(generation.ns, "v1");
   assert_true(lc_pouch_index_term_table_find(&generation.terms, "2f76", "31",
@@ -3252,14 +3254,14 @@ test_index_term_generation_rejects_corrupt_identity_and_payload(void **state) {
   assert_int_equal(rc, LC_OK);
 
   rc = lc_pouch_index_term_generation_decode(&allocator, bytes, length, 10UL,
-                                             2UL, 88UL, &decoded, &error);
+                                             2UL, 88UL, NULL, &decoded, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_non_null(strstr(error.message, "identity mismatch"));
   lc_error_cleanup(&error);
   lc_error_init(&error);
 
-  rc = lc_pouch_index_term_generation_decode(&allocator, bytes, length / 2U,
-                                             9UL, 2UL, 88UL, &decoded, &error);
+  rc = lc_pouch_index_term_generation_decode(
+      &allocator, bytes, length / 2U, 9UL, 2UL, 88UL, NULL, &decoded, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   lc_error_cleanup(&error);
   lc_error_init(&error);
@@ -3271,7 +3273,7 @@ test_index_term_generation_rejects_corrupt_identity_and_payload(void **state) {
   assert_true(length > 0U);
   corrupt[length - 1U] = (char)(corrupt[length - 1U] ^ 0x7f);
   rc = lc_pouch_index_term_generation_decode(&allocator, corrupt, length, 9UL,
-                                             2UL, 88UL, &decoded, &error);
+                                             2UL, 88UL, NULL, &decoded, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
 
   lc_free_with_allocator(&allocator, corrupt);
@@ -18037,6 +18039,131 @@ test_maintenance_retention_sweep_deletes_expired_state(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_compaction_diagnostics_distinguish_deferred_cleanup(void **state) {
+  lc_pouch *pouch = NULL;
+  lc_pouch_open_options options;
+  lc_pouch_maintenance_options maintenance;
+  lc_pouch_maintenance_result result;
+  lc_pouch_state_write_result written;
+  lc_pouch_query_index_flush_result flushed;
+  lc_source *body = NULL;
+  lc_error error;
+  FILE *log_fp = NULL;
+  pslog_logger *logger;
+  char root[512];
+  char path[1024];
+  char *ns_path;
+  char *logs;
+  const char *complete;
+  const char *line_end;
+  const char *records;
+  int i;
+
+  (void)state;
+  memset(&options, 0, sizeof(options));
+  memset(&maintenance, 0, sizeof(maintenance));
+  memset(&result, 0, sizeof(result));
+  memset(&written, 0, sizeof(written));
+  memset(&flushed, 0, sizeof(flushed));
+  lc_error_init(&error);
+  make_root("compaction-diagnostics", root, sizeof(root));
+  cleanup_root(root);
+  logger = open_pouch_test_logger(&log_fp);
+  assert_non_null(logger);
+  options.logger = logger;
+  /* Transformed shared roots eagerly warm their derived index on reopen. */
+  options.compression = "zlib";
+  options.segment_target_bytes = 1U;
+  options.single_writer_set = 1;
+  options.single_writer = 0;
+  options.background_compaction_enabled_set = 1;
+  options.background_compaction_enabled = 0;
+  assert_int_equal(lc_pouch_open(root, NULL, &options, &pouch, &error), LC_OK);
+  for (i = 0; i < 3; ++i) {
+    assert_int_equal(lc_source_from_memory("{\"a\":1}", 7U, &body, &error),
+                     LC_OK);
+    assert_int_equal(lc_pouch_state_write(pouch, "diagnostics", "state", body,
+                                          NULL, &written, &error),
+                     LC_OK);
+    lc_source_close(body);
+    body = NULL;
+    lc_pouch_state_write_result_cleanup(NULL, &written);
+  }
+  assert_int_equal(lc_pouch_state_index_seq(pouch, "diagnostics",
+                                            &written.index_seq, &error),
+                   LC_OK);
+  assert_int_equal(lc_pouch_query_index_flush(pouch, "diagnostics",
+                                              written.index_seq, &flushed,
+                                              &error),
+                   LC_OK);
+  maintenance.ns = "diagnostics";
+  maintenance.force = 1;
+  assert_int_equal(
+      lc_pouch_maintenance_run(pouch, &maintenance, &result, &error), LC_OK);
+  assert_true(result.compacted);
+  assert_true(result.cleanup_pending_count > 0U);
+  lc_pouch_maintenance_result_cleanup(NULL, &result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  assert_int_equal(lc_pouch_open(root, NULL, &options, &pouch, &error), LC_OK);
+  assert_int_equal(lc_pouch_state_index_seq(pouch, "diagnostics",
+                                            &written.index_seq, &error),
+                   LC_OK);
+  assert_int_equal(lc_pouch_query_index_flush(pouch, "diagnostics",
+                                              written.index_seq, &flushed,
+                                              &error),
+                   LC_OK);
+  assert_true(flushed.repaired);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  logs = read_pouch_log_stream(log_fp);
+  assert_non_null(logs);
+  complete = strstr(logs, "\"message\":\"compaction.complete\"");
+  assert_non_null(complete);
+  line_end = strchr(complete, '\n');
+  records = strstr(complete, "\"records\":");
+  assert_non_null(strstr(logs, "\"cleanup_deleted\":"));
+  assert_true(records == NULL || (line_end != NULL && records > line_end));
+  assert_null(strstr(logs, "compaction.cleanup.pending"));
+  assert_null(strstr(logs, "maintenance.cleanup.pending"));
+  assert_non_null(strstr(logs, "cache.load.index.invalidated"));
+  assert_null(strstr(logs, "cache.load.index.error"));
+  free(logs);
+  assert_int_equal(ftruncate(fileno(log_fp), 0), 0);
+  rewind(log_fp);
+  ns_path = lc_pouch_namespace_path(NULL, root, "diagnostics");
+  assert_non_null(ns_path);
+  assert_true(snprintf(path, sizeof(path), "%s/index/query.manifest", ns_path) >
+              0);
+  lc_free_with_allocator(NULL, ns_path);
+  write_text_file(path, "invalid\nnot-an-intentional-marker\n");
+  assert_int_equal(lc_pouch_open(root, NULL, &options, &pouch, &error), LC_OK);
+  /* A real obsolete-file unlink failure still reaches the caller with its
+   * filesystem cause; only ordinary grace-period deferral is quiet. */
+  pouch_state_segment_path(root, "diagnostics", 1U, path, sizeof(path));
+  assert_int_equal(unlink(path), 0);
+  assert_int_equal(mkdir(path, 0700), 0);
+  pouch->compaction_delete_grace_seconds = 0U;
+  maintenance.cleanup_only = 1;
+  assert_int_equal(
+      lc_pouch_maintenance_run(pouch, &maintenance, &result, &error),
+      LC_ERR_TRANSPORT);
+  assert_non_null(error.message);
+  assert_non_null(error.detail);
+  assert_int_equal(rmdir(path), 0);
+  lc_pouch_maintenance_result_cleanup(NULL, &result);
+  lc_pouch_close(pouch);
+  logs = read_pouch_log_stream(log_fp);
+  assert_non_null(logs);
+  assert_non_null(strstr(logs, "cache.load.index.error"));
+  free(logs);
+  logger->destroy(logger);
+  fclose(log_fp);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_terminal_reclaim_compacts_active_segment_without_timing_wait(
     void **state) {
   lc_pouch *pouch;
@@ -26638,7 +26765,7 @@ test_lease_save_streams_mapped_json_and_replays_after_reopen(void **state) {
   assert_int_equal(rc, LC_OK);
 
   saved.value = 42;
-  rc = lease->save(lease, &pouch_value_map, &saved, &error);
+  rc = lease->save(lease, &pouch_value_map, &saved, NULL, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lease->version, 1L);
   assert_sha256_hex_etag(lease->state_etag);
@@ -28760,6 +28887,7 @@ test_explicit_xa_release_rollback_discards_all_participants(void **state) {
 
 static void
 test_expired_explicit_xa_release_rolls_back_all_participants(void **state) {
+  pouch_lifecycle_test_clock clock;
   lc_client *client;
   lc_lease *first;
   lc_lease *second;
@@ -28792,6 +28920,10 @@ test_expired_explicit_xa_release_rolls_back_all_participants(void **state) {
            "state/expired-explicit-xa-participant/b/%ld", (long)getpid());
 
   open_pouch_client(root, &client, &error);
+  memset(&clock, 0, sizeof(clock));
+  clock.now.tv_sec = 1000000;
+  lc_pouch_test_queue_time_context = &clock;
+  lc_pouch_test_queue_clock_gettime = pouch_lifecycle_test_gettime;
   acquire_first.key = first_key;
   acquire_first.owner = "expired-explicit-xa-owner";
   acquire_first.ttl_seconds = 1L;
@@ -28818,7 +28950,7 @@ test_expired_explicit_xa_release_rolls_back_all_participants(void **state) {
   source->close(source);
   source = NULL;
 
-  sleep(2U);
+  clock.now.tv_sec += 2;
   /* An expired participant is a rollback vote for the whole XA unit. */
   rc = first->release(first, NULL, &error);
   assert_int_equal(rc, LC_OK);
@@ -28867,6 +28999,7 @@ test_expired_explicit_xa_release_rolls_back_all_participants(void **state) {
 
 static void
 test_explicit_xa_live_release_rolls_back_expired_peer(void **state) {
+  pouch_lifecycle_test_clock clock;
   lc_client *client;
   lc_lease *first;
   lc_lease *second;
@@ -28899,11 +29032,13 @@ test_explicit_xa_live_release_rolls_back_expired_peer(void **state) {
            "state/explicit-xa-expired-peer/b/%ld", (long)getpid());
 
   open_pouch_client(root, &client, &error);
+  memset(&clock, 0, sizeof(clock));
+  clock.now.tv_sec = 1000000;
+  lc_pouch_test_queue_time_context = &clock;
+  lc_pouch_test_queue_clock_gettime = pouch_lifecycle_test_gettime;
   acquire_first.key = first_key;
   acquire_first.owner = "explicit-xa-expired-peer-owner";
-  /* Cross-runtime emulation can take longer than one second to prepare the
-   * second participant and stage both payloads. Keep that setup window well
-   * clear of expiry, then expire this participant deliberately below. */
+  /* Freeze expiry while staging, then advance only the controlled clock. */
   acquire_first.ttl_seconds = 10L;
   acquire_first.txn_id = test_xid_for_label("explicit-xa-expired-peer");
   rc = client->acquire(client, &acquire_first, &first, &error);
@@ -28928,7 +29063,7 @@ test_explicit_xa_live_release_rolls_back_expired_peer(void **state) {
   source->close(source);
   source = NULL;
 
-  sleep(11U);
+  clock.now.tv_sec += 11;
   /* The earliest participant expiry rolls the complete XA unit back. */
   rc = second->release(second, NULL, &error);
   assert_int_equal(rc, LC_OK);
@@ -29834,6 +29969,7 @@ test_transaction_bound_remove_renew_then_update_recreates_logical_value(
 }
 
 static void test_txn_decision_skips_newer_state_lease(void **state) {
+  pouch_lifecycle_test_clock clock;
   lc_client *client;
   lc_lease *old_lease;
   lc_lease *new_lease;
@@ -29870,11 +30006,14 @@ static void test_txn_decision_skips_newer_state_lease(void **state) {
   snprintf(key, sizeof(key), "state/txn-newer-state-lease/%ld", (long)getpid());
 
   open_pouch_client(root, &client, &error);
+  memset(&clock, 0, sizeof(clock));
+  clock.now.tv_sec = 1000000;
+  lc_pouch_test_queue_time_context = &clock;
+  lc_pouch_test_queue_clock_gettime = pouch_lifecycle_test_gettime;
   acquire_req.key = key;
   acquire_req.owner = "old-owner";
-  /* The old lease must remain live through its staged update, even under
-   * Memcheck. It is deliberately allowed to expire before the replacement
-   * lease and old transaction decision below. */
+  /* Hold the old lease live while staging, then expire it before replacement.
+   */
   acquire_req.ttl_seconds = 5L;
   acquire_req.txn_id = test_xid_for_label("txn-old");
   rc = client->acquire(client, &acquire_req, &old_lease, &error);
@@ -29887,7 +30026,7 @@ static void test_txn_decision_skips_newer_state_lease(void **state) {
   assert_int_equal(rc, LC_OK);
   old_lease->close(old_lease);
   old_lease = NULL;
-  sleep(6U);
+  clock.now.tv_sec += 6;
 
   acquire_req.owner = "new-owner";
   acquire_req.ttl_seconds = 30L;
@@ -36962,6 +37101,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_open_creates_segmented_root_layout),
       cmocka_unit_test(test_pouch_public_size_rejects_unrepresentable_u64),
       cmocka_unit_test(test_pouch_logs_use_storage_pouch_subsystem),
+      cmocka_unit_test(
+          test_compaction_diagnostics_distinguish_deferred_cleanup),
       cmocka_unit_test(test_open_rejects_unsupported_root_manifest),
       cmocka_unit_test(test_ensure_namespace_creates_per_namespace_layout),
       cmocka_unit_test(test_namespace_manifest_uses_u64_snapshot_ids),
@@ -37311,9 +37452,12 @@ int main(int argc, char **argv) {
           teardown_pouch_lifecycle_test_clock),
       cmocka_unit_test(
           test_explicit_xa_release_rollback_discards_all_participants),
-      cmocka_unit_test(
-          test_expired_explicit_xa_release_rolls_back_all_participants),
-      cmocka_unit_test(test_explicit_xa_live_release_rolls_back_expired_peer),
+      cmocka_unit_test_teardown(
+          test_expired_explicit_xa_release_rolls_back_all_participants,
+          teardown_pouch_lifecycle_test_clock),
+      cmocka_unit_test_teardown(
+          test_explicit_xa_live_release_rolls_back_expired_peer,
+          teardown_pouch_lifecycle_test_clock),
       cmocka_unit_test(
           test_explicit_xa_coordinator_commit_after_acquire_prepare),
       cmocka_unit_test(test_explicit_xa_release_survives_pouch_reopen),
@@ -37327,7 +37471,8 @@ int main(int argc, char **argv) {
           test_transaction_bound_remove_then_mutate_recreates_logical_value),
       cmocka_unit_test(
           test_transaction_bound_remove_renew_then_update_recreates_logical_value),
-      cmocka_unit_test(test_txn_decision_skips_newer_state_lease),
+      cmocka_unit_test_teardown(test_txn_decision_skips_newer_state_lease,
+                                teardown_pouch_lifecycle_test_clock),
       cmocka_unit_test(test_lease_metadata_persists_query_hidden),
       cmocka_unit_test(
           test_minted_lease_metadata_finalization_preserves_staged_version),
@@ -37410,6 +37555,6 @@ int main(int argc, char **argv) {
   if (argc > 1 && strcmp(argv[1], "--pouch-child") == 0) {
     return pouch_test_child_main(argc, argv);
   }
-  return cmocka_run_group_tests(tests, setup_pouch_unit_group,
-                                teardown_pouch_unit_group);
+  return lc_test_run_cases(tests, sizeof(tests) / sizeof(tests[0]), argc, argv,
+                           setup_pouch_unit_group, teardown_pouch_unit_group);
 }

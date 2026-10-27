@@ -3,9 +3,12 @@
 #include "lc_api_internal.h"
 #include "lc_intcompat.h"
 #include "lc_log.h"
+#include "lc_pouch_index_artifact.h"
 #include "lc_pouch_internal.h"
 #include "lc_pouch_namespace.h"
 #include "lc_pouch_path.h"
+#include "lc_pouch_query_plan.h"
+#include "lc_pouch_query_terms.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -286,6 +289,7 @@ typedef struct lc_pouch_query_index_manifest {
   size_t segment_capacity;
   int present;
   int valid;
+  int intentionally_invalidated;
 } lc_pouch_query_index_manifest;
 
 typedef struct lc_pouch_query_index_generation_cache_term {
@@ -953,7 +957,15 @@ typedef struct lc_pouch_query_index_extract_context {
   unsigned char *array_depths;
   size_t array_depth_capacity;
   int has_array_field;
+  lc_pouch_query_term_fn visit;
+  void *visit_context;
+  lc_error visit_error;
+  int visit_rc;
+  int unrepresentable_number;
 } lc_pouch_query_index_extract_context;
+
+static int lc_pouch_query_index_parse_number_value(const char *text,
+                                                   double *out);
 
 static unsigned long lc_pouch_query_index_hash_init(void) {
   return LC_POUCH_QUERY_INDEX_HASH_OFFSET;
@@ -1432,6 +1444,12 @@ lc_pouch_query_index_lonejson_read(void *user, unsigned char *buffer,
   }
   result.bytes_read =
       reader->source->read(reader->source, buffer, capacity, &reader->error);
+  if (result.bytes_read > capacity) {
+    lc_error_set(&reader->error, LC_ERR_INVALID, 0L,
+                 "query-index source exceeded requested chunk size", NULL, NULL,
+                 NULL);
+    result.bytes_read = 0U;
+  }
   if (result.bytes_read == 0U) {
     if (reader->error.code != LC_OK) {
       result.error_code = EIO;
@@ -1663,9 +1681,9 @@ static int lc_pouch_query_index_extract_array_depth_reserve(
   return LC_OK;
 }
 
+/* Consumes the callback's local owned error after copying its diagnostic. */
 static lonejson_status
-lc_pouch_query_index_lonejson_error(lonejson_error *lj_error,
-                                    const lc_error *error) {
+lc_pouch_query_index_lonejson_error(lonejson_error *lj_error, lc_error *error) {
   if (lj_error != NULL) {
     lonejson_error_init(lj_error);
     lj_error->code = error != NULL && error->code == LC_ERR_NOMEM
@@ -1676,7 +1694,67 @@ lc_pouch_query_index_lonejson_error(lonejson_error *lj_error,
                                                      : "pouch query-index "
                                                        "callback failed");
   }
+  lc_error_cleanup(error);
   return lj_error != NULL ? lj_error->code : LONEJSON_STATUS_CALLBACK_FAILED;
+}
+
+static int
+lc_pouch_query_index_emit_term(lc_pouch_query_index_extract_context *context,
+                               const char *field, size_t field_len,
+                               const char *value, size_t value_len,
+                               char value_type, lc_error *error) {
+  lc_pouch_index_term_key term;
+  char *field_hex;
+  char *value_hex;
+  int rc;
+  if (field_len == 0U)
+    return LC_OK;
+  field_hex = lc_pouch_query_index_hex_encode_bytes(context->summary->allocator,
+                                                    field, field_len);
+  value_hex = NULL;
+  rc = LC_OK;
+  if (value_type == 'n') {
+    rc = lc_pouch_query_index_exact_generation_number_text_hex(
+        context->summary->allocator, value, value_len, &value_hex, error);
+  } else if (value_type == 'h') {
+    value_hex = lc_pouch_query_index_exact_hash_format(
+        context->summary->allocator, context->string_length,
+        context->string_hash, context->string_folded_hash, error);
+  } else {
+    value_hex = lc_pouch_query_index_hex_encode_bytes(
+        context->summary->allocator, value, value_len);
+  }
+  if (rc == LC_OK && (field_hex == NULL || value_hex == NULL))
+    rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                      "failed to allocate streamed query term", NULL, NULL,
+                      NULL);
+  if (rc == LC_OK) {
+    term.field_hex = field_hex;
+    term.value_hex = value_hex;
+    term.value_type = value_type == 'e' ? 's' : value_type;
+    rc = context->visit(context->visit_context, &term, value_type == 'e',
+                        &context->visit_error);
+    if (rc != LC_OK) {
+      context->visit_rc = rc;
+      if (context->visit_error.code == LC_OK)
+        lc_error_set(&context->visit_error, rc, 0L,
+                     "streamed query term callback rejected a term", NULL, NULL,
+                     NULL);
+    }
+  }
+  lc_free_with_allocator(context->summary->allocator, field_hex);
+  lc_free_with_allocator(context->summary->allocator, value_hex);
+  return rc;
+}
+
+static int lc_pouch_query_index_extract_presence(
+    lc_pouch_query_index_extract_context *context, const char *field,
+    size_t length, lc_error *error) {
+  if (context->visit != NULL)
+    return lc_pouch_query_index_emit_term(context, field, length, "", 0U, 'e',
+                                          error);
+  return lc_pouch_query_index_presence_add(context->summary, field, length,
+                                           context->key_hex, error);
 }
 
 static int lc_pouch_query_index_add_presence_for_field(
@@ -1688,8 +1766,7 @@ static int lc_pouch_query_index_add_presence_for_field(
   if (context == NULL || field == NULL || field_len == 0U) {
     return LC_OK;
   }
-  rc = lc_pouch_query_index_presence_add(context->summary, field, field_len,
-                                         context->key_hex, error);
+  rc = lc_pouch_query_index_extract_presence(context, field, field_len, error);
   if (rc == LC_OK) {
     char *recursive_field;
     size_t recursive_len;
@@ -1704,9 +1781,8 @@ static int lc_pouch_query_index_add_presence_for_field(
     }
     memcpy(recursive_field, field, field_len);
     memcpy(recursive_field + field_len, "/**", 4U);
-    rc = lc_pouch_query_index_presence_add(context->summary, recursive_field,
-                                           recursive_len, context->key_hex,
-                                           error);
+    rc = lc_pouch_query_index_extract_presence(context, recursive_field,
+                                               recursive_len, error);
     lc_free_with_allocator(context->summary->allocator, recursive_field);
   }
   for (index = 1U; rc == LC_OK && index < field_len; ++index) {
@@ -1726,9 +1802,8 @@ static int lc_pouch_query_index_add_presence_for_field(
     }
     memcpy(recursive_field, field, index);
     memcpy(recursive_field + index, "/**", 4U);
-    rc = lc_pouch_query_index_presence_add(context->summary, recursive_field,
-                                           recursive_len, context->key_hex,
-                                           error);
+    rc = lc_pouch_query_index_extract_presence(context, recursive_field,
+                                               recursive_len, error);
     lc_free_with_allocator(context->summary->allocator, recursive_field);
   }
   return rc;
@@ -1758,6 +1833,16 @@ static int lc_pouch_query_index_add_term_for_current_field(
   if (context == NULL) {
     return LC_OK;
   }
+  if (context->visit != NULL) {
+    rc = lc_pouch_query_index_emit_term(context, context->field,
+                                        context->field_len, value, value_len,
+                                        value_type, error);
+    if (rc == LC_OK && context->has_array_field)
+      rc = lc_pouch_query_index_emit_term(context, context->array_field,
+                                          context->array_field_len, value,
+                                          value_len, value_type, error);
+    return rc;
+  }
   rc = lc_pouch_query_index_term_add(
       context->summary, context->field, context->field_len, value, value_len,
       context->key_hex, value_type, context->version, context->bytes,
@@ -1778,6 +1863,15 @@ static int lc_pouch_query_index_add_streamed_long_for_current_field(
 
   if (context == NULL) {
     return LC_OK;
+  }
+  if (context->visit != NULL) {
+    rc = lc_pouch_query_index_emit_term(
+        context, context->field, context->field_len, NULL, 0U, 'h', error);
+    if (rc == LC_OK && context->has_array_field)
+      rc = lc_pouch_query_index_emit_term(context, context->array_field,
+                                          context->array_field_len, NULL, 0U,
+                                          'h', error);
+    return rc;
   }
   rc = lc_pouch_query_index_term_add_streamed_long(
       context->summary, context->field, context->field_len, context->value,
@@ -1989,9 +2083,15 @@ lc_pouch_query_index_number_end(void *user, const lonejson_value_path *path,
   lc_pouch_query_index_extract_context *context;
   lc_error error;
   int rc;
+  double normalized;
 
   (void)path;
   context = (lc_pouch_query_index_extract_context *)user;
+  if (context->visit != NULL &&
+      !lc_pouch_query_index_parse_number_value(context->value, &normalized)) {
+    context->unrepresentable_number = 1;
+    return LONEJSON_STATUS_OK;
+  }
   lc_error_init(&error);
   rc = lc_pouch_query_index_add_term_for_current_field(
       context, context->value, context->value_len, 'n', &error);
@@ -2061,9 +2161,10 @@ static void lc_pouch_query_index_extract_context_cleanup(
   memset(context, 0, sizeof(*context));
 }
 
-static int lc_pouch_query_index_extract_terms_from_body(
+static int lc_pouch_query_index_extract_terms(
     lc_pouch_query_index_summary *summary, const char *key,
-    const lc_pouch_query_index_row *row, lc_source *body, lc_error *error) {
+    const lc_pouch_query_index_row *row, lc_source *body,
+    lc_pouch_query_term_fn visit, void *visit_context, lc_error *error) {
   lc_pouch_query_index_source_reader reader;
   lc_pouch_query_index_extract_context context;
   lonejson_path_value_visitor visitor;
@@ -2080,7 +2181,7 @@ static int lc_pouch_query_index_extract_terms_from_body(
                         "row, and body",
                         NULL, NULL, NULL);
   }
-  if (body->reset != NULL) {
+  if (visit == NULL && body->reset != NULL) {
     rc = body->reset(body, error);
     if (rc != LC_OK) {
       return rc;
@@ -2100,6 +2201,9 @@ static int lc_pouch_query_index_extract_terms_from_body(
   context.bytes = row->bytes;
   context.has_query_hidden = row->has_query_hidden;
   context.query_hidden = row->query_hidden;
+  context.visit = visit;
+  context.visit_context = visit_context;
+  lc_error_init(&context.visit_error);
   visitor = lonejson_default_path_value_visitor();
   visitor.object_begin = lc_pouch_query_index_presence_value;
   visitor.array_begin = lc_pouch_query_index_array_begin;
@@ -2116,9 +2220,17 @@ static int lc_pouch_query_index_extract_terms_from_body(
   status = runtime->visit_path_value_reader(
       runtime, lc_pouch_query_index_lonejson_read, &reader, &visitor, &context,
       &lj_error);
-  if (reader.error.code != LC_OK) {
+  if (context.visit_rc != LC_OK) {
+    rc = context.visit_rc;
+    if (error != NULL) {
+      lc_error_cleanup(error);
+      *error = context.visit_error;
+      memset(&context.visit_error, 0, sizeof(context.visit_error));
+    }
+  } else if (reader.error.code != LC_OK) {
     rc = reader.error.code;
     if (error != NULL) {
+      lc_error_cleanup(error);
       *error = reader.error;
       memset(&reader.error, 0, sizeof(reader.error));
     }
@@ -2131,11 +2243,46 @@ static int lc_pouch_query_index_extract_terms_from_body(
       summary->term_index_complete = 0;
       summary->presence_index_complete = 0;
     }
-    rc = LC_OK;
+    rc = visit != NULL && status != LONEJSON_STATUS_OK
+             ? lc_lonejson_error_from_status(
+                   error, status, &lj_error,
+                   "failed to extract streamed query terms")
+             : LC_OK;
   }
+  if (rc == LC_OK && status == LONEJSON_STATUS_OK &&
+      context.unrepresentable_number)
+    rc = lc_error_set(
+        error, LC_ERR_UNSUPPORTED, 0L,
+        "valid state number is outside the query index representation", NULL,
+        LC_POUCH_QUERY_NUMBER_UNINDEXED, "pouch");
   lc_error_cleanup(&reader.error);
+  lc_error_cleanup(&context.visit_error);
   lc_pouch_query_index_extract_context_cleanup(&context);
   return rc;
+}
+
+static int lc_pouch_query_index_extract_terms_from_body(
+    lc_pouch_query_index_summary *summary, const char *key,
+    const lc_pouch_query_index_row *row, lc_source *body, lc_error *error) {
+  return lc_pouch_query_index_extract_terms(summary, key, row, body, NULL, NULL,
+                                            error);
+}
+
+int lc_pouch_query_terms_visit(lc_source *source, const lc_allocator *allocator,
+                               lc_pouch_query_term_fn visit, void *context,
+                               lc_error *error) {
+  lc_pouch_query_index_summary summary;
+  lc_pouch_query_index_row row;
+  if (source == NULL || source->read == NULL || visit == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "streamed query terms require a source and visitor",
+                        NULL, NULL, NULL);
+  memset(&summary, 0, sizeof(summary));
+  memset(&row, 0, sizeof(row));
+  summary.allocator = allocator;
+  row.key_hex = "-";
+  return lc_pouch_query_index_extract_terms(&summary, "-", &row, source, visit,
+                                            context, error);
 }
 
 static int lc_pouch_query_index_extract_batch_visit(
@@ -3641,7 +3788,7 @@ static int lc_pouch_query_index_rewrite_long_exact_terms(
   return LC_OK;
 }
 
-static int lc_pouch_query_index_build_exact_terms(
+int lc_pouch_query_index_build_exact_terms(
     const lc_pouch_index_plain_term *terms, size_t term_count,
     lc_pouch_index_term_key **out_terms, size_t *out_count,
     const lc_allocator *allocator, lc_error *error) {
@@ -4505,9 +4652,8 @@ static uint64_t lc_pouch_query_index_get_u64_le(const unsigned char *in) {
   return value;
 }
 
-static int lc_pouch_query_index_append_crypto_footer_fd(int fd,
-                                                        const char *descriptor,
-                                                        lc_error *error) {
+int lc_pouch_query_index_append_crypto_footer_fd(int fd, const char *descriptor,
+                                                 lc_error *error) {
   unsigned char footer[LC_POUCH_QUERY_INDEX_CRYPTO_FOOTER_BYTES];
   const char *cursor;
   size_t descriptor_length;
@@ -4579,9 +4725,12 @@ static int lc_pouch_query_index_append_crypto_footer_fd(int fd,
   return rc;
 }
 
-static int lc_pouch_query_index_read_crypto_footer(
-    const lc_allocator *allocator, const char *path, char **descriptor_out,
-    uint64_t *cipher_length_out, lc_error *error) {
+int lc_pouch_query_index_read_crypto_footer(const lc_allocator *allocator,
+                                            const char *path,
+                                            size_t max_descriptor_bytes,
+                                            char **descriptor_out,
+                                            uint64_t *cipher_length_out,
+                                            lc_error *error) {
   unsigned char footer[LC_POUCH_QUERY_INDEX_CRYPTO_FOOTER_BYTES];
   char *descriptor;
   struct stat st;
@@ -4638,6 +4787,8 @@ static int lc_pouch_query_index_read_crypto_footer(
   }
   descriptor_length64 = lc_pouch_query_index_get_u64_le(footer + 8U);
   if (descriptor_length64 == 0U ||
+      (max_descriptor_bytes != 0U &&
+       descriptor_length64 > max_descriptor_bytes) ||
       descriptor_length64 >
           (uint64_t)(st.st_size -
                      (off_t)LC_POUCH_QUERY_INDEX_CRYPTO_FOOTER_BYTES) ||
@@ -4780,7 +4931,7 @@ static int lc_pouch_query_index_read_encrypted_artifact_bytes(
   descriptor = NULL;
   cipher_length = 0U;
   rc = lc_pouch_query_index_read_crypto_footer(
-      &pouch->allocator, path, &descriptor, &cipher_length, error);
+      &pouch->allocator, path, 0U, &descriptor, &cipher_length, error);
   if (rc != LC_OK) {
     if (!strict && rc != LC_ERR_NOMEM) {
       if (error != NULL) {
@@ -5736,6 +5887,9 @@ lc_pouch_query_index_manifest_read(lc_pouch *pouch, const char *path,
     return rc;
   }
   manifest->present = 1;
+  manifest->intentionally_invalidated =
+      length == sizeof("invalid\n") - 1U &&
+      memcmp(bytes, "invalid\n", sizeof("invalid\n") - 1U) == 0;
   cursor = bytes;
   line = lc_pouch_query_index_manifest_next_line(&cursor);
   if (line == NULL ||
@@ -14525,6 +14679,16 @@ int lc_pouch_query_index_warm_namespace(lc_pouch *pouch, const char *ns,
     goto cleanup;
   }
   if (!manifest.present) {
+    goto cleanup;
+  }
+  if (manifest.intentionally_invalidated) {
+    pslog_field fields[2];
+
+    /* The writer deliberately retired this derived view before compaction.
+     * Leave it invalid so the next query/flush rebuilds canonical state. */
+    fields[0] = lc_log_str_field("ns", ns);
+    fields[1] = lc_log_str_field("reason", "intentional-invalidation");
+    lc_log_debug(pouch->logger, "cache.load.index.invalidated", fields, 2U);
     goto cleanup;
   }
   if (!manifest.valid) {

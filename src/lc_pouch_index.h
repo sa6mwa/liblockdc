@@ -446,11 +446,19 @@ int lc_pouch_index_term_generation_encode(
     const lc_pouch_index_term_generation *generation,
     const lc_allocator *allocator, char **out_bytes, size_t *out_length,
     lc_error *error);
+typedef struct lc_pouch_index_term_limits {
+  size_t max_terms;
+  size_t max_term_bytes;
+} lc_pouch_index_term_limits;
+/* Optional limits bound decoded dictionary/posting cardinality and expanded
+ * field/value bytes before allocation, including dictionary expansion. Bounded
+ * pages also require posting slots within expected_row_count. NULL retains
+ * ordinary namespace-generation limits and its independent docID domain. */
 int lc_pouch_index_term_generation_decode(
     const lc_allocator *allocator, const char *bytes, size_t length,
     uint64_t expected_index_seq, unsigned long expected_row_count,
-    unsigned long expected_row_hash, lc_pouch_index_term_generation *generation,
-    lc_error *error);
+    unsigned long expected_row_hash, const lc_pouch_index_term_limits *limits,
+    lc_pouch_index_term_generation *generation, lc_error *error);
 int lc_pouch_index_term_generation_load_bytes(
     const lc_allocator *allocator, const char *bytes, size_t length,
     uint64_t expected_index_seq, unsigned long expected_row_count,

@@ -81,6 +81,11 @@ management cleanup. If power loss separates that parent deletion from
 marker removal, the next reclaimer recognizes the absent parent as stale and
 discards the marker safely.
 
+Starting a dispatcher enables automatic retention even before its first
+consumer request. A due dead letter can therefore disappear before a management
+call. Replay and deletion require a current dead letter and return
+`LC_ERR_INVALID` if maintenance has already removed it.
+
 Each live Pouch dispatcher performs the same bounded control-directory
 discovery at most once per minute when no earlier known marker is due. This is
 how a dispatcher notices a marker published later by another shared writer;

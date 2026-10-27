@@ -71,7 +71,9 @@ source build/devenv/env.sh
   acquire a lease, read JSON state, update JSON state, and release
 - `acquire_for_update.lua`
   wraps the same acquire, snapshot, update, and release lifecycle for callback
-  code; successful handlers commit and failed handlers roll back
+  code; successful handlers commit and failed handlers roll back. The complete
+  snapshot is staged in a temporary file, then copied into a Lua string before
+  the callback; `load_json()` decodes that string
 - `queue_roundtrip.lua`
   enqueue a JSON payload, dequeue it, inspect it, and acknowledge it
 - `namespace_config.lua`

@@ -1,3 +1,4 @@
+#include "lc_api_internal.h"
 #include "lc_internal.h"
 #include "lc_log.h"
 
@@ -521,6 +522,63 @@ static const char *lc_engine_trim_http_ows_end(const char *value,
   return end;
 }
 
+int lc_engine_retention_validate(lc_engine_client *client, int selected,
+                                 long seconds, const char *ns, const char *key,
+                                 lc_engine_error *error) {
+  lc_error validation;
+  int rc;
+  lc_error_init(&validation);
+  rc = lc_state_retention_validate(selected, seconds,
+                                   lc_engine_effective_namespace(client, ns),
+                                   key, &validation);
+  if (rc != LC_OK)
+    rc = lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                    validation.message);
+  lc_error_cleanup(&validation);
+  return rc;
+}
+
+int lc_engine_retention_header(lc_engine_retention_headers *headers,
+                               const char *name, size_t name_length,
+                               const char *value, size_t value_length) {
+  int support_field =
+      name_length == sizeof("X-State-Retention-Supported") - 1 &&
+      lc_engine_case_equal_n(name, "X-State-Retention-Supported", name_length);
+  int expiry_field =
+      name_length == sizeof("X-State-Retention-Expires-At-Unix") - 1 &&
+      lc_engine_case_equal_n(name, "X-State-Retention-Expires-At-Unix",
+                             name_length);
+  lc_unix_seconds expiry;
+  size_t i;
+  if (!support_field && !expiry_field)
+    return 0;
+  if (support_field) {
+    lc_state_retention_support support;
+    if (value_length != 1 || (value[0] != '0' && value[0] != '1'))
+      return -1;
+    support = value[0] == '1' ? LC_STATE_RETENTION_SUPPORTED
+                              : LC_STATE_RETENTION_UNSUPPORTED;
+    if ((headers->has_support && headers->support != support) ||
+        (support == LC_STATE_RETENTION_UNSUPPORTED && headers->has_expiry))
+      return -1;
+    headers->has_support = 1;
+    headers->support = support;
+    return 1;
+  }
+  if (value_length == 0 || headers->support == LC_STATE_RETENTION_UNSUPPORTED)
+    return -1;
+  for (i = 0; i < value_length; ++i)
+    if (value[i] < '0' || value[i] > '9')
+      return -1;
+  if (!lc_parse_i64_base10_range_checked(value, value_length, &expiry) ||
+      (headers->has_expiry && headers->expiry != expiry))
+    return -1;
+  headers->support = LC_STATE_RETENTION_SUPPORTED;
+  headers->has_expiry = 1;
+  headers->expiry = expiry;
+  return 1;
+}
+
 static size_t
 lc_engine_header_numeric_parse_failed(lc_engine_http_result *result,
                                       const char *message) {
@@ -589,6 +647,7 @@ static size_t lc_engine_json_http_header_callback(char *buffer, size_t size,
     parsed = 0L;
     sscanf(status_line, "%*s %ld", &parsed);
     state->result->http_status = parsed;
+    memset(&state->result->retention, 0, sizeof(state->result->retention));
     state->parser_is_error = !(parsed >= 200L && parsed < 300L);
     return total;
   }
@@ -720,9 +779,32 @@ static size_t lc_engine_header_callback(char *buffer, size_t size,
   const char *value;
   const char *end;
   size_t name_length;
+  const char *colon;
+  int retention_rc;
 
   result = (lc_engine_http_result *)userdata;
   total = size * nitems;
+
+  colon = memchr(buffer, ':', total);
+  if (colon != NULL && result->http_status >= 200 &&
+      result->http_status < 300) {
+    value = colon + 1;
+    end = buffer + total;
+    while (value < end && (*value == ' ' || *value == '\t'))
+      ++value;
+    while (end > value && (end[-1] == '\r' || end[-1] == '\n' ||
+                           end[-1] == ' ' || end[-1] == '\t'))
+      --end;
+    retention_rc = lc_engine_retention_header(&result->retention, buffer,
+                                              (size_t)(colon - buffer), value,
+                                              (size_t)(end - value));
+    if (retention_rc < 0)
+      return lc_engine_header_numeric_parse_failed(
+          result,
+          "response state retention headers are invalid or contradictory");
+    if (retention_rc > 0)
+      return total;
+  }
 
   if (total > 0U) {
     name_length = strlen("X-Correlation-Id:");

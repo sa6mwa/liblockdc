@@ -61,6 +61,19 @@ int lc_pouch_crypto_stream_to_fd_crc_with_compression(
     lc_pouch_crypto *crypto, const char *context, int fd, lc_source *body,
     uint64_t *plain_bytes, uint64_t *cipher_bytes, unsigned long *stored_crc,
     char **descriptor_out, int allow_compression, lc_error *error);
+/* A synchronous producer writes bounded chunks into the borrowed sink. The
+ * same codec serves pull sources and validated JSON push writers; no bridge
+ * thread, spool, or whole-value buffer is needed. Failure leaves an unpublished
+ * partial byte range for the canonical record owner to roll back. */
+typedef int (*lc_pouch_crypto_producer_fn)(void *context, lc_sink *sink,
+                                           lc_error *error);
+int lc_pouch_crypto_produce_to_fd(lc_pouch_crypto *crypto, const char *context,
+                                  int fd, lc_pouch_crypto_producer_fn producer,
+                                  void *producer_context, uint64_t *plain_bytes,
+                                  uint64_t *cipher_bytes,
+                                  unsigned long *stored_crc,
+                                  char **descriptor_out, int allow_compression,
+                                  lc_error *error);
 /* Transforms a bounded, already-materialized payload without touching a
  * source. Callers retain ownership of `plain`; both outputs use the explicit
  * allocator, including when crypto is NULL, and require matching cleanup. */

@@ -21,6 +21,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "../support/lc_test_cases.h"
+
 #define OUTBOX_TMP_PREFIX "/tmp/liblockdc-unit-outbox-"
 #define OUTBOX_RECONCILIATION_RECORDS 256U
 #define OUTBOX_PREFETCH_RECORDS 3U
@@ -5509,6 +5511,7 @@ test_pouch_expired_commit_reports_rollback_without_signal(void **state) {
   outbox_config.transaction_ttl_seconds = 3L;
   assert_int_equal(
       lc_client_new_outbox(client, &outbox_config, &outbox, &error), LC_OK);
+  assert_null(((lc_client_handle *)client)->outbox_dispatchers);
   assert_int_equal(clock_gettime(CLOCK_REALTIME, &clock.wall), 0);
   lc_pouch_test_queue_time_context = &clock;
   lc_pouch_test_queue_clock_gettime = outbox_pouch_test_gettime;
@@ -5558,12 +5561,11 @@ test_pouch_expired_commit_reports_rollback_without_signal(void **state) {
   transaction = NULL;
   assert_null(receipt.outbox_key);
   outbox_assert_public_state_absent(client, "domain-expired-terminal", &error);
-  assert_int_equal(lc_outbox_next(outbox, 250L, &job, &error), LC_OK);
-  assert_null(job);
 
   /* The outbox now always gives Pouch its own explicit xid, even when its
    * only participant is a domain record. Its terminal result must therefore
    * be replayed too: an expired one-participant vote cannot report commit. */
+  assert_null(((lc_client_handle *)client)->outbox_dispatchers);
   assert_int_equal(clock_gettime(CLOCK_REALTIME, &clock.wall), 0);
   lc_pouch_test_queue_time_context = &clock;
   lc_pouch_test_queue_clock_gettime = outbox_pouch_test_gettime;
@@ -5595,6 +5597,12 @@ test_pouch_expired_commit_reports_rollback_without_signal(void **state) {
   lc_outbox_transaction_close(transaction);
   transaction = NULL;
   outbox_assert_public_state_absent(client, "domain-expired-single", &error);
+  /* Starting a consumer also starts its real-clock maintenance thread. Finish
+   * both controlled-clock transactions first, then check that neither one
+   * published a dispatch signal. */
+  assert_null(((lc_client_handle *)client)->outbox_dispatchers);
+  assert_int_equal(lc_outbox_next(outbox, 250L, &job, &error), LC_OK);
+  assert_null(job);
 
   lc_outbox_receipt_cleanup(&receipt);
   lc_source_close(payload);
@@ -10409,6 +10417,7 @@ static void terminal_retention_open(terminal_retention_fixture *f) {
 }
 
 static void terminal_retention_reopen(terminal_retention_fixture *f) {
+  assert_null(((lc_client_handle *)f->client)->outbox_dispatchers);
   f->outbox->close(f->outbox);
   f->outbox = NULL;
   assert_int_equal(
@@ -10416,6 +10425,7 @@ static void terminal_retention_reopen(terminal_retention_fixture *f) {
 }
 
 static void terminal_retention_close(terminal_retention_fixture *f) {
+  assert_null(((lc_client_handle *)f->client)->outbox_dispatchers);
   lc_outbox_test_before_terminal_remove_hook = NULL;
   lc_outbox_test_before_terminal_remove_context = NULL;
   lc_outbox_close(f->outbox);
@@ -11534,31 +11544,10 @@ test_pouch_dead_letter_retention_is_bounded_and_generation_safe(void **state) {
   outbox_assert_state_presence(
       client, config.ns, "__lockdc_io/v1/outbox/retention/cleanup", 0, &error);
 
-  /* Explicit management deletion removes its marker immediately. A marker
-   * orphaned by a crash after the durable parent delete is equally safe: it
-   * must be consumed as stale rather than poisoning every later maintenance
-   * turn with a permanent not-found error. */
-  assert_int_equal(lc_xid_new(first_id, &error), LC_OK);
-  seed_retained_dead_letter_outbox(client, config.ns,
-                                   "__lockdc_io/v1/outbox/retention/manual",
-                                   first_id, &error);
-  assert_int_equal(
-      lc_pouch_outbox_retention_marker_write(
-          client_handle->pouch, config.ns, LC_POUCH_RETENTION_DEAD_LETTER,
-          first_id, "__lockdc_io/v1/outbox/retention/manual", 1, 32U, &error),
-      LC_OK);
-  assert_int_equal(
-      lc_outbox_delete_dead_letter(
-          outbox, "__lockdc_io/v1/outbox/retention/manual", &error),
-      LC_OK);
-  outbox_assert_state_presence(
-      client, config.ns, "__lockdc_io/v1/outbox/retention/manual", 0, &error);
-  reclaimed = 1U;
-  next_due = 0;
-  assert_int_equal(lc_outbox_test_reclaim_dead_letters(outbox, 7000, &reclaimed,
-                                                       &next_due, &error),
-                   LC_OK);
-  assert_int_equal(reclaimed, 0U);
+  /* A marker orphaned by a crash after the durable parent delete must be
+   * consumed as stale rather than poisoning every later maintenance turn.
+   * Keep this synthetic-clock case producer-only; public management starts a
+   * real dispatcher and is covered separately below. */
   assert_int_equal(lc_xid_new(first_id, &error), LC_OK);
   assert_int_equal(
       lc_pouch_outbox_retention_marker_write(
@@ -11574,6 +11563,7 @@ test_pouch_dead_letter_retention_is_bounded_and_generation_safe(void **state) {
   /* The byte bound uses the same exact-key path, independently of the count
    * bound. A measured payload-bearing envelope over the cap is reclaimed even
    * though its expiry is still far in the future. */
+  assert_null(client_handle->outbox_dispatchers);
   lc_outbox_close(outbox);
   outbox = NULL;
   config.ns = "outbox-dead-letter-retention-bytes";
@@ -11676,6 +11666,119 @@ test_pouch_dead_letter_retention_is_bounded_and_generation_safe(void **state) {
   lc_test_tmp_cleanup_path(root, OUTBOX_TMP_PREFIX);
 }
 
+static void
+test_pouch_dead_letter_manual_delete_before_retention(void **state) {
+  terminal_retention_fixture f;
+  lc_outbox_dispatcher *dispatcher;
+  lc_pouch_outbox_retention_marker marker;
+  lc_pouch *pouch;
+  char id[LC_XID_STRING_SIZE];
+  const char *key = "__lockdc_io/v1/outbox/retention/manual";
+  lc_i64 due;
+  lc_i64 next_due;
+  size_t reclaimed;
+  unsigned int scenario;
+
+  (void)state;
+  for (scenario = 0U; scenario < 2U; ++scenario) {
+    terminal_retention_open(&f);
+    /* An already-due marker is safe for management only when automatic
+     * retention is disabled. With retention enabled, keep the record live. */
+    f.config.dead_letter_retention_seconds = scenario == 0U ? -1L : 3600L;
+    terminal_retention_reopen(&f);
+    pouch = ((lc_client_handle *)f.client)->pouch;
+    due = scenario == 0U ? 1 : (lc_i64)time(NULL) + 3600;
+    assert_int_equal(lc_xid_new(id, &f.error), LC_OK);
+    seed_retained_dead_letter_outbox(f.client, f.config.ns, key, id, &f.error);
+    assert_int_equal(lc_pouch_outbox_retention_marker_write(
+                         pouch, f.config.ns, LC_POUCH_RETENTION_DEAD_LETTER, id,
+                         key, due, 32U, &f.error),
+                     LC_OK);
+    reclaimed = 0U;
+    next_due = 0;
+    assert_int_equal(lc_outbox_test_reclaim_dead_letters(
+                         f.outbox, 7000, &reclaimed, &next_due, &f.error),
+                     LC_OK);
+    assert_int_equal(reclaimed, 0U);
+    outbox_assert_state_presence(f.client, f.config.ns, key, 1, &f.error);
+
+    dispatcher = NULL;
+    assert_int_equal(
+        outbox_public_get_or_start(f.outbox, &dispatcher, &f.error), LC_OK);
+    assert_int_equal(
+        lc_outbox_dispatcher_delete_dead_letter(dispatcher, key, &f.error),
+        LC_OK);
+    outbox_assert_state_presence(f.client, f.config.ns, key, 0, &f.error);
+    memset(&marker, 0, sizeof(marker));
+    next_due = 0;
+    assert_int_equal(lc_pouch_outbox_retention_marker_take(
+                         pouch, f.config.ns, LC_POUCH_RETENTION_DEAD_LETTER,
+                         NULL, 7000, SIZE_MAX, UINT64_MAX, &marker, &next_due,
+                         &f.error),
+                     LC_OK);
+    assert_null(marker.marker_id);
+    assert_int_equal(next_due, 0);
+    lc_pouch_outbox_retention_marker_cleanup(pouch, &marker);
+    assert_int_equal(lc_outbox_dispatcher_stop(dispatcher, -1L, &f.error),
+                     LC_OK);
+    lc_outbox_dispatcher_close(dispatcher);
+    terminal_retention_close(&f);
+  }
+}
+
+static void test_pouch_dead_letter_management_after_retention(void **state) {
+  terminal_retention_fixture f;
+  lc_outbox_dispatcher *dispatcher;
+  lc_outbox_stats stats;
+  char id[LC_XID_STRING_SIZE];
+  const char *key = "__lockdc_io/v1/outbox/retention/expired";
+  struct timespec delay;
+  unsigned int attempt;
+
+  (void)state;
+  terminal_retention_open(&f);
+  assert_int_equal(lc_xid_new(id, &f.error), LC_OK);
+  seed_retained_dead_letter_outbox(f.client, f.config.ns, key, id, &f.error);
+  assert_int_equal(lc_pouch_outbox_retention_marker_write(
+                       ((lc_client_handle *)f.client)->pouch, f.config.ns,
+                       LC_POUCH_RETENTION_DEAD_LETTER, id, key, 1, 32U,
+                       &f.error),
+                   LC_OK);
+  dispatcher = NULL;
+  assert_int_equal(outbox_public_get_or_start(f.outbox, &dispatcher, &f.error),
+                   LC_OK);
+  /* Force retention to finish before management instead of relying on which
+   * thread happens to win. This is the release failure's exact interleaving. */
+  delay.tv_sec = 0;
+  delay.tv_nsec = 10000000L;
+  for (attempt = 0U; attempt < 500U; ++attempt) {
+    lc_outbox_stats_init(&stats);
+    assert_int_equal(
+        lc_outbox_dispatcher_get_stats(dispatcher, &stats, &f.error), LC_OK);
+    if (stats.dead_letter_reclaims == 1U)
+      break;
+    lc_outbox_stats_cleanup(&stats);
+    (void)nanosleep(&delay, NULL);
+  }
+  assert_true(attempt < 500U);
+  assert_int_equal(stats.dead_letter_reclaim_failures, 0U);
+  lc_outbox_stats_cleanup(&stats);
+  outbox_assert_state_presence(f.client, f.config.ns, key, 0, &f.error);
+  assert_int_equal(
+      lc_outbox_dispatcher_delete_dead_letter(dispatcher, key, &f.error),
+      LC_ERR_INVALID);
+  lc_error_cleanup(&f.error);
+  lc_error_init(&f.error);
+  assert_int_equal(
+      lc_outbox_dispatcher_replay_dead_letter(dispatcher, key, &f.error),
+      LC_ERR_INVALID);
+  lc_error_cleanup(&f.error);
+  lc_error_init(&f.error);
+  assert_int_equal(lc_outbox_dispatcher_stop(dispatcher, -1L, &f.error), LC_OK);
+  lc_outbox_dispatcher_close(dispatcher);
+  terminal_retention_close(&f);
+}
+
 static void test_outbox_public_rejections_clear_handle_outputs(void **state) {
   char endpoint[PATH_MAX];
   const char *endpoints[1];
@@ -11731,7 +11834,7 @@ static void test_outbox_public_rejections_clear_handle_outputs(void **state) {
   lc_test_tmp_cleanup_path(root, OUTBOX_TMP_PREFIX);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(
           test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts),
@@ -11788,6 +11891,8 @@ int main(void) {
           test_pouch_terminal_retention_generation_busy_and_failure),
       cmocka_unit_test(
           test_pouch_dead_letter_retention_is_bounded_and_generation_safe),
+      cmocka_unit_test(test_pouch_dead_letter_manual_delete_before_retention),
+      cmocka_unit_test(test_pouch_dead_letter_management_after_retention),
       cmocka_unit_test(
           test_pouch_dead_letter_retention_corrupt_markers_do_not_starve),
       cmocka_unit_test(test_outbox_public_rejections_clear_handle_outputs),
@@ -11880,5 +11985,6 @@ int main(void) {
       strcmp(getenv("LOCKDC_TEST_ALLOCATOR_TRACKING"), "1") == 0 &&
       lc_allocator_tracking_configure(1, NULL) != LC_OK)
     return 1;
-  return cmocka_run_group_tests(tests, NULL, NULL);
+  return lc_test_run_cases(tests, sizeof(tests) / sizeof(tests[0]), argc, argv,
+                           NULL, NULL);
 }

@@ -58,6 +58,7 @@ function(lc_add_lua_e2e_test test_name script_path)
       -DLOCKDC_TEST_NAME=${test_name}
       -DLOCKDC_LUA_TEST_SCRIPT=${script_path}
       -DLOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}
+      -DLOCKDC_LUA_FIXTURE_ROOT=${CMAKE_BINARY_DIR}/lua-rock-tests/e2e
   )
   if(LUA_E2E_ENV_OVERRIDES)
     string(REPLACE ";" "|" lua_e2e_env_overrides "${LUA_E2E_ENV_OVERRIDES}")
@@ -82,6 +83,7 @@ function(lc_add_lua_e2e_test test_name script_path)
   add_test(NAME ${test_name} COMMAND ${lua_e2e_command})
   set_tests_properties(${test_name} PROPERTIES
     LABELS "e2e;lua"
+    FIXTURES_REQUIRED lockdc_e2e_lua
     RUN_SERIAL TRUE
     TIMEOUT 300
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -191,12 +193,28 @@ endif()
 
 find_program(LOCKDC_LUAROCKS_BIN NAMES luarocks)
 if(TARGET lockdc_lua_core AND LOCKDC_LUA_RUNNABLE AND LOCKDC_LUAROCKS_BIN)
+  add_test(NAME lc_e2e_lua_setup COMMAND ${CMAKE_COMMAND}
+    -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR} -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -DLOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}
+    -DLOCKDC_TEST_NAME=e2e-lua-setup
+    -DLOCKDC_LUA_TEST_SCRIPT=${CMAKE_SOURCE_DIR}/tests/lua/test_lockdc_luarocks_smoke.lua
+    -DLOCKDC_LUA_FIXTURE_ROOT=${CMAKE_BINARY_DIR}/lua-rock-tests/e2e
+    -DLOCKDC_LUA_PREPARE_FIXTURE=ON
+    -P ${CMAKE_SOURCE_DIR}/tests/lua_rock_install_and_run_test.cmake)
+  set_tests_properties(lc_e2e_lua_setup PROPERTIES
+    LABELS "e2e;lua" FIXTURES_SETUP lockdc_e2e_lua RUN_SERIAL TRUE TIMEOUT 120)
+  add_test(NAME lua_e2e_fixture_test COMMAND ${CMAKE_COMMAND}
+    -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR} -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -P ${CMAKE_SOURCE_DIR}/tests/lua_e2e_fixture_test.cmake)
+  set_tests_properties(lua_e2e_fixture_test PROPERTIES
+    LABELS "unit;local;lifecycle-host" RUN_SERIAL TRUE TIMEOUT 15)
   add_test(NAME lc_e2e_lua_allocator_gate COMMAND ${CMAKE_COMMAND}
     -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR} -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
     -DLOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}
+    -DLOCKDC_LUA_FIXTURE_ROOT=${CMAKE_BINARY_DIR}/lua-rock-tests/e2e
     -P ${CMAKE_SOURCE_DIR}/tests/lua_allocator_gate_test.cmake)
   set_tests_properties(lc_e2e_lua_allocator_gate PROPERTIES
-    LABELS "e2e;lua;allocator" RUN_SERIAL TRUE TIMEOUT 120)
+    LABELS "e2e;lua;allocator" FIXTURES_REQUIRED lockdc_e2e_lua RUN_SERIAL TRUE TIMEOUT 120)
 endif()
 
 lc_add_lua_e2e_test(
@@ -281,10 +299,12 @@ if(TARGET lc_example_outbox_producer AND LOCKDC_LUA_RUNNABLE AND
       -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
       -DLOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}
       -DLOCKDC_OUTBOX_PRODUCER=$<TARGET_FILE:lc_example_outbox_producer>
+      -DLOCKDC_LUA_FIXTURE_ROOT=${CMAKE_BINARY_DIR}/lua-rock-tests/e2e
       -P "${CMAKE_CURRENT_SOURCE_DIR}/outbox_examples_test.cmake"
   )
   set_tests_properties(lc_e2e_outbox_examples PROPERTIES
     LABELS "e2e;examples;lua"
+    FIXTURES_REQUIRED lockdc_e2e_lua
     RUN_SERIAL TRUE
     TIMEOUT 300
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}

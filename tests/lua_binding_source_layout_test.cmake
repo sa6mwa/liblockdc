@@ -20,6 +20,7 @@ list(GET generated_rockspec 0 generated_rockspec_path)
 foreach(required_path
     "${LOCKDC_ROOT}/lua/lockdc/init.lua"
     "${LOCKDC_ROOT}/src/lua/lockdc_lua.c"
+    "${LOCKDC_ROOT}/src/lua/lockdc_collections_lua.c"
     "${LOCKDC_ROOT}/src/lc_api_internal.h"
     "${LOCKDC_ROOT}/src/lc_engine_api.h"
     "${LOCKDC_ROOT}/src/lc_pouch.h"

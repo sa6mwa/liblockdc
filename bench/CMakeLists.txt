@@ -4,6 +4,7 @@ endif()
 
 add_executable(lockdc_bench
     bench_main.c
+    bench_collections.c
     ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
 )
 target_include_directories(lockdc_bench PRIVATE

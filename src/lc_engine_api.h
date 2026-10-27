@@ -113,6 +113,9 @@ typedef struct lc_engine_get_response {
   lonejson_int64 version;
   lonejson_int64 fencing_token;
   char *correlation_id;
+  lc_state_retention_support retention_support;
+  int has_retention_expires_at_unix;
+  lc_unix_seconds retention_expires_at_unix;
 } lc_engine_get_response;
 
 typedef struct lc_engine_get_stream_response {
@@ -122,6 +125,9 @@ typedef struct lc_engine_get_stream_response {
   lonejson_int64 version;
   lonejson_int64 fencing_token;
   char *correlation_id;
+  lc_state_retention_support retention_support;
+  int has_retention_expires_at_unix;
+  lc_unix_seconds retention_expires_at_unix;
 } lc_engine_get_stream_response;
 
 typedef struct lc_engine_keepalive_request {
@@ -166,6 +172,8 @@ typedef struct lc_engine_update_request {
   const void *body;
   size_t body_length;
   const char *content_type;
+  int has_retention_seconds;
+  long retention_seconds;
 } lc_engine_update_request;
 
 typedef struct lc_engine_update_response {
@@ -173,6 +181,9 @@ typedef struct lc_engine_update_response {
   char *new_state_etag;
   lonejson_int64 bytes;
   char *correlation_id;
+  lc_state_retention_support retention_support;
+  int has_retention_expires_at_unix;
+  lc_unix_seconds retention_expires_at_unix;
 } lc_engine_update_response;
 
 typedef struct lc_engine_mutate_request {
@@ -186,6 +197,8 @@ typedef struct lc_engine_mutate_request {
   int has_if_version;
   const char *const *mutations;
   size_t mutation_count;
+  int has_retention_seconds;
+  long retention_seconds;
 } lc_engine_mutate_request;
 
 typedef struct lc_engine_mutate_response {
@@ -193,6 +206,9 @@ typedef struct lc_engine_mutate_response {
   char *new_state_etag;
   lonejson_int64 bytes;
   char *correlation_id;
+  lc_state_retention_support retention_support;
+  int has_retention_expires_at_unix;
+  lc_unix_seconds retention_expires_at_unix;
 } lc_engine_mutate_response;
 
 typedef struct lc_engine_metadata_request {
@@ -205,6 +221,8 @@ typedef struct lc_engine_metadata_request {
   int has_if_version;
   int has_query_hidden;
   int query_hidden;
+  int has_retention_seconds;
+  long retention_seconds;
 } lc_engine_metadata_request;
 
 typedef struct lc_engine_metadata_response {
@@ -214,6 +232,9 @@ typedef struct lc_engine_metadata_response {
   int has_query_hidden;
   int query_hidden;
   char *correlation_id;
+  lc_state_retention_support retention_support;
+  int has_retention_expires_at_unix;
+  lc_unix_seconds retention_expires_at_unix;
 } lc_engine_metadata_response;
 
 typedef struct lc_engine_remove_request {
@@ -250,6 +271,9 @@ typedef struct lc_engine_describe_response {
   int has_query_hidden;
   int query_hidden;
   char *correlation_id;
+  lc_state_retention_support retention_support;
+  int has_retention_expires_at_unix;
+  lc_unix_seconds retention_expires_at_unix;
 } lc_engine_describe_response;
 
 typedef struct lc_engine_query_request {

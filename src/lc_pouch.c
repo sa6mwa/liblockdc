@@ -1,6 +1,7 @@
 #include "lc_pouch.h"
 
 #include "lc_api_internal.h"
+#include "lc_collection_maintenance.h"
 #include "lc_intcompat.h"
 #include "lc_log.h"
 #include "lc_pouch_format.h"
@@ -8,6 +9,7 @@
 #include "lc_pouch_namespace.h"
 #include "lc_pouch_path.h"
 #include "lc_pouch_query_index.h"
+#include "lc_pouch_retention.h"
 
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
@@ -2420,20 +2422,59 @@ static int lc_pouch_compaction_take_namespace(lc_pouch *pouch,
   return LC_OK;
 }
 
-static int lc_pouch_compaction_take_marker_turn(lc_pouch *pouch) {
-  int marker_turn;
+enum {
+  LC_POUCH_COMPACTION_QUEUED,
+  LC_POUCH_COMPACTION_TERMINAL,
+  LC_POUCH_COMPACTION_RETENTION,
+  LC_POUCH_COMPACTION_COLLECTION,
+  LC_POUCH_COMPACTION_SOURCE_COUNT
+};
+
+static int lc_pouch_compaction_take_source_turn(lc_pouch *pouch) {
+  int source;
 
   pthread_mutex_lock(&pouch->compaction_mutex);
-  marker_turn = pouch->compaction_marker_turn;
-  pouch->compaction_marker_turn = !pouch->compaction_marker_turn;
+  source = pouch->compaction_source_turn;
+  pouch->compaction_source_turn =
+      (source + 1) % LC_POUCH_COMPACTION_SOURCE_COUNT;
   pthread_mutex_unlock(&pouch->compaction_mutex);
-  return marker_turn;
+  return source;
+}
+
+static int lc_pouch_compaction_take_retention_namespace(lc_pouch *pouch,
+                                                        char **ns,
+                                                        lc_error *error) {
+  char *cursor = NULL;
+  int rc = lc_pouch_retention_hint_next(
+      pouch, pouch->state_retention_marker_cursor, ns, &cursor, error);
+  if (rc == LC_OK && cursor != NULL) {
+    lc_free_with_allocator(&pouch->allocator,
+                           pouch->state_retention_marker_cursor);
+    pouch->state_retention_marker_cursor = cursor;
+  } else
+    lc_free_with_allocator(&pouch->allocator, cursor);
+  return rc;
+}
+
+static int lc_pouch_compaction_take_collection_namespace(lc_pouch *pouch,
+                                                         char **ns,
+                                                         lc_error *error) {
+  char *cursor = NULL;
+  int rc = lc_collection_maintenance_next(
+      pouch, pouch->collection_namespace_cursor, ns, &cursor, error);
+  if (rc == LC_OK && cursor != NULL) {
+    lc_free_with_allocator(&pouch->allocator,
+                           pouch->collection_namespace_cursor);
+    pouch->collection_namespace_cursor = cursor;
+  } else
+    lc_free_with_allocator(&pouch->allocator, cursor);
+  return rc;
 }
 
 static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
   char *ns;
   int terminal_reclaim;
-  int marker_turn;
+  int attempt;
   lc_error error;
   int rc;
 
@@ -2445,20 +2486,26 @@ static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
   ns = NULL;
   terminal_reclaim = 0;
   rc = LC_OK;
-  marker_turn = lc_pouch_compaction_take_marker_turn(pouch);
-  if (marker_turn) {
-    rc = lc_pouch_terminal_reclaim_marker_take(pouch, &ns, &error);
-    if (rc == LC_OK && ns != NULL) {
-      terminal_reclaim = 1;
-    }
-  }
-  if (rc == LC_OK && ns == NULL) {
-    rc = lc_pouch_compaction_take_namespace(pouch, &ns, &terminal_reclaim);
-  }
-  if (!marker_turn && rc == LC_OK && ns == NULL) {
-    rc = lc_pouch_terminal_reclaim_marker_take(pouch, &ns, &error);
-    if (rc == LC_OK && ns != NULL) {
-      terminal_reclaim = 1;
+  /* One fair, work-conserving rotation. Advance before discovery so a failed
+   * source cannot keep the next pass; inspect each source at most once. */
+  for (attempt = 0;
+       attempt < LC_POUCH_COMPACTION_SOURCE_COUNT && rc == LC_OK && ns == NULL;
+       ++attempt) {
+    switch (lc_pouch_compaction_take_source_turn(pouch)) {
+    case LC_POUCH_COMPACTION_QUEUED:
+      rc = lc_pouch_compaction_take_namespace(pouch, &ns, &terminal_reclaim);
+      break;
+    case LC_POUCH_COMPACTION_TERMINAL:
+      rc = lc_pouch_terminal_reclaim_marker_take(pouch, &ns, &error);
+      if (rc == LC_OK && ns != NULL)
+        terminal_reclaim = 1;
+      break;
+    case LC_POUCH_COMPACTION_RETENTION:
+      rc = lc_pouch_compaction_take_retention_namespace(pouch, &ns, &error);
+      break;
+    case LC_POUCH_COMPACTION_COLLECTION:
+      rc = lc_pouch_compaction_take_collection_namespace(pouch, &ns, &error);
+      break;
     }
   }
   if (rc != LC_OK) {
@@ -2562,7 +2609,8 @@ static void *lc_pouch_compaction_worker(void *arg) {
     struct timespec deadline;
     int wait_rc;
 
-    /* Opening a root alone must not schedule background maintenance. */
+    /* Ordinary opens stay idle; existing work or a failed hint discovery arms
+     * the same bounded cadence so transient I/O cannot lose durable work. */
     if (!armed) {
       while (!pouch->compaction_stop && !pouch->compaction_pending) {
         (void)pthread_cond_wait(&pouch->compaction_cond,
@@ -2598,6 +2646,7 @@ static void *lc_pouch_compaction_worker(void *arg) {
 
 static int lc_pouch_compaction_worker_init(lc_pouch *pouch, lc_error *error) {
   char *pending_namespace;
+  char *retention_cursor;
   lc_error marker_error;
   int pthread_rc;
   int queued;
@@ -2652,6 +2701,40 @@ static int lc_pouch_compaction_worker_init(lc_pouch *pouch, lc_error *error) {
   }
   lc_error_cleanup(&marker_error);
   lc_free_with_allocator(&pouch->allocator, pending_namespace);
+  pending_namespace = NULL;
+  retention_cursor = NULL;
+  rc = lc_pouch_retention_hint_next(pouch, NULL, &pending_namespace,
+                                    &retention_cursor, &marker_error);
+  if (rc != LC_OK) {
+    pslog_field fields[2];
+    fields[0] = lc_log_error_field("error", &marker_error);
+    fields[1] = lc_log_code_field(&marker_error);
+    lc_log_warn(pouch->logger, "compaction.retention.hint.scan.error", fields,
+                2);
+  }
+  if (rc != LC_OK || pending_namespace != NULL) {
+    pouch->compaction_pending = 1;
+#ifdef LOCKDC_TEST_BUILD
+    (void)lc_pouch_retention_note_phase(LC_POUCH_RETENTION_DISCOVERED, NULL);
+#endif
+  }
+  lc_error_cleanup(&marker_error);
+  lc_free_with_allocator(&pouch->allocator, pending_namespace);
+  lc_free_with_allocator(&pouch->allocator, retention_cursor);
+  pending_namespace = retention_cursor = NULL;
+  rc = lc_collection_maintenance_next(pouch, NULL, &pending_namespace,
+                                      &retention_cursor, &marker_error);
+  if (rc != LC_OK || pending_namespace != NULL)
+    pouch->compaction_pending = 1;
+  if (rc != LC_OK) {
+    pslog_field field;
+    field = lc_log_error_field("error", &marker_error);
+    lc_log_warn(pouch->logger, "compaction.collection.discovery.error", &field,
+                1U);
+  }
+  lc_error_cleanup(&marker_error);
+  lc_free_with_allocator(&pouch->allocator, pending_namespace);
+  lc_free_with_allocator(&pouch->allocator, retention_cursor);
   pthread_rc = pthread_create(&pouch->compaction_thread, NULL,
                               lc_pouch_compaction_worker, pouch);
   if (pthread_rc != 0) {
@@ -2696,6 +2779,11 @@ static void lc_pouch_compaction_worker_close(lc_pouch *pouch) {
   lc_free_with_allocator(&pouch->allocator,
                          pouch->terminal_reclaim_marker_cursor);
   pouch->terminal_reclaim_marker_cursor = NULL;
+  lc_free_with_allocator(&pouch->allocator,
+                         pouch->state_retention_marker_cursor);
+  pouch->state_retention_marker_cursor = NULL;
+  lc_free_with_allocator(&pouch->allocator, pouch->collection_namespace_cursor);
+  pouch->collection_namespace_cursor = NULL;
   pouch->compaction_namespace_count = 0U;
   pouch->compaction_namespace_capacity = 0U;
 }

@@ -375,6 +375,10 @@ static int lc_client_acquire_for_update_method_impl(
   update.state.version = get_res.version;
   update.state.fencing_token = get_res.fencing_token;
   update.state.correlation_id = get_res.correlation_id;
+  update.state.retention_support = get_res.retention_support;
+  update.state.has_retention_expires_at_unix =
+      get_res.has_retention_expires_at_unix;
+  update.state.retention_expires_at_unix = get_res.retention_expires_at_unix;
   if (!get_res.no_content) {
     snapshot_fp = fp;
     fp = NULL;
@@ -504,6 +508,9 @@ int lc_client_describe_method(lc_client *self, const lc_describe_req *req,
   out->has_query_hidden = engine_res.has_query_hidden;
   out->query_hidden = engine_res.query_hidden;
   out->correlation_id = lc_strdup_local(engine_res.correlation_id);
+  out->retention_support = engine_res.retention_support;
+  out->has_retention_expires_at_unix = engine_res.has_retention_expires_at_unix;
+  out->retention_expires_at_unix = engine_res.retention_expires_at_unix;
   {
     pslog_field fields[4];
 
@@ -580,6 +587,9 @@ static int lc_client_get_with_namespace_method(lc_client *self, const char *ns,
   out->version = engine_res.version;
   out->fencing_token = engine_res.fencing_token;
   out->correlation_id = lc_strdup_local(engine_res.correlation_id);
+  out->retention_support = engine_res.retention_support;
+  out->has_retention_expires_at_unix = engine_res.has_retention_expires_at_unix;
+  out->retention_expires_at_unix = engine_res.retention_expires_at_unix;
   {
     pslog_field fields[5];
 
@@ -759,6 +769,9 @@ static int lc_client_load_with_namespace_method(
   out->version = version;
   out->fencing_token = fencing_token;
   out->correlation_id = correlation_id;
+  out->retention_support = engine_res.retention_support;
+  out->has_retention_expires_at_unix = engine_res.has_retention_expires_at_unix;
+  out->retention_expires_at_unix = engine_res.retention_expires_at_unix;
   lc_engine_get_stream_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
   return LC_OK;
@@ -824,6 +837,8 @@ static int lc_client_update_method_impl(lc_client *self,
   engine_req.if_state_etag = req->if_state_etag;
   engine_req.if_version = req->if_version;
   engine_req.has_if_version = req->has_if_version;
+  engine_req.has_retention_seconds = req->has_retention_seconds;
+  engine_req.retention_seconds = req->retention_seconds;
   engine_req.content_type =
       req->content_type != NULL ? req->content_type : "application/json";
   rc = lc_engine_client_update_from(client->engine, &engine_req,
@@ -855,6 +870,9 @@ static int lc_client_update_method_impl(lc_client *self,
   out->new_state_etag = lc_strdup_local(engine_res.new_state_etag);
   out->bytes = engine_res.bytes;
   out->correlation_id = lc_strdup_local(engine_res.correlation_id);
+  out->retention_support = engine_res.retention_support;
+  out->has_retention_expires_at_unix = engine_res.has_retention_expires_at_unix;
+  out->retention_expires_at_unix = engine_res.retention_expires_at_unix;
   {
     pslog_field fields[6];
 
@@ -905,6 +923,8 @@ int lc_client_mutate_method(lc_client *self, const lc_mutate_op *req,
   engine_req.if_state_etag = req->if_state_etag;
   engine_req.if_version = req->if_version;
   engine_req.has_if_version = req->has_if_version;
+  engine_req.has_retention_seconds = req->has_retention_seconds;
+  engine_req.retention_seconds = req->retention_seconds;
   engine_req.mutations = req->mutations;
   engine_req.mutation_count = req->mutation_count;
   rc = lc_engine_client_mutate(client->engine, &engine_req, &engine_res,
@@ -935,6 +955,9 @@ int lc_client_mutate_method(lc_client *self, const lc_mutate_op *req,
   out->new_state_etag = lc_strdup_local(engine_res.new_state_etag);
   out->bytes = engine_res.bytes;
   out->correlation_id = lc_strdup_local(engine_res.correlation_id);
+  out->retention_support = engine_res.retention_support;
+  out->has_retention_expires_at_unix = engine_res.has_retention_expires_at_unix;
+  out->retention_expires_at_unix = engine_res.retention_expires_at_unix;
   {
     pslog_field fields[6];
 
@@ -983,6 +1006,8 @@ int lc_client_metadata_method(lc_client *self, const lc_metadata_op *req,
   engine_req.fencing_token = req->lease.fencing_token;
   engine_req.if_version = req->if_version;
   engine_req.has_if_version = req->has_if_version;
+  engine_req.has_retention_seconds = req->has_retention_seconds;
+  engine_req.retention_seconds = req->retention_seconds;
   engine_req.has_query_hidden = req->has_query_hidden;
   engine_req.query_hidden = req->query_hidden;
   rc = lc_engine_client_update_metadata(client->engine, &engine_req,
@@ -1013,6 +1038,9 @@ int lc_client_metadata_method(lc_client *self, const lc_metadata_op *req,
   out->has_query_hidden = engine_res.has_query_hidden;
   out->query_hidden = engine_res.query_hidden;
   out->correlation_id = lc_strdup_local(engine_res.correlation_id);
+  out->retention_support = engine_res.retention_support;
+  out->has_retention_expires_at_unix = engine_res.has_retention_expires_at_unix;
+  out->retention_expires_at_unix = engine_res.retention_expires_at_unix;
   {
     pslog_field fields[4];
 

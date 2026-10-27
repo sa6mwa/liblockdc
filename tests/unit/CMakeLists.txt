@@ -16,6 +16,8 @@ if(LOCKDC_BUILD_POSTGRES AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     lc_unit_cpkt_postgres_checked)
 endif()
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/portability.cmake")
+
 function(lc_add_unit_test target_name)
   add_executable(${target_name} ${ARGN})
   target_link_libraries(${target_name} PRIVATE ${lc_test_link_target} lc::cmocka)
@@ -37,13 +39,28 @@ function(lc_add_unit_test target_name)
       $<$<LINK_LANGUAGE:C>:--coverage>
     )
   endif()
-  add_test(NAME ${target_name} COMMAND ${target_name})
-  # The QEMU release suite exercises every portable core unit target.  Keep
-  # protocol edge-case permutations on the native sanitizer and host-release
-  # suites, where they provide the same coverage without emulator overhead.
+  set(cases)
+  if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    set(cases ${lc_portability_${target_name}})
+  endif()
+  if(cases)
+    list(GET ARGN 0 source)
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/${source}" case_source)
+    foreach(case IN LISTS cases)
+      if(NOT case_source MATCHES "cmocka_unit_test[a-z_]*\\([ \r\n]*${case}[ ,)\r\n]")
+        message(FATAL_ERROR "Unknown portability case for ${target_name}: ${case}")
+      endif()
+    endforeach()
+  endif()
+  add_test(NAME ${target_name} COMMAND ${target_name} ${cases})
+  # Every portable unit executable runs on each Linux target. The three large
+  # storage tables use named portability cases in optimized configurations.
   set_tests_properties(${target_name} PROPERTIES
     LABELS "unit;cross-runtime"
     TIMEOUT 60)
+  if(cases)
+    set_property(TEST ${target_name} APPEND PROPERTY LABELS portability)
+  endif()
   set_property(GLOBAL APPEND PROPERTY LOCKDC_CROSS_RUNTIME_TEST_TARGETS
     ${target_name})
   if(LOCKDC_C_TEST_ENVIRONMENT)
@@ -53,6 +70,30 @@ function(lc_add_unit_test target_name)
 endfunction()
 
 lc_add_unit_test(lc_unit_streams test_lc_streams.c)
+lc_add_unit_test(lc_unit_pouch_query_terms test_lc_pouch_query_terms.c)
+lc_add_unit_test(lc_unit_collection_index test_lc_collection_index.c)
+lc_add_unit_test(lc_unit_collection_order test_lc_collection_order.c
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+lc_add_unit_test(lc_unit_collection_json test_lc_collection_json.c
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+lc_add_unit_test(lc_unit_collection_record test_lc_collection_record.c
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+target_compile_definitions(lc_unit_collection_record PRIVATE LOCKDC_TEST_BUILD=1)
+lc_add_unit_test(lc_unit_collection_ids test_lc_collection_ids.c
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+lc_add_unit_test(lc_unit_collections test_lc_collections.c
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+target_compile_definitions(lc_unit_collections PRIVATE LOCKDC_TEST_BUILD=1)
+lc_add_unit_test(lc_unit_collection_sync test_lc_collection_sync.c
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+target_compile_definitions(lc_unit_collection_sync PRIVATE LOCKDC_TEST_BUILD=1)
+lc_add_unit_test(lc_unit_mixed_storage test_lc_mixed_storage.c
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+target_compile_definitions(lc_unit_mixed_storage PRIVATE LOCKDC_TEST_BUILD=1)
+foreach(collection_test lc_unit_collection_order lc_unit_collection_json lc_unit_collection_record lc_unit_collection_ids lc_unit_collections lc_unit_collection_sync lc_unit_mixed_storage)
+  target_compile_definitions(${collection_test} PRIVATE
+    LC_COLLECTION_TMP_PARENT="${CMAKE_CURRENT_BINARY_DIR}")
+endforeach()
 add_executable(lc_allocator_exit_probe test_lc_allocator_exit.c
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
 if(TARGET lc_static)
@@ -204,6 +245,10 @@ target_sources(lc_unit_mutate_stream PRIVATE
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
 )
 lc_add_unit_test(lc_unit_pouch test_lc_pouch.c)
+lc_add_unit_test(lc_unit_state_retention test_lc_state_retention.c
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+target_compile_definitions(lc_unit_state_retention PRIVATE LOCKDC_TEST_BUILD=1)
+target_link_options(lc_unit_state_retention PRIVATE "LINKER:--wrap=fsync")
 lc_add_unit_test(lc_unit_pouch_xa test_lc_pouch_xa.c)
 target_compile_definitions(lc_unit_pouch_xa PRIVATE LOCKDC_TEST_BUILD=1)
 lc_add_unit_test(lc_unit_xa_borrow test_lc_xa_borrow.c)
@@ -220,6 +265,12 @@ lc_add_tracking_case(lc_allocator_pouch_compaction lc_unit_pouch
   test_compaction_reclaims_expired_obsolete_files)
 lc_add_tracking_case(lc_allocator_outbox_lifecycle lc_unit_outbox
   test_pouch_outbox_stateful_delivery_lifecycle)
+add_test(NAME lc_test_case_selection_test COMMAND "${CMAKE_COMMAND}"
+  "-DLOCKDC_TEST_RUNNER=${CMAKE_CROSSCOMPILING_EMULATOR}"
+  -DLOCKDC_UNIT_DIR=${CMAKE_CURRENT_BINARY_DIR}
+  -P "${CMAKE_SOURCE_DIR}/tests/test_case_selection_test.cmake")
+set_tests_properties(lc_test_case_selection_test PROPERTIES
+  LABELS "unit;lifecycle-host" TIMEOUT 30)
 target_link_options(lc_unit_pouch PRIVATE -Wl,--wrap=time)
 if(CMAKE_CROSSCOMPILING AND CMAKE_CROSSCOMPILING_EMULATOR)
   set(lc_pouch_cross_emulator ${CMAKE_CROSSCOMPILING_EMULATOR})
@@ -266,6 +317,8 @@ if(LOCKDC_ENABLE_COVERAGE)
   target_link_options(lc_unit_transport_https PRIVATE $<$<LINK_LANGUAGE:C>:--coverage>)
 endif()
 set(https_cases
+    test_public_retention_remote_options_and_observations
+    test_retention_remote_rejects_invalid_headers
     test_client_open_accepts_memory_bundle_source
     test_public_client_namespaced_load_rejects_empty_namespace
     test_state_transport_paths_use_mtls

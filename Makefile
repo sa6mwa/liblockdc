@@ -30,6 +30,10 @@ LOCKDC_LUA_ENV_PACKAGE_PREFIX ?= $(X86_64_GNU_RELEASE_BUILD_DIR)/package
 
 DIST_DIR := $(ROOT)/dist
 BENCH_ITERS ?= 0
+COLLECTION_COMPARE_ROWS ?= 8192
+COLLECTION_COMPARE_JSON_BYTES ?= 4096
+COLLECTION_COMPARE_RUNS ?= 3
+COLLECTION_COMPARE_DIR ?= $(ROOT)/build/collection-read-compare
 POUCH_GO_BENCH ?= .
 POUCH_GO_BENCHTIME ?= 3s
 POUCH_GO_BENCH_COUNT ?= 1
@@ -189,7 +193,7 @@ POUCH_GO_BENCH_LDFLAGS := \
 LOCKD_GO_CACHE_ENV := GOMODCACHE=$(ROOT)/.cache/go/pkg/mod GOCACHE=$(ROOT)/.cache/go/build GOBIN=$(ROOT)/.cache/go/bin
 LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VERSION)
 
-.PHONY: \
+.PHONY: compare-collection-read \
 	help \
 	__deps-debug __deps-release __deps-cross \
 	__build-debug __build-host __build-x86_64-linux-gnu-release __build-release __build-e2e __build-coverage __build-fuzz \
@@ -248,6 +252,7 @@ help:
 		'make fuzz-long          Run longer AFL unit and Pouch integration mutation fuzzing (FUZZ_LONG_TIME=$(FUZZ_LONG_TIME)).' \
 		'make pouch-integration-fuzz Run production-code Pouch integration mutation fuzzing (FUZZ_TIME=$(FUZZ_TIME)).' \
 		'make bench              Standard short name for benchmarks.' \
+		'make compare-collection-read  Compare page-cache-cold raw JSONL and collection reads; manual diagnostic, never a gate.' \
 		'make benchmarks         Build the shipped x86_64-linux-gnu release preset and run the local benchmark matrix (BENCH_ITERS=$(BENCH_ITERS)).' \
 		'make bench-check        Run native benchmarks and enforce Pouch-vs-lockd performance thresholds.' \
 		'make bench-gate         Run native benchmarks and enforce Pouch-vs-lockd performance thresholds.' \
@@ -560,6 +565,14 @@ __perf-gate:
 	$(TIMED) 'perf-gate benchmark-prepare' $(MAKE_RECURSE) __benchmark-pouch-go-prepare
 	$(TIMED) 'perf-gate pouch-go-parity' $(MAKE_RECURSE) __benchmark-pouch-go-parity-gate
 	$(TIMED) 'perf-gate pouch-go-durable-parity' $(MAKE_RECURSE) __benchmark-pouch-go-durable-gate
+
+compare-collection-read:
+	$(CMAKE) --preset $(X86_64_GNU_RELEASE_PRESET)
+	$(CMAKE) --build --preset $(X86_64_GNU_RELEASE_PRESET) --target lockdc_collection_read_compare
+	mkdir -p -- '$(COLLECTION_COMPARE_DIR)'
+	./build/$(X86_64_GNU_RELEASE_PRESET)/tools/lockdc_collection_read_compare \
+	  '$(COLLECTION_COMPARE_ROWS)' '$(COLLECTION_COMPARE_JSON_BYTES)' \
+	  '$(COLLECTION_COMPARE_RUNS)' '$(COLLECTION_COMPARE_DIR)'
 
 benchmark-pouch-perf: __benchmark-pouch-perf-prepare
 	$(TIMED) benchmark-pouch-perf timeout --kill-after=5s \
@@ -1128,6 +1141,7 @@ prerelease:
 
 __prerelease-ordinary:
 	$(TIMED) 'prerelease format' $(MAKE_RECURSE) __format
+	$(TIMED) 'prerelease compiler preflight' $(MAKE_RECURSE) __build-fuzz
 	$(TIMED) 'prerelease test-all' $(MAKE_RECURSE) __test-all
 	$(TIMED) 'prerelease valgrind' $(MAKE_RECURSE) __valgrind
 	$(TIMED) 'prerelease fuzz' $(MAKE_RECURSE) __fuzz

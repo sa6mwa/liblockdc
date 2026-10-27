@@ -33,6 +33,20 @@ foreach(expected
     endif()
 endforeach()
 
+execute_process(COMMAND make -n __prerelease
+    WORKING_DIRECTORY "${LOCKDC_ROOT}"
+    RESULT_VARIABLE plan_result OUTPUT_VARIABLE plan ERROR_VARIABLE plan_error)
+if(NOT plan_result EQUAL 0)
+    message(FATAL_ERROR "Cannot inspect prerelease order: ${plan_error}")
+endif()
+string(FIND "${plan}" "prerelease compiler preflight" compile_step)
+string(FIND "${plan}" "prerelease test-all" test_step)
+string(FIND "${plan}" "prerelease valgrind" memory_step)
+string(FIND "${plan}" "prerelease fuzz" fuzz_step)
+if(compile_step LESS 0 OR test_step LESS compile_step OR memory_step LESS test_step OR fuzz_step LESS memory_step)
+    message(FATAL_ERROR "Prerelease must compile AFL before service/memory tests, then retain all gates: ${plan}")
+endif()
+
 foreach(unexpected
     "[release] __test-debug"
     "[release] __test-host"

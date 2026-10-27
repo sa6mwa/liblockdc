@@ -2,8 +2,12 @@
 
 set -euo pipefail
 
+mode=all
+case "${1:-}" in
+  --prepare|--run) mode=${1#--}; shift ;;
+esac
 if [ "$#" -ne 4 ]; then
-  printf 'usage: %s TREE_DIR SDK_PREFIX LUA_PACKAGE_PATH LUA_SCRIPT\n' "$0" >&2
+  printf 'usage: %s [--prepare|--run] TREE_DIR SDK_PREFIX LUA_PACKAGE_PATH LUA_SCRIPT\n' "$0" >&2
   exit 1
 fi
 
@@ -19,9 +23,6 @@ lonejson_src_rock="${LOCKDC_LONEJSON_SRC_ROCK:-https://github.com/sa6mwa/lonejso
 luarocks_build_root="${LOCKDC_LUAROCKS_BUILD_ROOT:-${tree_dir}/.luarocks-build}"
 luarocks_workdir="${LOCKDC_LUAROCKS_WORKDIR:-$PWD}"
 run_lua_smoke="${LOCKDC_RUN_LUA_SMOKE:-1}"
-luarocks_cc="${LOCKDC_LUAROCKS_CC:?LOCKDC_LUAROCKS_CC must name the selected Bootlin C compiler}"
-luarocks_cflags="${LOCKDC_LUAROCKS_CFLAGS:?LOCKDC_LUAROCKS_CFLAGS must contain the selected Bootlin C flags}"
-luarocks_lua_incdir="${LOCKDC_LUAROCKS_LUA_INCDIR:?LOCKDC_LUAROCKS_LUA_INCDIR must name the cpkt Lua headers}"
 
 # shellcheck source=assert_generated_path.sh
 source "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/assert_generated_path.sh"
@@ -43,13 +44,21 @@ require_command() {
 require_command "$lua_bin"
 require_command "$luarocks_bin"
 require_path "$sdk_prefix"
-require_path "$lua_package_path"
 require_path "$lua_script"
 require_path "$luarocks_workdir"
-require_path "$luarocks_cc"
-require_path "$luarocks_lua_incdir/lua.h"
 lockdc_assert_generated_path "$luarocks_workdir" "$tree_dir"
 lockdc_assert_generated_path "$luarocks_workdir" "$luarocks_build_root"
+if [ "$mode" != run ]; then
+  luarocks_cc="${LOCKDC_LUAROCKS_CC:?LOCKDC_LUAROCKS_CC must name the selected Bootlin C compiler}"
+  luarocks_cflags="${LOCKDC_LUAROCKS_CFLAGS:?LOCKDC_LUAROCKS_CFLAGS must contain the selected Bootlin C flags}"
+  luarocks_lua_incdir="${LOCKDC_LUAROCKS_LUA_INCDIR:?LOCKDC_LUAROCKS_LUA_INCDIR must name the cpkt Lua headers}"
+  require_path "$lua_package_path"
+  require_path "$luarocks_cc"
+  require_path "$luarocks_lua_incdir/lua.h"
+else
+  require_path "$tree_dir/lib/lua/$lua_version/lockdc/core.so"
+  require_path "$tree_dir/share/lua/$lua_version/lockdc/init.lua"
+fi
 
 lua_runtime_version="$($lua_bin -e 'io.write(_VERSION)' 2>/dev/null || true)"
 if [ "$lua_runtime_version" != "Lua 5.5" ]; then
@@ -107,37 +116,45 @@ export LOCKDC_PREFIX="$sdk_prefix"
 : "${LONEJSON_LIBDIR:=$sdk_prefix/lib}"
 export LONEJSON_LIBDIR
 
-rm -rf "$tree_dir" "$luarocks_build_root"
-mkdir -p "$tree_dir"
-cd "$luarocks_workdir"
+if [ "$mode" != run ]; then
+  rm -rf "$tree_dir" "$luarocks_build_root"
+  mkdir -p "$tree_dir"
+  cd "$luarocks_workdir"
 
-install_lonejson_dependency
-luarocks_target_variables=(
-  "CC=${luarocks_cc}"
-  "CFLAGS=${luarocks_cflags}"
-  "LUA_INCDIR=${luarocks_lua_incdir}"
-)
-case "$lua_package_path" in
-  *.rockspec)
-    LOCKDC_LUAROCKS_BUILD_ROOT="$luarocks_build_root" \
-      "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" make "$lua_package_path" "${luarocks_target_variables[@]}"
-    ;;
-  *.src.rock|*.rock)
-    "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" install "$lua_package_path" "${luarocks_target_variables[@]}"
-    ;;
-  *)
-    printf 'unsupported Lua package path: %s\n' "$lua_package_path" >&2
-    exit 1
-    ;;
-esac
+  install_lonejson_dependency
+  luarocks_target_variables=(
+    "CC=${luarocks_cc}"
+    "CFLAGS=${luarocks_cflags}"
+    "LUA_INCDIR=${luarocks_lua_incdir}"
+  )
+  case "$lua_package_path" in
+    *.rockspec)
+      LOCKDC_LUAROCKS_BUILD_ROOT="$luarocks_build_root" \
+        "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" make "$lua_package_path" "${luarocks_target_variables[@]}"
+      ;;
+    *.src.rock|*.rock)
+      "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" install "$lua_package_path" "${luarocks_target_variables[@]}"
+      ;;
+    *)
+      printf 'unsupported Lua package path: %s\n' "$lua_package_path" >&2
+      exit 1
+      ;;
+  esac
 
-if [ -n "${LOCKDC_POSTGRES_ROCK:-}" ]; then
-  require_path "$LOCKDC_POSTGRES_ROCK"
-  "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" \
-    install "$LOCKDC_POSTGRES_ROCK" "${luarocks_target_variables[@]}"
+  if [ -n "${LOCKDC_POSTGRES_ROCK:-}" ]; then
+    require_path "$LOCKDC_POSTGRES_ROCK"
+    "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" \
+      install "$LOCKDC_POSTGRES_ROCK" "${luarocks_target_variables[@]}"
+  fi
 fi
 
-eval "$("$luarocks_bin" --tree "$tree_dir" path --lua-version "$lua_version")"
+if [ "$mode" = prepare ]; then
+  printf 'Prepared LuaRocks fixture: %s\n' "$tree_dir"
+  exit 0
+fi
+
+lua_paths=$("$luarocks_bin" --tree "$tree_dir" path --lua-version "$lua_version")
+eval "$lua_paths"
 
 if [ "$run_lua_smoke" = "0" ] || [ "$run_lua_smoke" = "OFF" ] || [ "$run_lua_smoke" = "FALSE" ]; then
   printf '%s\n' "Skipping Lua runtime smoke: target module is not runnable on this host"

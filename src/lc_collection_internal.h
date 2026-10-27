@@ -1,0 +1,226 @@
+#ifndef LC_COLLECTION_INTERNAL_H
+#define LC_COLLECTION_INTERNAL_H
+
+#include "lc_api_internal.h"
+#include "lc_collection_ids.h"
+#include "lc_collection_maintenance.h"
+#include "lc_collection_order.h"
+#include "lc_pouch_collection_record.h"
+#include "lc_pouch_internal.h"
+
+#define LC_COLLECTION_CURSOR_BYTES 256U
+#define LC_COLLECTION_SNAPSHOT_BIT ((lc_u64)LC_I64_MAX + 1U)
+
+typedef struct lc_collection_head {
+  lc_u64 active;
+  lc_u64 snapshot;
+  lc_u64 snapshot_generation;
+  lc_u64 tail_segment;
+  lc_u64 tail_offset;
+  lc_u64 next_snapshot;
+  lc_u64 published_at;
+  lc_pouch_unix_seconds retention;
+  int dropped;
+} lc_collection_head;
+
+typedef struct lc_collection_handle {
+  lc_collection pub;
+  lc_client_handle *client;
+  lc_pouch *pouch;
+  lc_allocator allocator;
+  char *ns;
+  char *name;
+  char id[LC_XID_STRING_SIZE];
+  char *directory;
+  char *head_path;
+  char *catalog_path;
+  char *catalog_base;
+  char *order_path;
+  char *ids_path;
+  int session_fd;
+  int join_fd;
+  int metadata_fd;
+  int append_fd;
+  int active_fd;
+  /* Keep the immutable cached head inode alive across atomic replacements:
+   * an unpinned device/inode pair can be reused for a different head. */
+  int head_fd;
+  lc_u64 active_fd_segment;
+  pthread_mutex_t metadata_mutex;
+  pthread_mutex_t append_mutex;
+  int metadata_mutex_initialized;
+  int append_mutex_initialized;
+  lc_collection_head head;
+  uint64_t head_device;
+  uint64_t head_inode;
+  int head_loaded;
+  lc_collection_order order;
+  lc_collection_ids ids;
+  unsigned long references;
+  int closed;
+  int trusted;
+} lc_collection_handle;
+
+typedef struct lc_collection_call {
+  lc_collection_handle *collection;
+  lc_pouch *pouch;
+  pthread_t thread;
+  int callback;
+  int source_callback;
+  int mode_guard;
+  lc_error local_error;
+  lc_error *error;
+  struct lc_collection_call *next;
+} lc_collection_call;
+
+typedef struct lc_collection_guard {
+  lc_collection_handle *collection;
+  lc_pouch *pouch;
+  lc_collection_call *call;
+  lc_pouch_state_shared_mutation_guard *shared;
+  int mode;
+  int append;
+  int commit_fd;
+} lc_collection_guard;
+
+int lc_collection_call_begin(lc_collection *self, int mutating,
+                             lc_collection_call *call, lc_error *error);
+void lc_collection_call_end(lc_collection_call *call);
+void lc_collection_call_callback(lc_collection_call *call, int enabled,
+                                 int source);
+int lc_collection_metadata_enter(lc_collection_handle *collection,
+                                 int exclusive, lc_error *error);
+void lc_collection_metadata_leave(lc_collection_handle *collection);
+/* Capture waits for pending durable appends before taking metadata authority.
+ * Release before callbacks. Appenders take their shared commit pin only after
+ * consuming the source, so callback reads may still capture the previous view.
+ */
+int lc_collection_capture_enter(lc_collection_handle *collection, int *pin,
+                                lc_error *error);
+void lc_collection_capture_leave(lc_collection_handle *collection, int *pin);
+/* Order for mutations: root, catalog, join/session, append, commit, metadata.
+ * Snapshot capture prepares before taking commit authority and never waits
+ * for append authority behind it. Root-only scopes
+ * participate in callback nesting without a client or receiver. */
+int lc_collection_root_begin(lc_pouch *pouch, lc_collection_call *scope,
+                             lc_collection_guard *guard, lc_error *error);
+void lc_collection_root_end(lc_collection_call *scope,
+                            lc_collection_guard *guard);
+/* Non-append mutation entry drains durable appends under an exclusive commit
+ * pin and returns with metadata held; release metadata before write_leave. */
+int lc_collection_write_enter(lc_collection_call *call,
+                              lc_collection_guard *guard, lc_error *error);
+void lc_collection_write_leave(lc_collection_guard *guard);
+int lc_collection_head_write(lc_collection_handle *collection, lc_error *error);
+int lc_collection_head_read(lc_collection_handle *collection, lc_error *error);
+int lc_collection_rotate(lc_collection_handle *collection, int force,
+                         lc_error *error);
+int lc_collection_project_record(lc_collection_order *order,
+                                 lc_collection_ids *ids,
+                                 const lc_pouch_collection_record *record,
+                                 lc_u64 segment, int snapshot, lc_error *error);
+int lc_collection_replay_into(lc_collection_handle *collection,
+                              lc_collection_order *order,
+                              lc_collection_ids *ids, lc_u64 segment,
+                              lc_u64 offset, int snapshot, lc_u64 cutoff,
+                              lc_error *error);
+int lc_collection_lookup_id(lc_collection_handle *collection,
+                            const char *append_id,
+                            lc_pouch_collection_record *out, lc_u64 *segment,
+                            int *found, lc_error *error);
+/* Ensures a live session's projections include the canonical peer tail. A
+ * reader can observe the previous committed view while an upload is active. */
+int lc_collection_prepare(lc_collection_handle *collection, lc_error *error);
+/* Called under metadata authority; pins one canonical topology until close. */
+int lc_collection_read_pin(lc_collection_handle *collection, lc_u64 snapshot,
+                           int *fd, lc_error *error);
+int lc_collection_refresh_view(lc_collection_handle *collection,
+                               lc_error *error);
+int lc_collection_record_ref(lc_collection_handle *collection, lc_u64 segment,
+                             lc_u64 offset, int *fd, lc_u64 *fd_segment,
+                             lc_u64 *fd_end, lc_pouch_collection_record *out,
+                             lc_error *error);
+/* Resolves metadata history for a pinned read generation. The current record
+ * must already be loaded, and fd describes it. Only bounded metadata is read.
+ */
+int lc_collection_record_at(lc_collection_handle *collection, lc_u64 generation,
+                            int *fd, lc_u64 *fd_segment, lc_u64 *fd_end,
+                            lc_pouch_collection_record *record,
+                            lc_error *error);
+int lc_collection_record_body(lc_collection_handle *collection,
+                              const lc_pouch_collection_record *record, int *fd,
+                              lc_u64 *fd_segment, lc_u64 *fd_end,
+                              lc_error *error);
+int lc_collection_record_path(lc_collection_handle *collection, lc_u64 segment,
+                              char **out, char leaf[64], lc_error *error);
+int lc_collection_record_leaf(lc_u64 segment, char leaf[64], lc_error *error);
+int lc_collection_hash(const void *bytes, size_t length, unsigned char out[32],
+                       lc_error *error);
+int lc_collection_failure(lc_error *error, int code, const char *reason,
+                          const char *message);
+int lc_collection_read_method(lc_collection *self,
+                              const lc_collection_read_opts *opts,
+                              lc_sink *sink, lc_collection_read_res *out,
+                              lc_error *error);
+int lc_collection_catalog_read(const char *path, char id[LC_XID_STRING_SIZE],
+                               char name[256], lc_error *error);
+int lc_collection_catalog_write(const char *path, const char *id,
+                                const char *name, lc_error *error);
+int lc_collection_catalog_name_path(const lc_allocator *allocator,
+                                    const char *base, const char *name,
+                                    char **out, lc_error *error);
+int lc_collection_compact(lc_collection *collection, int force,
+                          int cleanup_only, lc_pouch_maintenance_result *out,
+                          lc_error *error);
+int lc_collection_expire(lc_collection *collection, lc_pouch_unix_seconds now,
+                         int *removed, lc_error *error);
+int lc_collection_expire_entry(lc_collection *collection, uint64_t position,
+                               lc_pouch_unix_seconds now,
+                               lc_collection_delete_res *out, lc_error *error);
+int lc_collection_retention_maintain(lc_collection *collection, int *dropped,
+                                     lc_pouch_maintenance_result *out,
+                                     lc_error *error);
+/* Caller owns compaction, append and metadata authority. */
+int lc_collection_cleanup_files(lc_collection_handle *collection,
+                                lc_pouch_maintenance_result *out,
+                                lc_error *error);
+enum {
+  LC_COLLECTION_COMPACT_CAPTURED = 1,
+  LC_COLLECTION_COMPACT_COPIED,
+  LC_COLLECTION_COMPACT_HEAD_PUBLISHED,
+  LC_COLLECTION_COMPACT_ORDER_PUBLISHED,
+  LC_COLLECTION_COMPACT_IDS_PUBLISHED
+};
+typedef int (*lc_collection_compact_hook_fn)(void *, lc_collection *, int,
+                                             lc_error *);
+extern lc_collection_compact_hook_fn lc_collection_compact_test_hook;
+extern void *lc_collection_compact_test_context;
+#ifdef LOCKDC_TEST_BUILD
+typedef void (*lc_collection_root_hook_fn)(void *, lc_pouch *);
+extern lc_collection_root_hook_fn lc_collection_root_test_hook;
+extern void *lc_collection_root_test_context;
+typedef int (*lc_collection_commit_hook_fn)(void *, lc_collection *,
+                                            lc_error *);
+extern lc_collection_commit_hook_fn lc_collection_commit_wait_test_hook;
+extern void *lc_collection_commit_wait_test_context;
+#endif
+int lc_collection_catalog_paths(lc_client_handle *client, const char *ns,
+                                const char *name, int create, char **base,
+                                char **catalog, lc_error *error);
+int lc_collection_catalog_bound(lc_collection_handle *collection,
+                                lc_error *error);
+int lc_collection_catalog_lock(const char *base, int *fd, lc_error *error);
+int lc_collection_open_bound(lc_client_handle *client, const char *ns,
+                             const char *name, const char *id, const char *base,
+                             const char *catalog, int create,
+                             lc_pouch_unix_seconds retention,
+                             lc_collection **out, lc_error *error);
+/* Internal maintenance borrows its existing root; public receivers retain
+ * their owning client. Both use the same storage and allocator paths. */
+int lc_collection_storage_open(lc_pouch *pouch, lc_client_handle *owner,
+                               const char *ns, const char *name, const char *id,
+                               const char *base, const char *catalog,
+                               int create, lc_pouch_unix_seconds retention,
+                               lc_collection **out, lc_error *error);
+
+#endif

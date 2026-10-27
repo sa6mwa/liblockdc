@@ -134,6 +134,7 @@ typedef struct https_expectation {
   size_t response_body_chunk_size;
   const char *const *response_trailers;
   size_t response_trailer_count;
+  const char *forbidden_header;
 } https_expectation;
 
 typedef struct https_tls_material {
@@ -1276,6 +1277,13 @@ static void verify_expectation(https_testserver *server, size_t index,
       free(decoded_body);
       return;
     }
+  }
+  if (expectation->forbidden_header != NULL &&
+      strstr(headers, expectation->forbidden_header) != NULL) {
+    set_failure(server, "unexpected header substring: %s",
+                expectation->forbidden_header);
+    free(decoded_body);
+    return;
   }
   if (expectation->expect_empty_body &&
       (body_view != NULL && body_view[0] != '\0')) {
@@ -6738,7 +6746,7 @@ static void test_public_lease_save_uses_mapped_lonejson_upload(void **state) {
   assert_non_null(lease);
 
   value_doc.value = 2;
-  rc = lc_lease_save(lease, &test_value_map, &value_doc, &error);
+  rc = lc_lease_save(lease, &test_value_map, &value_doc, NULL, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lease->version, 5L);
   assert_string_equal(lease->state_etag, "etag-2");
@@ -6818,7 +6826,7 @@ test_public_lease_save_ignores_response_limit_for_request_body(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_non_null(lease);
 
-  rc = lc_lease_save(lease, &test_large_payload_map, &value_doc, &error);
+  rc = lc_lease_save(lease, &test_large_payload_map, &value_doc, NULL, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lease->version, 5L);
   assert_string_equal(lease->state_etag, "etag-2");
@@ -7599,7 +7607,7 @@ test_public_lease_save_fails_on_state_etag_allocation(void **state) {
 
   value_doc.value = 2;
   g_fail_lc_client_strdup_on_call = 1;
-  rc = lc_lease_save(lease, &test_value_map, &value_doc, &error);
+  rc = lc_lease_save(lease, &test_value_map, &value_doc, NULL, &error);
   assert_int_equal(rc, LC_ERR_NOMEM);
   assert_int_equal(error.code, LC_ERR_NOMEM);
   assert_string_equal(error.message,
@@ -7924,8 +7932,203 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
   https_tls_material_cleanup(&material);
 }
 
+static void
+test_public_retention_remote_options_and_observations(void **state) {
+  const char *json[] = {"Content-Type: application/json"};
+  const char *ttl[] = {"X-State-Retention-Seconds: 60"};
+  const char *clear[] = {"X-State-Retention-Seconds: 0"};
+  const char *pending[] = {"Content-Type: application/json",
+                           "x-state-retention-supported: \t1\t "};
+  const char *no_expiry[] = {"Content-Type: application/json",
+                             "X-State-Retention-Expires-At-Unix: 0"};
+  const char *unsupported[] = {"Content-Type: application/json",
+                               "X-State-Retention-Supported: 0"};
+  const char *uncertain[] = {"Content-Type: application/json",
+                             "X-State-Retention-Expires-At-Unix: -1"};
+  const char *expiry[] = {"Content-Type: application/json", "X-Key-Version: 8",
+                          "X-State-Retention-Expires-At-Unix: 2147483648",
+                          "X-State-Retention-Expires-At-Unix: 2147483648",
+                          "X-State-Retention-Supported: 1"};
+  https_expectation expectations[] = {
+      {"POST", "/v1/update?key=resource%2F1&namespace=transport-ns", ttl, 1,
+       NULL, 0, 0, 200, pending, 2,
+       "{\"new_version\":5,\"new_state_etag\":\"etag-2\",\"bytes\":11}"},
+      {"POST", "/v1/update?key=resource%2F1&namespace=transport-ns", clear, 1,
+       NULL, 0, 0, 200, no_expiry, 2,
+       "{\"new_version\":6,\"new_state_etag\":\"etag-3\",\"bytes\":11}"},
+      {"POST", "/v1/mutate?key=resource%2F1&namespace=transport-ns", ttl, 1,
+       NULL, 0, 0, 200, unsupported, 2,
+       "{\"new_version\":7,\"new_state_etag\":\"etag-4\",\"bytes\":11}"},
+      {"POST", "/v1/metadata?key=resource%2F1&namespace=transport-ns", clear, 1,
+       NULL, 0, 0, 200, json, 1,
+       "{\"namespace\":\"transport-ns\",\"key\":\"resource/"
+       "1\",\"version\":8,\"metadata\":{}}"},
+      {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns", NULL, 0, NULL,
+       0, 1, 200, expiry, 5, "{\"value\":1}"},
+      {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1", NULL,
+       0, NULL, 0, 1, 200, unsupported, 2, "{\"value\":1}"},
+      {"POST", "/v1/update?key=resource%2F1&namespace=transport-ns", ttl, 1,
+       NULL, 0, 0, 200, uncertain, 2,
+       "{\"new_version\":9,\"new_state_etag\":\"etag-uncertain\",\"bytes\":"
+       "11}"},
+      {"POST", "/v1/update?key=resource%2F1&namespace=transport-ns", NULL, 0,
+       NULL, 0, 0, 200, json, 1,
+       "{\"new_version\":9,\"new_state_etag\":\"etag-5\",\"bytes\":11}"},
+  };
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client = NULL;
+  lc_lease *lease;
+  lc_update_opts options = {0};
+  lc_mutate_req mutate = {0};
+  lc_metadata_req metadata = {0};
+  const char *mutations[] = {"value=2"};
+  test_value_doc document = {2};
+  lc_get_opts public_read = {1};
+  lc_get_res result = {0};
+  lc_source *source = NULL;
+  lc_sink *sink = NULL;
+  lc_error error;
+  (void)state;
+  lc_error_init(&error);
+  expectations[7].forbidden_header = "X-State-Retention-Seconds:";
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(https_testserver_start(&server, &material, expectations, 8));
+  server.allow_response_write_failure = 1;
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  assert_int_equal(lc_client_open(&config, &client, &error), LC_OK);
+  lease = lc_lease_new((lc_client_handle *)client, "transport-ns", "resource/1",
+                       "owner", "lease-1", "txn-1", 11, 4, "etag-1", NULL);
+  assert_non_null(lease);
+  options.has_retention_seconds = 1;
+  options.retention_seconds = 60;
+  assert_int_equal(
+      lc_lease_save(lease, &test_value_map, &document, &options, &error),
+      LC_OK);
+  assert_int_equal(lease->retention_support, LC_STATE_RETENTION_SUPPORTED);
+  assert_false(lease->has_retention_expires_at_unix);
+  options.retention_seconds = 0;
+  assert_int_equal(lc_source_from_memory("{\"value\":2}", 11, &source, &error),
+                   LC_OK);
+  assert_int_equal(lc_lease_update(lease, source, &options, &error), LC_OK);
+  lc_source_close(source);
+  assert_true(lease->has_retention_expires_at_unix);
+  assert_int_equal(lease->retention_expires_at_unix, 0);
+  mutate.has_retention_seconds = 1;
+  mutate.retention_seconds = 60;
+  mutate.mutations = mutations;
+  mutate.mutation_count = 1;
+  assert_int_equal(lc_lease_mutate(lease, &mutate, &error), LC_OK);
+  assert_int_equal(lease->retention_support, LC_STATE_RETENTION_UNSUPPORTED);
+  assert_false(lease->has_retention_expires_at_unix);
+  metadata.has_retention_seconds = 1;
+  assert_int_equal(lc_lease_metadata(lease, &metadata, &error), LC_OK);
+  assert_int_equal(lease->retention_support, LC_STATE_RETENTION_UNKNOWN);
+  assert_false(lease->has_retention_expires_at_unix);
+  assert_int_equal(lc_sink_to_memory(&sink, &error), LC_OK);
+  assert_int_equal(lc_lease_get(lease, sink, NULL, &result, &error), LC_OK);
+  assert_int_equal(result.retention_support, LC_STATE_RETENTION_SUPPORTED);
+  assert_true(result.has_retention_expires_at_unix);
+  assert_int_equal(result.retention_expires_at_unix, INT64_C(2147483648));
+  lc_get_res_cleanup(&result);
+  lc_sink_close(sink);
+  assert_int_equal(lc_sink_to_memory(&sink, &error), LC_OK);
+  assert_int_equal(lc_lease_get(lease, sink, &public_read, &result, &error),
+                   LC_OK);
+  assert_int_equal(result.retention_support, LC_STATE_RETENTION_UNSUPPORTED);
+  assert_false(result.has_retention_expires_at_unix);
+  assert_int_equal(lease->retention_support, LC_STATE_RETENTION_SUPPORTED);
+  assert_int_equal(lease->retention_expires_at_unix, INT64_C(2147483648));
+  lc_get_res_cleanup(&result);
+  lc_sink_close(sink);
+  options.retention_seconds = 60;
+  assert_int_equal(
+      lc_lease_save(lease, &test_value_map, &document, &options, &error),
+      LC_ERR_PROTOCOL);
+  assert_int_equal(lease->retention_support, LC_STATE_RETENTION_UNKNOWN);
+  assert_false(lease->has_retention_expires_at_unix);
+  lc_error_cleanup(&error);
+  options.has_retention_seconds = 0;
+  options.retention_seconds = -1;
+  assert_int_equal(
+      lc_lease_save(lease, &test_value_map, &document, &options, &error),
+      LC_OK);
+  assert_int_equal(lease->retention_support, LC_STATE_RETENTION_UNKNOWN);
+  assert_false(lease->has_retention_expires_at_unix);
+  lc_lease_close(lease);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void test_retention_remote_rejects_invalid_headers(void **state) {
+  const char *bad[] = {
+      "X-State-Retention-Supported: 2",
+      "X-State-Retention-Supported: true",
+      "X-State-Retention-Supported:",
+      "X-State-Retention-Expires-At-Unix: -1",
+      "X-State-Retention-Expires-At-Unix: +1",
+      "X-State-Retention-Expires-At-Unix: 1.5",
+      "X-State-Retention-Expires-At-Unix: 9223372036854775808",
+      "X-State-Retention-Supported: 1\r\nX-State-Retention-Supported: 0",
+      "X-State-Retention-Expires-At-Unix: "
+      "1\r\nX-State-Retention-Expires-At-Unix: 2",
+      "X-State-Retention-Supported: 0\r\nX-State-Retention-Expires-At-Unix: 0",
+      "X-State-Retention-Expires-At-Unix: 0\r\nX-State-Retention-Supported: 0",
+  };
+  https_tls_material material;
+  size_t i;
+  (void)state;
+  assert_true(https_tls_material_init(&material, 1));
+  for (i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+    const char *headers[] = {"Content-Type: application/json", bad[i]};
+    https_expectation expectations[] = {
+        {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1",
+         NULL, 0, NULL, 0, 1, 200, headers, 2, "{}"},
+        {"GET", "/v1/describe?key=resource%2F1&namespace=transport-ns", NULL, 0,
+         NULL, 0, 1, 200, headers, 2, "{}"},
+    };
+    https_testserver server;
+    lc_client_config config;
+    lc_client *client = NULL;
+    lc_get_opts options = {1};
+    lc_get_res result = {0};
+    lc_describe_req describe = {"transport-ns", "resource/1"};
+    lc_describe_res described = {0};
+    lc_sink *sink = NULL;
+    lc_error error;
+    lc_error_init(&error);
+    assert_true(https_testserver_start(&server, &material, expectations, 2));
+    server.allow_response_write_failure = 1;
+    init_public_client_config(&config, server.port, material.client_bundle_path,
+                              NULL);
+    assert_int_equal(lc_client_open(&config, &client, &error), LC_OK);
+    assert_int_equal(lc_sink_to_memory(&sink, &error), LC_OK);
+    assert_int_equal(
+        lc_get(client, "resource/1", &options, sink, &result, &error),
+        LC_ERR_PROTOCOL);
+    lc_sink_close(sink);
+    lc_get_res_cleanup(&result);
+    lc_error_cleanup(&error);
+    assert_int_equal(lc_describe(client, &describe, &described, &error),
+                     LC_ERR_PROTOCOL);
+    lc_describe_res_cleanup(&described);
+    lc_error_cleanup(&error);
+    lc_client_close(client);
+    https_testserver_stop(&server);
+    assert_server_ok(&server);
+  }
+  https_tls_material_cleanup(&material);
+}
+
 int main(int argc, char **argv) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test(test_public_retention_remote_options_and_observations),
+      cmocka_unit_test(test_retention_remote_rejects_invalid_headers),
       cmocka_unit_test(test_client_open_rejects_bundle_without_ca),
       cmocka_unit_test(test_client_open_accepts_memory_bundle_source),
       cmocka_unit_test(

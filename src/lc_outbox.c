@@ -1692,7 +1692,7 @@ static int lc_outbox_note_checkpoint_present(lc_outbox_job_handle *job,
   prior_commit_mode = ((lc_lease_handle *)job->lease)->pouch_commit_immediately;
   ((lc_lease_handle *)job->lease)->pouch_commit_immediately =
       LC_POUCH_COMMIT_PARENT_IMMEDIATELY;
-  rc = lc_lease_save(job->lease, &lc_outbox_record_map, &record, error);
+  rc = lc_lease_save(job->lease, &lc_outbox_record_map, &record, NULL, error);
   ((lc_lease_handle *)job->lease)->pouch_commit_immediately = prior_commit_mode;
   if (rc == LC_OK)
     job->record.checkpoint_present = 1;
@@ -1714,7 +1714,7 @@ static int lc_outbox_save_completed_parent(lc_outbox_job_handle *job,
     ((lc_lease_handle *)job->lease)->pouch_commit_immediately =
         LC_POUCH_COMMIT_PARENT_IMMEDIATELY;
   }
-  return lc_lease_save(job->lease, &lc_outbox_record_map, record, error);
+  return lc_lease_save(job->lease, &lc_outbox_record_map, record, NULL, error);
 }
 
 /* The completed parent is already durable and its exact-key marker was
@@ -2946,7 +2946,8 @@ static int lc_outbox_stage_command(lc_client_handle *client, lc_lease *lease,
   record.operation_id = (char *)request->operation_id;
   record.accepted_at_unix = (lonejson_int64)now;
   record.state = "pending";
-  return lc_lease_save(lease, &lc_outbox_command_record_map, &record, error);
+  return lc_lease_save(lease, &lc_outbox_command_record_map, &record, NULL,
+                       error);
 }
 
 static int lc_outbox_stage_inbox(lc_outbox_handle *outbox, lc_lease *lease,
@@ -2981,7 +2982,8 @@ static int lc_outbox_stage_inbox(lc_outbox_handle *outbox, lc_lease *lease,
     return rc;
   record.accepted_at_unix = (lonejson_int64)now;
   record.retention_id = marker_id[0] == '\0' ? NULL : marker_id;
-  return lc_lease_save(lease, &lc_outbox_inbox_record_map, &record, error);
+  return lc_lease_save(lease, &lc_outbox_inbox_record_map, &record, NULL,
+                       error);
 }
 
 static int lc_outbox_nullable_string_equal(const char *left,
@@ -3381,7 +3383,7 @@ lc_outbox_stage_command_terminal(lc_outbox_transaction_handle *transaction,
   if (rc == LC_OK) {
     updated.retention_id = marker_id[0] == '\0' ? NULL : marker_id;
     rc = lc_lease_save(transaction->command_lease,
-                       &lc_outbox_command_record_map, &updated, error);
+                       &lc_outbox_command_record_map, &updated, NULL, error);
   }
   if (rc == LC_OK && result->body != NULL) {
     lc_attach_req_init(&attach);
@@ -3451,7 +3453,7 @@ static int lc_outbox_stage_outbox(lc_lease *lease, const lc_outbox_entry *entry,
   record.replay_count = 0;
   record.dead_lettered_at_unix = 0;
   record.replayed_at_unix = 0;
-  rc = lc_lease_save(lease, &lc_outbox_record_map, &record, error);
+  rc = lc_lease_save(lease, &lc_outbox_record_map, &record, NULL, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -3540,7 +3542,7 @@ static int lc_outbox_publish_claim_deadline(lc_outbox_job_handle *job,
     record.replay_count = job->record.replay_count;
     record.claim_expires_at_unix = (lonejson_int64)expires_at_unix;
     rc = lc_lease_save(lease, &lc_outbox_claim_deadline_record_map, &record,
-                       error);
+                       NULL, error);
   }
   if (rc == LC_OK) {
     lc_release_req_init(&release);
@@ -4055,7 +4057,8 @@ static int lc_outbox_job_terminal(lc_outbox_job *self, const char *state,
       if (rc == LC_OK)
         completed_parent_durable = 1;
     } else {
-      rc = lc_lease_save(job->lease, &lc_outbox_record_map, &record, error);
+      rc = lc_lease_save(job->lease, &lc_outbox_record_map, &record, NULL,
+                         error);
     }
     if (rc != LC_OK)
       return rc;
@@ -4471,8 +4474,8 @@ lc_outbox_restore_unhanded_stateful_claim(lc_outbox_job_handle *job) {
   record.claim_expires_at_unix = 0;
   if (record.attempt_count > 0)
     --record.attempt_count;
-  if (lc_lease_save(job->lease, &lc_outbox_record_map, &record, &ignored) ==
-      LC_OK) {
+  if (lc_lease_save(job->lease, &lc_outbox_record_map, &record, NULL,
+                    &ignored) == LC_OK) {
     lc_release_req_init(&release);
     if (lc_lease_release(job->lease, &release, &ignored) == LC_OK) {
       job->lease = NULL;
@@ -4608,7 +4611,7 @@ static int lc_outbox_claim_outbox(lc_outbox_handle *outbox, const char *key,
           dead_letter_marker_id, &dead_letter_due_at_unix,
           &dead_letter_scheduled, error);
       if (rc == LC_OK)
-        rc = lc_lease_save(lease, &lc_outbox_record_map, &record, error);
+        rc = lc_lease_save(lease, &lc_outbox_record_map, &record, NULL, error);
       if (rc == LC_OK && dead_letter_scheduled) {
         lc_outbox_schedule_retention(outbox, dead_letter_due_at_unix,
                                      (lc_unix_seconds)now, 1);
@@ -4673,7 +4676,7 @@ static int lc_outbox_claim_outbox(lc_outbox_handle *outbox, const char *key,
             &dead_letter_scheduled, error);
       }
       if (rc == LC_OK)
-        rc = lc_lease_save(lease, &lc_outbox_record_map, &record, error);
+        rc = lc_lease_save(lease, &lc_outbox_record_map, &record, NULL, error);
       if (rc == LC_OK && dead_letter_scheduled) {
         lc_outbox_schedule_retention(outbox, dead_letter_due_at_unix,
                                      (lc_unix_seconds)now, 1);
@@ -4732,7 +4735,7 @@ static int lc_outbox_claim_outbox(lc_outbox_handle *outbox, const char *key,
       }
     }
     if (rc == LC_OK)
-      rc = lc_lease_save(lease, &lc_outbox_record_map, &record, error);
+      rc = lc_lease_save(lease, &lc_outbox_record_map, &record, NULL, error);
     if (rc == LC_OK) {
       lc_release_req release;
       lc_release_req_init(&release);
@@ -5615,6 +5618,10 @@ static void lc_outbox_participant_refresh(lc_outbox_participant_handle *p) {
   p->pub.fencing_token = p->lease->fencing_token;
   p->pub.version = p->lease->version;
   p->pub.state_etag = p->lease->state_etag;
+  p->pub.retention_support = p->lease->retention_support;
+  p->pub.has_retention_expires_at_unix =
+      p->lease->has_retention_expires_at_unix;
+  p->pub.retention_expires_at_unix = p->lease->retention_expires_at_unix;
 }
 
 static void lc_outbox_participant_invalidate(lc_outbox_participant_handle *p) {
@@ -5629,6 +5636,9 @@ static void lc_outbox_participant_invalidate(lc_outbox_participant_handle *p) {
   p->pub.fencing_token = 0L;
   p->pub.version = 0;
   p->pub.state_etag = NULL;
+  p->pub.retention_support = LC_STATE_RETENTION_UNKNOWN;
+  p->pub.has_retention_expires_at_unix = 0;
+  p->pub.retention_expires_at_unix = 0;
 }
 
 static void lc_outbox_transaction_remove_participant(
@@ -5683,10 +5693,13 @@ static int lc_outbox_participant_get_impl(lc_outbox_participant *self,
                                           lc_sink *dst, const lc_get_opts *opts,
                                           lc_get_res *out, lc_error *error) {
   lc_outbox_participant_handle *p = (lc_outbox_participant_handle *)self;
+  int rc;
   if (p == NULL || p->lease == NULL)
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "outbox participant is closed", NULL, NULL, NULL);
-  return lc_lease_get(p->lease, dst, opts, out, error);
+  rc = lc_lease_get(p->lease, dst, opts, out, error);
+  lc_outbox_participant_refresh(p);
+  return rc;
 }
 static int lc_outbox_participant_update_impl(lc_outbox_participant *self,
                                              lc_source *src,
@@ -7857,7 +7870,7 @@ static int lc_outbox_replay_dead_letter_on_client(lc_outbox_handle *outbox,
   record.dead_letter_retention_id = NULL;
   ++record.replay_count;
   record.replayed_at_unix = (lonejson_int64)now;
-  rc = lc_lease_save(lease, &lc_outbox_record_map, &record, error);
+  rc = lc_lease_save(lease, &lc_outbox_record_map, &record, NULL, error);
 #ifdef LOCKDC_TEST_BUILD
   if (rc == LC_OK &&
       lc_outbox_test_before_dead_letter_replay_release_hook != NULL) {
