@@ -296,6 +296,7 @@ else()
 endif()
 
 list(APPEND test_env "LOCKDC_LUAROCKS_WORKDIR=${lua_rock_workdir}")
+list(APPEND test_env "LOCKDC_LUA_SMOKE_ROOT=${lua_tree_dir}/collection-writer.pouch")
 if(LOCKDC_LUA_PACKAGE_PATH MATCHES "[.]rockspec$")
     list(APPEND test_env "LOCKDC_LUAROCKS_BUILD_ROOT=${lua_build_root}")
 endif()

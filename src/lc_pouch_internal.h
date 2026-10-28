@@ -195,6 +195,7 @@ struct lc_pouch {
   char *query_fallback_engine;
   int query_indexing_enabled;
   char *compression;
+  int compression_explicit;
   lc_pouch_crypto *crypto;
   char *crypto_key_file;
   pslog_logger *base_logger;

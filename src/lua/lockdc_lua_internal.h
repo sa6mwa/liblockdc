@@ -15,6 +15,7 @@ int lcdc_sink_from_value(lua_State *L, int index, lc_sink **out,
 int lcdc_push_status_error(lua_State *L, int rc, const lc_error *error);
 /* Exact decimal fields across C89 targets, including 32-bit unsigned long. */
 void lcdc_set_u64_decimal(lua_State *L, const char *key, uint64_t value);
+void lcdc_set_version_field(lua_State *L, const char *name, lc_version value);
 void lcdc_set_state_retention(lua_State *L, lc_state_retention_support support,
                               int has_expiry, lc_unix_seconds expiry);
 void lcdc_collections_install(lua_State *L);

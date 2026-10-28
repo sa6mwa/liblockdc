@@ -250,6 +250,8 @@ static int reset_retention_clock(void **state) {
   lc_pouch_test_queue_time_context = NULL;
   lc_pouch_test_after_txn_decision_hook = NULL;
   lc_pouch_test_after_txn_decision_context = NULL;
+  lc_pouch_test_before_txn_replay_hook = NULL;
+  lc_pouch_test_before_txn_replay_context = NULL;
   lc_pouch_test_cleanup_fsync_hook = NULL;
   lc_pouch_test_cleanup_fsync_context = NULL;
   lc_pouch_test_retention_hook = NULL;
@@ -1900,6 +1902,197 @@ static void assert_public_retention(cleanup_fixture *fixture,
   lc_get_res_cleanup(&result);
 }
 
+static int count_native_decision(const lc_pouch_state_visit_entry *entry,
+                                 void *context, lc_error *error) {
+  size_t *count = context;
+  (void)entry;
+  (void)error;
+  ++*count;
+  return LC_OK;
+}
+
+static void
+test_native_retention_release_leaves_no_startup_backlog(void **state) {
+  cleanup_fixture *fixture = *state;
+  lc_pouch_settings settings;
+  lc_update_opts update = {0};
+  lc_metadata_req metadata = {0};
+  lc_release_req release = {0};
+  lc_unix_seconds deadline = 1050;
+  long fencing = fixture->original_fencing;
+  size_t decisions;
+  for (int durable = 0; durable < 2; ++durable) {
+    lc_client_close(fixture->client);
+    fixture->client = NULL;
+    lc_pouch_settings_init(&settings);
+    settings.set_mask =
+        LC_POUCH_SETTING_DURABLE_SYNC | LC_POUCH_SETTING_SINGLE_WRITER;
+    settings.durable_sync = durable;
+    settings.single_writer = 0;
+    fixture->config.pouch_settings = &settings;
+    assert_int_equal(
+        lc_client_open(&fixture->config, &fixture->client, &fixture->error),
+        LC_OK);
+    fixture->pouch = ((lc_client_handle *)fixture->client)->pouch;
+    for (unsigned int i = 0; i < 128; ++i) {
+      fixture->clock.now = 1100 + durable * 128 + i;
+      acquire_cleanup_fixture_lease(fixture, "order", NULL, 100,
+                                    &fixture->lease);
+      assert_true(fixture->lease->fencing_token > fencing);
+      fencing = fixture->lease->fencing_token;
+      update.has_retention_seconds = metadata.has_retention_seconds = 1;
+      update.retention_seconds = metadata.retention_seconds = 60;
+      release.rollback = i % 3 == 2;
+      if (i % 3 == 0)
+        public_retention_write(fixture, &update);
+      else
+        assert_int_equal(fixture->lease->metadata(fixture->lease, &metadata,
+                                                  &fixture->error),
+                         LC_OK);
+      if (i % 4 == 0) {
+        lc_release_op operation;
+        lc_release_res released = {0};
+        lc_release_op_init(&operation);
+        operation.lease.ns = fixture->lease->ns;
+        operation.lease.key = fixture->lease->key;
+        operation.lease.lease_id = fixture->lease->lease_id;
+        operation.lease.txn_id = fixture->lease->txn_id;
+        operation.lease.fencing_token = fixture->lease->fencing_token;
+        operation.rollback = release.rollback;
+        assert_int_equal(fixture->client->release(fixture->client, &operation,
+                                                  &released, &fixture->error),
+                         LC_OK);
+        lc_release_res_cleanup(&released);
+        fixture->lease->close(fixture->lease);
+      } else
+        assert_int_equal(
+            fixture->lease->release(fixture->lease, &release, &fixture->error),
+            LC_OK);
+      fixture->lease = NULL;
+      if (!release.rollback)
+        deadline = fixture->clock.now + 60;
+    }
+    decisions = 0;
+    assert_int_equal(lc_pouch_state_visit(fixture->pouch, ".txns",
+                                          count_native_decision, &decisions,
+                                          &fixture->error),
+                     LC_OK);
+    assert_int_equal(decisions,
+                     0); /* No replay/deletion work on the next open. */
+    lc_client_close(fixture->client);
+    fixture->client = NULL;
+    assert_int_equal(
+        lc_client_open(&fixture->config, &fixture->client, &fixture->error),
+        LC_OK);
+    fixture->pouch = ((lc_client_handle *)fixture->client)->pouch;
+    assert_public_retention(fixture, deadline);
+    assert_cleanup_state(fixture, 1, 1);
+  }
+  fixture->config.pouch_settings = NULL;
+}
+
+static void test_native_retirement_failure_preserves_recovery(void **state) {
+  cleanup_fixture *fixture = *state;
+  lc_metadata_req metadata = {0};
+  lc_pouch_state_read_result decision = {0};
+  char id[LC_XID_STRING_SIZE];
+  metadata.has_retention_seconds = 1;
+  metadata.retention_seconds = 60;
+  for (int phase = 0; phase < 2; ++phase) {
+    fixture->clock.now = 1010 + phase * 200;
+    acquire_cleanup_fixture_lease(fixture, "order", NULL, 100, &fixture->lease);
+    strcpy(id, fixture->lease->txn_id);
+    assert_int_equal(
+        fixture->lease->metadata(fixture->lease, &metadata, &fixture->error),
+        LC_OK);
+    if (phase == 0)
+      lc_pouch_test_before_txn_replay_hook = lose_decision_ack;
+    else
+      lc_pouch_test_cleanup_fsync_hook = lose_decision_ack;
+    assert_int_equal(
+        fixture->lease->release(fixture->lease, NULL, &fixture->error),
+        LC_ERR_TRANSPORT);
+    lc_pouch_test_before_txn_replay_hook = NULL;
+    lc_pouch_test_cleanup_fsync_hook = NULL;
+    lc_error_cleanup(&fixture->error);
+    assert_int_equal(lc_pouch_state_read_metadata(fixture->pouch, ".txns", id,
+                                                  &decision, &fixture->error),
+                     LC_OK);
+    assert_true(decision.found);
+    lc_pouch_state_read_result_cleanup(NULL, &decision);
+    fixture->lease->close(fixture->lease);
+    fixture->lease = NULL;
+    fixture->clock.now += 40;
+    lc_client_close(fixture->client);
+    fixture->client = NULL;
+    assert_int_equal(
+        lc_client_open(&fixture->config, &fixture->client, &fixture->error),
+        LC_OK);
+    fixture->pouch = ((lc_client_handle *)fixture->client)->pouch;
+    assert_public_retention(fixture, 1070 + phase * 200);
+    assert_cleanup_state(fixture, 1, 1);
+    assert_int_equal(lc_pouch_state_read_metadata(fixture->pouch, ".txns", id,
+                                                  &decision, &fixture->error),
+                     LC_OK);
+    assert_false(decision.found);
+    lc_pouch_state_read_result_cleanup(NULL, &decision);
+  }
+}
+
+static void
+test_native_retirement_preserves_explicit_and_joined_outcomes(void **state) {
+  cleanup_fixture *fixture = *state;
+  lc_metadata_req metadata = {0};
+  lc_release_req release = {0};
+  lc_txn_replay_req request;
+  lc_txn_replay_res result = {0};
+  char id[LC_XID_STRING_SIZE];
+  metadata.has_retention_seconds = 1;
+  metadata.retention_seconds = 60;
+  for (int mode = 0; mode < 4; ++mode) {
+    assert_int_equal(lc_xid_new(id, &fixture->error), LC_OK);
+    acquire_cleanup_fixture_lease(fixture, "order", mode >= 2 ? NULL : id, 100,
+                                  &fixture->lease);
+    if (mode == 2) {
+      strcpy(id, fixture->lease->txn_id);
+      acquire_cleanup_fixture_lease(fixture, "other", id, 100,
+                                    &fixture->other_lease);
+    }
+    assert_int_equal(
+        fixture->lease->metadata(fixture->lease, &metadata, &fixture->error),
+        LC_OK);
+    release.rollback = mode == 1;
+    if (mode == 3) {
+      lc_txn_decision_req commit;
+      lc_txn_decision_res committed = {0};
+      strcpy(id, fixture->lease->txn_id);
+      lc_txn_decision_req_init(&commit);
+      commit.txn_id = id;
+      assert_int_equal(
+          lc_txn_commit(fixture->client, &commit, &committed, &fixture->error),
+          LC_OK);
+      lc_txn_decision_res_cleanup(&committed);
+    }
+    assert_int_equal(
+        fixture->lease->release(fixture->lease, &release, &fixture->error),
+        LC_OK);
+    fixture->lease = NULL;
+    if (mode == 2) {
+      assert_int_equal(fixture->other_lease->release(fixture->other_lease, NULL,
+                                                     &fixture->error),
+                       LC_OK);
+      fixture->other_lease = NULL;
+    }
+    lc_txn_replay_req_init(&request);
+    request.txn_id = id;
+    assert_int_equal(
+        lc_txn_replay(fixture->client, &request, &result, &fixture->error),
+        LC_OK);
+    assert_string_equal(result.state, mode == 1 ? "rollback" : "commit");
+    lc_txn_replay_res_cleanup(&result);
+  }
+}
+
 static void
 test_public_retention_commit_clock_and_omitted_updates(void **state) {
   cleanup_fixture *fixture = *state;
@@ -2198,6 +2391,15 @@ int main(void) {
       cmocka_unit_test_teardown(
           test_retention_idle_sync_failure_preserves_discovery,
           reset_retention_clock),
+      cmocka_unit_test_setup_teardown(
+          test_native_retention_release_leaves_no_startup_backlog,
+          setup_cleanup_fixture, teardown_cleanup_fixture),
+      cmocka_unit_test_setup_teardown(
+          test_native_retirement_failure_preserves_recovery,
+          setup_cleanup_fixture, teardown_cleanup_fixture),
+      cmocka_unit_test_setup_teardown(
+          test_native_retirement_preserves_explicit_and_joined_outcomes,
+          setup_cleanup_fixture, teardown_cleanup_fixture),
       cmocka_unit_test_setup_teardown(
           test_public_retention_expired_state_can_be_extended_and_queried,
           setup_cleanup_fixture, teardown_cleanup_fixture),

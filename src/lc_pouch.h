@@ -74,6 +74,9 @@ typedef struct lc_pouch_open_options {
   const char *crypto_key;
   const char *crypto_key_file;
   int crypto_generate_key_file;
+  /** NULL inherits an existing root's mode, or none for a new root. An explicit
+   * none/zlib requests offline conversion when it differs; active writers
+   * prevent conversion and the open adopts the stored mode. */
   const char *compression;
   pslog_logger *logger;
   /**
@@ -354,6 +357,8 @@ void lc_pouch_close(lc_pouch *pouch);
 int lc_pouch_abort(lc_pouch *pouch, lc_error *error);
 /** Returns whether this handle uses shared-root mutation coordination. */
 int lc_pouch_supports_concurrent_writes(const lc_pouch *pouch);
+/** Borrowed resolved storage mode, including inheritance or writer fallback. */
+const char *lc_pouch_compression_mode(const lc_pouch *pouch);
 /** Copies aggregate group-commit diagnostics into `out`. */
 int lc_pouch_fsync_stats_read(lc_pouch *pouch, lc_pouch_fsync_stats *out,
                               lc_error *error);

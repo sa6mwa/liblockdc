@@ -275,7 +275,14 @@ local client, err = lockdc.open({
 })
 ```
 
-The supported compression values are `"none"` and `"zlib"`. Pouch remains
+The supported compression values are `"none"` and `"zlib"`. Omitting
+`pouch.compression` inherits the existing root's mode; a new root defaults to
+none. Explicitly selecting a different mode converts the entire root before
+`open` returns, with warning/info logs at start/completion. Competing shared
+writers prevent conversion: open warns and uses the stored mode. Conversion
+errors return the normal structured open error. See
+[compression changes on open](pouch-compression.md) for recovery and disk-space
+requirements. Pouch remains
 exclusive single-writer by default; opening another writer for the same root
 returns the normal structured `lockdc.open` error. Set
 `pouch = { single_writer = false }` where shared writers are explicitly
@@ -360,7 +367,7 @@ numeric status `8` (`LC_ERR_UNSUPPORTED` in C). The
 [collection contract](collections.md) also defines the
 future server interface. Collections do not enlist in XA transactions.
 
-`client:create_collection({namespace=..., name=..., retention_seconds=...})`
+`client:create_collection({namespace=..., name=..., retention_seconds=..., max_entries="1000"})`
 returns a new bound receiver; an existing name is a conflict.
 `client:open_collection({namespace=..., name=...})` opens without creating or
 changing retention. Omit `namespace` to select the client default. Creation
@@ -369,7 +376,9 @@ assigns a collection ID; drop/recreation invalidates old receivers and cursors.
 order without entry bodies. The visitor accepts a description by returning
 `true` or nothing. `client:collection_capabilities()` reports current and future
 selection support. Pouch currently enables `collections`, `lql_filter`, `resume`,
-`checkpoint`, `ranges`, and `first_n`; `last_n` and `position_selection` are false.
+`checkpoint`, `ranges`, `first_n`, `count_retention`, `append_writer`, and
+`append_collection_retention`; `last_n` and
+`position_selection` are false.
 A remote client's capability query returns all false without a network request;
 other collection operations are unsupported. Unknown selection options are
 rejected rather than ignored.
@@ -377,8 +386,9 @@ rejected rather than ignored.
 | Collection method | Result |
 | --- | --- |
 | `describe()` | Namespace, name, collection ID, upper position, live count, indexing and collection retention |
-| `metadata({retention_seconds=...})` | Updated collection description |
-| `append({append_id=..., retention_seconds=...}, source)` | Position, ETag, bytes, duplicate/deleted and entry retention facts |
+| `metadata({retention_seconds=..., max_entries="1000"})` | Updated collection description |
+| `append({append_id=..., retention_seconds=..., collection_retention_seconds=...}, source)` | Position, ETag, bytes, duplicate/deleted and retention facts |
+| `append_begin(request)` | Owned raw-JSON writer; same request as `append`, without a source |
 | `append_status(append_id)` | `state="absent"`, `"committed"`, or `"deleted"`; assigned identities include an `entry` table |
 | `entry_metadata(position, {retention_seconds=...})` | Entry facts after a body-preserving retention change |
 | `read(options, sink)` | `nil, result`; on failure `nil, error, code, partial_result` |
@@ -394,9 +404,42 @@ integer seconds replace it from commit. New objects default to no expiry.
 Observations return `retention_support` and, when known,
 `retention_expires_at_unix`, including zero for no expiry.
 
+Both append forms accept optional `collection_retention_seconds`: omission
+preserves the parent deadline, zero clears it, and positive integer seconds
+reset it from the new append's commit timestamp. Only new membership renews;
+identical retries, reads and failures before publication do not. Results/status
+include `collection_retention_expires_at_unix` when the original append selected
+the directive, even if the parent has since changed. Use `describe()` for its
+current deadline. There is no default inactivity duration in liblockdc.
+
+An append writer accepts `writer:write(raw_json_string)` repeatedly, then
+`writer:commit()` or `writer:abort()`, and always `writer:close()`. `write` and
+`abort` return true on success; `commit` returns the normal append result.
+Failures return `nil, error, code`. Empty writes are not EOF. Strings are
+borrowed for each call; the binding does not decode JSON, buffer a whole value,
+or introduce a producer thread. No collection lock is held between calls.
+Writers retain their owners independently of public collection/client close.
+Commit is terminal, abort is idempotent, and close/GC never publishes. After
+an uncertain commit error, use `append_status`, including when constructing
+the Lua result failed after native publication. See
+[incremental appends](collection-writer.md) for lifecycle and storage costs.
+
 Collection retention expires the collection itself with all remaining entries.
 Entry retention expires only that state. An empty collection remains until its
-own expiry or an explicit drop. Appends and retries do not renew either policy.
+own expiry or an explicit drop. Appends without an explicit parent directive
+preserve parent expiry; retries preserve both policies.
+
+Optional collection `max_entries` limits live states by permanent position:
+`"1000"` keeps the newest 1,000, `"0"` disables the limit, and omission preserves
+an existing setting (new collections default to unlimited). Creation and
+collection `metadata` accept it; opening and entry metadata reject it.
+`describe` and list callbacks return the configured limit as a decimal string.
+Age expiry is independent. Maintenance removes due entries first, then trims
+oldest surplus states up to the surplus captured when the visit started. Until
+that pass, reads and appends may observe more entries than the limit. Disabling
+background compaction disables automatic trimming too. This is a live-state
+limit, not a disk-space or retry-tombstone bound; increasing it cannot restore
+deleted states. See [count retention](collections.md#count-retention).
 Expiry permits later maintenance deletion; reads and metadata changes continue
 normally until that deletion occurs. Metadata changes preserve the body, ETag,
 append identity, and position. Retrying a deleted append ID cannot resurrect it.
@@ -893,6 +936,12 @@ State results, lease/participant `info()`, and callback `state_meta` expose
 deadline appears as `retention_expires_at_unix`; zero confirms no expiry.
 Pending positive durations have no final deadline until commit. Public reads
 report committed policy and leave the receiver's private observation unchanged.
+
+Pouch retires a fully applied single-key implicit retention decision on lease
+release, so successful renewals do not accumulate startup recovery work. This
+also covers metadata-only renewals and rollback. Cleanup can fail after the
+decision has applied: a release error is not evidence of rollback. Explicit,
+joined and managed/external XA retain their normal outcome rules.
 
 Expiry makes an object eligible for cleanup; it remains ordinary readable and
 writable state until maintenance deletes it. Pouch uses its existing compaction

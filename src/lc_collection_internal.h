@@ -20,6 +20,9 @@ typedef struct lc_collection_head {
   lc_u64 next_snapshot;
   lc_u64 published_at;
   lc_pouch_unix_seconds retention;
+  /* Explicit expiry overrides append directives through this generation. */
+  lc_u64 retention_generation;
+  lc_u64 max_entries;
   int dropped;
 } lc_collection_head;
 
@@ -86,6 +89,27 @@ typedef struct lc_collection_guard {
 int lc_collection_call_begin(lc_collection *self, int mutating,
                              lc_collection_call *call, lc_error *error);
 void lc_collection_call_end(lc_collection_call *call);
+/* A writer owns this independent reference, including after public close. */
+void lc_collection_handle_hold(lc_collection_handle *collection);
+void lc_collection_handle_release(lc_collection_handle *collection);
+int lc_collection_call_begin_held(lc_collection_handle *collection,
+                                  int mutating, lc_collection_call *call,
+                                  lc_error *error);
+int lc_collection_append_validate(lc_collection_handle *collection,
+                                  const lc_collection_append_req *req,
+                                  lc_error *error);
+int lc_collection_append_begin_method(lc_collection *self,
+                                      const lc_collection_append_req *req,
+                                      lc_collection_writer **out,
+                                      lc_error *error);
+/* Publishes a finished private pending inode without replaying its body.
+ * The caller keeps fd/path alive and never unlinks a canonical segment. */
+int lc_collection_publish_pending(lc_collection_call *call,
+                                  lc_pouch_collection_writer *writer,
+                                  const char *pending_path, int fd,
+                                  const lc_pouch_collection_record *body,
+                                  lc_collection_append_res *out,
+                                  lc_error *error);
 void lc_collection_call_callback(lc_collection_call *call, int enabled,
                                  int source);
 int lc_collection_metadata_enter(lc_collection_handle *collection,
@@ -113,6 +137,8 @@ int lc_collection_write_enter(lc_collection_call *call,
 void lc_collection_write_leave(lc_collection_guard *guard);
 int lc_collection_head_write(lc_collection_handle *collection, lc_error *error);
 int lc_collection_head_read(lc_collection_handle *collection, lc_error *error);
+lc_pouch_unix_seconds
+lc_collection_retention_deadline(const lc_collection_handle *collection);
 int lc_collection_rotate(lc_collection_handle *collection, int force,
                          lc_error *error);
 int lc_collection_project_record(lc_collection_order *order,
@@ -177,6 +203,10 @@ int lc_collection_expire(lc_collection *collection, lc_pouch_unix_seconds now,
 int lc_collection_expire_entry(lc_collection *collection, uint64_t position,
                                lc_pouch_unix_seconds now,
                                lc_collection_delete_res *out, lc_error *error);
+/* Rechecks the current live count and policy while holding mutation authority;
+ * a zero deleted result means no surplus remains. Uses canonical deletion. */
+int lc_collection_trim_entry(lc_collection *collection,
+                             lc_collection_delete_res *out, lc_error *error);
 int lc_collection_retention_maintain(lc_collection *collection, int *dropped,
                                      lc_pouch_maintenance_result *out,
                                      lc_error *error);
@@ -203,7 +233,24 @@ typedef int (*lc_collection_commit_hook_fn)(void *, lc_collection *,
                                             lc_error *);
 extern lc_collection_commit_hook_fn lc_collection_commit_wait_test_hook;
 extern void *lc_collection_commit_wait_test_context;
+enum {
+  LC_COLLECTION_APPEND_NAMED = 1,
+  LC_COLLECTION_APPEND_HEAD,
+  LC_COLLECTION_APPEND_PROJECTED
+};
+typedef int (*lc_collection_append_hook_fn)(void *, lc_collection *, int,
+                                            lc_error *);
+extern lc_collection_append_hook_fn lc_collection_append_test_hook;
+extern void *lc_collection_append_test_context;
 #endif
+
+struct lc_pouch_recode;
+int lc_collection_recode_head(lc_pouch *pouch, const char *directory,
+                              lc_collection_head *head, lc_error *error);
+int lc_collection_recode_finish(struct lc_pouch_recode *work,
+                                const char *source, const char *target,
+                                const char *id, lc_error *error);
+
 int lc_collection_catalog_paths(lc_client_handle *client, const char *ns,
                                 const char *name, int create, char **base,
                                 char **catalog, lc_error *error);
@@ -214,13 +261,15 @@ int lc_collection_open_bound(lc_client_handle *client, const char *ns,
                              const char *name, const char *id, const char *base,
                              const char *catalog, int create,
                              lc_pouch_unix_seconds retention,
-                             lc_collection **out, lc_error *error);
+                             lc_u64 max_entries, lc_collection **out,
+                             lc_error *error);
 /* Internal maintenance borrows its existing root; public receivers retain
  * their owning client. Both use the same storage and allocator paths. */
 int lc_collection_storage_open(lc_pouch *pouch, lc_client_handle *owner,
                                const char *ns, const char *name, const char *id,
                                const char *base, const char *catalog,
                                int create, lc_pouch_unix_seconds retention,
-                               lc_collection **out, lc_error *error);
+                               lc_u64 max_entries, lc_collection **out,
+                               lc_error *error);
 
 #endif

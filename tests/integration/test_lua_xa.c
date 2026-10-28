@@ -1,4 +1,7 @@
 #include "lockdc_lua_internal.h"
+#ifdef LOCKDC_LUA_COLLECTION_MAINTENANCE
+#include "lc_collection_internal.h"
+#endif
 #include <lauxlib.h>
 #include <lualib.h>
 #include <poll.h>
@@ -19,6 +22,31 @@ static int integer_fields(lua_State *L) {
   lcdc_set_u64_decimal(L, "maximum", (uint64_t)-1);
   return 1;
 }
+
+/* Drive the real shared maintenance pass explicitly; Lua scenarios need no
+ * sleeps or shortened production worker cadence to observe lazy retention. */
+#ifdef LOCKDC_LUA_COLLECTION_MAINTENANCE
+static int maintain_collections(lua_State *L) {
+  lc_client *client = NULL;
+  lc_error error;
+  lc_pouch_maintenance_options options = {0};
+  lc_pouch_maintenance_result result = {0};
+  int rc;
+  lc_error_init(&error);
+  options.ns = "journal";
+  options.force = lua_toboolean(L, 2);
+  rc = lc_lua_client_view(L, 1, &client, &error);
+  if (rc == LC_OK && ((lc_client_handle *)client)->is_pouch)
+    rc = lc_pouch_maintenance_run(((lc_client_handle *)client)->pouch, &options,
+                                  &result, &error);
+  else if (rc == LC_OK)
+    rc = LC_ERR_INVALID;
+  lc_pouch_maintenance_result_cleanup(NULL, &result);
+  lc_error_cleanup(&error);
+  lua_pushboolean(L, rc == LC_OK);
+  return 1;
+}
+#endif
 typedef struct lua_heap_probe {
   lua_Alloc allocate;
   void *context;
@@ -50,6 +78,31 @@ static int heap_fail(lua_State *L) {
   probe->failures = (unsigned int)failures;
   return 0;
 }
+
+#ifdef LOCKDC_LUA_COLLECTION_MAINTENANCE
+static int collection_result_oom(void *context, lc_collection *collection,
+                                 int phase, lc_error *error) {
+  lua_State *L = context;
+  void *allocator_context;
+  lua_heap_probe *probe;
+  (void)collection;
+  (void)error;
+  if (phase == LC_COLLECTION_APPEND_PROJECTED) {
+    (void)lua_getallocf(L, &allocator_context);
+    probe = allocator_context;
+    probe->failures = 2;
+    lc_collection_append_test_hook = NULL;
+    lc_collection_append_test_context = NULL;
+  }
+  return LC_OK;
+}
+
+static int fail_collection_result(lua_State *L) {
+  lc_collection_append_test_hook = collection_result_oom;
+  lc_collection_append_test_context = L;
+  return 0;
+}
+#endif
 
 static int heap_limit(lua_State *L) {
   void *context;
@@ -171,6 +224,12 @@ int main(int argc, char **argv) {
   lua_setglobal(L, "lockdc_test_invalid_borrow");
   lua_pushcfunction(L, integer_fields);
   lua_setglobal(L, "lockdc_test_integer_fields");
+#ifdef LOCKDC_LUA_COLLECTION_MAINTENANCE
+  lua_pushcfunction(L, maintain_collections);
+  lua_setglobal(L, "lockdc_test_maintain_collections");
+  lua_pushcfunction(L, fail_collection_result);
+  lua_setglobal(L, "lockdc_test_fail_collection_result");
+#endif
   lua_pushcfunction(L, heap_fail);
   lua_setglobal(L, "lockdc_test_lua_heap_fail");
   lua_pushcfunction(L, heap_limit);

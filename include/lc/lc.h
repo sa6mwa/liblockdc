@@ -79,6 +79,7 @@ typedef struct lc_consumer_service lc_consumer_service;
 typedef struct lc_history_consumer lc_history_consumer;
 /** Ordered owner of immutable JSON state objects. */
 typedef struct lc_collection lc_collection;
+typedef struct lc_collection_writer lc_collection_writer;
 /** Opaque transactional outbox handle. */
 typedef struct lc_outbox lc_outbox;
 /** Opaque process-local outbox dispatcher. */
@@ -351,7 +352,11 @@ typedef struct lc_pouch_settings {
   const char *crypto_key_file;
   /** Creates a missing selected Pouch key file. */
   int crypto_generate_key_file;
-  /** At-rest compression: `"none"` or `"zlib"`. */
+  /** At-rest compression: `"none"` or `"zlib"`. Omission inherits an existing
+   * root's mode; new roots default to none. A differing explicit mode converts
+   * the entire root synchronously with exclusive ownership. If other writers
+   * prevent conversion, open warns and uses the stored mode. Conversion errors
+   * fail the open; interrupted publication is recovered on the next open. */
   const char *compression;
 } lc_pouch_settings;
 
@@ -466,9 +471,11 @@ typedef struct lc_client_config {
    * parent directory, rejecting unsafe existing parent directories.
    */
   int pouch_crypto_generate_key_file;
-  /** Local Pouch at-rest compression mode: NULL/"none" disables it, "zlib"
-   * enables streaming zlib compression before storage/encryption. Consumer
-   * service workers retain the resolved mode when reopening this Pouch root.
+  /** Local Pouch at-rest compression: NULL inherits an existing root's mode
+   * (none for new roots). Explicit "none"/"zlib" requests whole-root conversion
+   * if different, before open returns. Other writers prevent conversion and
+   * the open warns and adopts the stored mode. Conversion errors fail the open.
+   * Consumer service workers retain the mode actually opened.
    */
   const char *pouch_compression;
   /** Marks `pouch_crypto_generate_key_file` as explicitly configured.
@@ -563,6 +570,11 @@ typedef struct lc_collection_config {
   int has_retention_seconds;
   /** Seconds from creation commit; zero disables expiry. */
   long retention_seconds;
+  /** Creation-only live entry limit. Omission/zero is unlimited. Opening with
+   * this flag selected is invalid. Maintenance lazily removes oldest entries;
+   * appends may temporarily exceed the limit. */
+  int has_max_entries;
+  uint64_t max_entries;
 } lc_collection_config;
 
 /** Collection identity and current counts. Strings are borrowed from the
@@ -579,11 +591,15 @@ typedef struct lc_collection_info {
   int has_retention_expires_at_unix;
   /** Collection's own expiry; lazy removal drops all its entries as well. */
   lc_unix_seconds retention_expires_at_unix;
+  /** Configured live entry limit, zero for unlimited. This is not a disk cap.
+   */
+  uint64_t max_entries;
 } lc_collection_info;
 
 /** Endpoint-local capabilities, queried without a network request. Pouch
- * supports LQL, both cursors, ranges and first-N; last-N and position selection
- * are currently false. Remote clients currently return all fields as zero. */
+ * supports LQL, both cursors, ranges, first-N, count retention, append writers
+ * and atomic parent renewal. Last-N and position selection are currently false.
+ * Remote clients currently return all fields as zero. */
 typedef struct lc_collection_capabilities {
   int collections;
   int lql_filter;
@@ -593,6 +609,12 @@ typedef struct lc_collection_capabilities {
   int first_n;
   int last_n;
   int position_selection;
+  /** Supports per-collection max_entries and lazy oldest-first trimming. */
+  int count_retention;
+  /** Supports owned push-fed append writers without whole-value buffering. */
+  int append_writer;
+  /** Supports atomic parent retention directives on either append form. */
+  int append_collection_retention;
 } lc_collection_capabilities;
 
 /** Required retry identity, scoped to a collection incarnation. Supply 1..128
@@ -607,14 +629,26 @@ typedef struct lc_collection_append_req {
   /** Entry retention from commit. Omission/zero means no expiry for a new
    * entry. An identical retry preserves the existing deadline. */
   long retention_seconds;
+  /** Optional parent directive, applied atomically only for a new append.
+   * Omission preserves, zero clears, positive seconds reset from this commit.
+   * Duplicates and aborted/failed-before-publication appends never renew it.
+   * A commit error after publication is uncertain; reconcile through status. */
+  int has_collection_retention_seconds;
+  long collection_retention_seconds;
 } lc_collection_append_req;
 
-/** Retention-only state metadata. Omission preserves, zero clears, positive
+/** Retention metadata. Omission preserves, zero clears, positive
  * seconds replace the deadline from this metadata commit. Expired objects
- * remain ordinary objects until maintenance deletes them. */
+ * remain ordinary objects until maintenance deletes them. max_entries applies
+ * only to the collection owner; selecting it for entry_metadata is invalid. */
 typedef struct lc_collection_metadata_req {
   int has_retention_seconds;
   long retention_seconds;
+  int has_max_entries;
+  /** Zero disables count retention; positive values retain newest live entries
+   * by permanent position, independently of age retention and LQL filtering.
+   * Updates apply to existing and future entries; deletion is eventual. */
+  uint64_t max_entries;
 } lc_collection_metadata_req;
 
 /** One append outcome. Fixed-size metadata needs no cleanup. etag is the
@@ -630,6 +664,11 @@ typedef struct lc_collection_append_res {
   /** A deleted binding has no current state deadline. */
   int has_retention_expires_at_unix;
   lc_unix_seconds retention_expires_at_unix;
+  /** Original append's selected parent deadline, also retained for retries.
+   * It is not the parent's current deadline; use collection.describe for that.
+   * Absent when the original append selected no parent directive. */
+  int has_collection_retention_expires_at_unix;
+  lc_unix_seconds collection_retention_expires_at_unix;
 } lc_collection_append_res;
 
 typedef enum lc_collection_append_state {
@@ -756,6 +795,9 @@ struct lc_collection {
   int (*append)(lc_collection *self, const lc_collection_append_req *req,
                 lc_source *source, lc_collection_append_res *out,
                 lc_error *error);
+  /** Begins an owned push-fed writer without publishing an entry. */
+  int (*append_begin)(lc_collection *self, const lc_collection_append_req *req,
+                      lc_collection_writer **out, lc_error *error);
   int (*append_status)(lc_collection *self, const char *append_id,
                        lc_collection_append_status_res *out, lc_error *error);
   /** Changes only a live entry's retention; reads/writes no payload bytes. */
@@ -776,6 +818,24 @@ struct lc_collection {
   void *impl;
 };
 
+/** Owned incremental append. Writes borrow bytes for the call and return
+ * LC_OK/status, not the lc_sink boolean convention. Zero bytes are not EOF.
+ * Commit supplies EOF and is terminal; errors may have an uncertain published
+ * outcome. Abort/close never publish or undo a committed append. Close every
+ * returned writer, including after success/error. No publication locks are held
+ * between calls. Sequential thread transfer is allowed; overlapping operations
+ * fail. Closing an active writer defers destruction until its call unwinds.
+ * The writer retains its collection/client even after their public close. */
+struct lc_collection_writer {
+  int (*write)(lc_collection_writer *self, const void *bytes, size_t count,
+               lc_error *error);
+  int (*commit)(lc_collection_writer *self, lc_collection_append_res *out,
+                lc_error *error);
+  int (*abort)(lc_collection_writer *self, lc_error *error);
+  void (*close)(lc_collection_writer *self);
+  void *impl;
+};
+
 /** Initializes a creation/open config with no selected retention policy. */
 void lc_collection_config_init(lc_collection_config *config);
 void lc_collection_append_req_init(lc_collection_append_req *req);
@@ -789,7 +849,8 @@ int lc_client_create_collection(lc_client *client,
                                 const lc_collection_config *config,
                                 lc_collection **out, lc_error *error);
 /** Opens an existing incarnation without creating or renewing it. Selecting
- * creation retention here, even zero, is invalid. Returns an owned receiver. */
+ * creation expiry or count retention, even zero, is invalid. Returns an owned
+ * receiver. */
 int lc_client_open_collection(lc_client *client,
                               const lc_collection_config *config,
                               lc_collection **out, lc_error *error);
@@ -805,8 +866,9 @@ int lc_client_collection_capabilities(lc_client *client,
                                       lc_error *error);
 int lc_collection_describe(lc_collection *collection, lc_collection_info *out,
                            lc_error *error);
-/** Updates only the collection's own expiry; existing entries inherit no new
- * per-entry age limit. Omission preserves, zero clears, positive seconds reset.
+/** Updates collection expiry and/or max_entries. Omitted fields preserve their
+ * values. Expiry does not assign a per-entry age limit. Increasing/disabling
+ * the count limit never restores deleted entries or their bodies.
  */
 int lc_collection_metadata(lc_collection *collection,
                            const lc_collection_metadata_req *req,
@@ -824,6 +886,17 @@ int lc_collection_entry_metadata(lc_collection *collection, uint64_t position,
 int lc_collection_append(lc_collection *collection,
                          const lc_collection_append_req *req, lc_source *source,
                          lc_collection_append_res *out, lc_error *error);
+int lc_collection_append_begin(lc_collection *collection,
+                               const lc_collection_append_req *req,
+                               lc_collection_writer **out, lc_error *error);
+int lc_collection_writer_write(lc_collection_writer *writer, const void *bytes,
+                               size_t count, lc_error *error);
+int lc_collection_writer_commit(lc_collection_writer *writer,
+                                lc_collection_append_res *out, lc_error *error);
+/** Idempotently discards an unfinished append; safe after write/commit failure.
+ */
+int lc_collection_writer_abort(lc_collection_writer *writer, lc_error *error);
+void lc_collection_writer_close(lc_collection_writer *writer);
 /** Observes ABSENT/COMMITTED/DELETED without a body. ABSENT returns LC_OK and
  * does not cancel an upload in progress. Deleted retry identities are retained.
  */
@@ -4488,7 +4561,10 @@ int lc_sink_memory_bytes(lc_sink *sink, const void **bytes, size_t *length,
 /**
  * Copies all bytes from a source into a sink.
  *
- * The copy is streaming and uses a bounded internal buffer. It resets `error`
+ * The copy is streaming and starts with a small bounded chunk. Longer copies
+ * use a bounded heap buffer from the built-in allocator; allocation failure
+ * returns `LC_ERR_NOMEM`. Errors can leave either stream partially advanced.
+ * It resets `error`
  * for this operation before reading the source. It advances `src`, does not
  * reset it, and leaves both handles open. `written` may be `NULL`; on success
  * it receives the total bytes copied.

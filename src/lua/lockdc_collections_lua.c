@@ -7,6 +7,7 @@
 
 #define COLLECTION_MT "lockdc.collection"
 #define CALL_MT "lockdc.collection_call"
+#define WRITER_MT "lockdc.collection_writer"
 
 enum collection_operation {
   CREATE,
@@ -20,7 +21,11 @@ enum collection_operation {
   APPEND_STATUS,
   READ,
   DELETE_ENTRY,
-  DROP
+  DROP,
+  APPEND_BEGIN,
+  WRITER_WRITE,
+  WRITER_COMMIT,
+  WRITER_ABORT
 };
 
 typedef struct collection_ud {
@@ -28,6 +33,12 @@ typedef struct collection_ud {
   lc_collection *closing;
   int active;
 } collection_ud;
+
+typedef struct writer_ud {
+  lc_collection_writer *handle;
+  lc_collection_writer *closing;
+  int active;
+} writer_ud;
 
 /* This userdata owns every temporary native allocation before another Lua
  * operation can raise. Its owner uservalue also pins the receiver across GC,
@@ -40,6 +51,7 @@ typedef struct collection_call {
   int visitor_ref;
   int callback_failed;
   collection_ud *receiver;
+  writer_ud *writer_receiver;
   lc_source *source;
   lc_sink *sink;
   lc_error error;
@@ -65,6 +77,12 @@ static void release_call(collection_call *call) {
     call->receiver->closing = NULL;
     call->receiver->active = 0;
     call->receiver = NULL;
+  }
+  if (call->writer_receiver != NULL) {
+    lc_collection_writer_close(call->writer_receiver->closing);
+    call->writer_receiver->closing = NULL;
+    call->writer_receiver->active = 0;
+    call->writer_receiver = NULL;
   }
   luaL_unref(call->L, LUA_REGISTRYINDEX, call->metadata_ref);
   luaL_unref(call->L, LUA_REGISTRYINDEX, call->cancel_ref);
@@ -96,6 +114,19 @@ static int collection_close(lua_State *L) {
   return 0;
 }
 
+static int writer_close(lua_State *L) {
+  writer_ud *ud = luaL_testudata(L, 1, WRITER_MT);
+  if (ud != NULL && ud->handle != NULL) {
+    lc_collection_writer *handle = ud->handle;
+    ud->handle = NULL;
+    if (ud->active)
+      ud->closing = handle;
+    else
+      lc_collection_writer_close(handle);
+  }
+  return 0;
+}
+
 static void set_text(lua_State *L, const char *key, const char *value) {
   if (value != NULL) {
     lua_pushstring(L, value);
@@ -115,6 +146,7 @@ static void push_info(lua_State *L, const lc_collection_info *info) {
   set_text(L, "collection_id", info->collection_id);
   lcdc_set_u64_decimal(L, "upper_position", info->upper_position);
   lcdc_set_u64_decimal(L, "live_count", info->live_count);
+  lcdc_set_u64_decimal(L, "max_entries", info->max_entries);
   set_bool(L, "query_indexing", info->query_indexing);
   lcdc_set_state_retention(L, info->retention_support,
                            info->has_retention_expires_at_unix,
@@ -131,6 +163,10 @@ static void push_entry(lua_State *L, const lc_collection_append_res *entry) {
   lcdc_set_state_retention(L, entry->retention_support,
                            entry->has_retention_expires_at_unix,
                            entry->retention_expires_at_unix);
+  if (entry->has_collection_retention_expires_at_unix)
+    lcdc_set_version_field(
+        L, "collection_retention_expires_at_unix",
+        (lc_version)entry->collection_retention_expires_at_unix);
 }
 
 static void push_read(lua_State *L, const lc_collection_read_res *read) {
@@ -220,8 +256,8 @@ static int text_field(collection_call *call, int index, const char *key,
   return rc;
 }
 
-static int retention(collection_call *call, int index, int *selected,
-                     long *seconds) {
+static int retention_field(collection_call *call, int index, const char *name,
+                           int *selected, long *seconds) {
   lua_State *L = call->L;
   lua_Integer value;
   int exact;
@@ -229,7 +265,7 @@ static int retention(collection_call *call, int index, int *selected,
   *seconds = 0;
   if (lua_isnoneornil(L, index))
     return LC_OK;
-  lua_getfield(L, index, "retention_seconds");
+  lua_getfield(L, index, name);
   if (lua_isnil(L, -1)) {
     lua_pop(L, 1);
     return LC_OK;
@@ -238,7 +274,7 @@ static int retention(collection_call *call, int index, int *selected,
   if (lua_type(L, -1) != LUA_TNUMBER || !exact || value < 0 ||
       (uintmax_t)value > (uintmax_t)LONG_MAX) {
     lua_pop(L, 1);
-    return invalid(call, "retention_seconds must be a nonnegative integer "
+    return invalid(call, "retention duration must be a nonnegative integer "
                          "representable by a C long");
   }
   lua_pop(L, 1);
@@ -408,11 +444,12 @@ static int cancelled(void *context) {
 }
 
 static int worker(lua_State *L) {
-  static const char *const config_keys[] = {"namespace", "name",
-                                            "retention_seconds", NULL};
-  static const char *const metadata_keys[] = {"retention_seconds", NULL};
-  static const char *const append_keys[] = {"append_id", "retention_seconds",
-                                            NULL};
+  static const char *const config_keys[] = {
+      "namespace", "name", "retention_seconds", "max_entries", NULL};
+  static const char *const metadata_keys[] = {"retention_seconds",
+                                              "max_entries", NULL};
+  static const char *const append_keys[] = {
+      "append_id", "retention_seconds", "collection_retention_seconds", NULL};
   static const char *const read_keys[] = {
       "selector_lql", "cursor",      "after",     "through",
       "first_n",      "on_metadata", "cancelled", NULL};
@@ -430,9 +467,41 @@ static int worker(lua_State *L) {
   lc_collection_capabilities capabilities;
   lc_collection_info info;
   collection_ud *ud;
+  writer_ud *writing;
   const char *value;
   uint64_t seq;
   int rc = LC_OK;
+  if (call->operation >= WRITER_WRITE) {
+    const char *bytes = NULL;
+    size_t count = 0;
+    writing = luaL_testudata(L, 1, WRITER_MT);
+    if (writing == NULL || writing->handle == NULL || writing->active)
+      return failure(L, call,
+                     invalid(call, "expected a live, idle collection writer"));
+    if (call->operation == WRITER_WRITE) {
+      if (lua_type(L, 2) != LUA_TSTRING)
+        return failure(
+            L, call,
+            invalid(call, "collection writer.write requires a byte string"));
+      bytes = lua_tolstring(L, 2, &count);
+    }
+    call->writer_receiver = writing;
+    writing->active = 1;
+    if (call->operation == WRITER_WRITE)
+      rc = lc_collection_writer_write(writing->handle, bytes, count,
+                                      &call->error);
+    else if (call->operation == WRITER_COMMIT)
+      rc = lc_collection_writer_commit(writing->handle, &entry, &call->error);
+    else
+      rc = lc_collection_writer_abort(writing->handle, &call->error);
+    if (rc != LC_OK)
+      return failure(L, call, rc);
+    if (call->operation == WRITER_COMMIT)
+      push_entry(L, &entry);
+    else
+      lua_pushboolean(L, 1);
+    return 1;
+  }
   if (call->operation <= CAPABILITIES) {
     rc = lc_lua_client_view(L, 1, &client, &call->error);
     if (rc != LC_OK)
@@ -445,8 +514,12 @@ static int worker(lua_State *L) {
       if (rc == LC_OK)
         rc = text_field(call, 2, "name", 0, &config.name);
       if (rc == LC_OK)
-        rc = retention(call, 2, &config.has_retention_seconds,
-                       &config.retention_seconds);
+        rc = retention_field(call, 2, "retention_seconds",
+                             &config.has_retention_seconds,
+                             &config.retention_seconds);
+      if (rc == LC_OK)
+        rc = position_field(call, 2, "max_entries", &config.has_max_entries,
+                            &config.max_entries);
       if (rc == LC_OK)
         rc = lc_lua_client_view(L, 1, &client, &call->error);
       if (rc != LC_OK)
@@ -497,6 +570,10 @@ static int worker(lua_State *L) {
     set_bool(L, "first_n", capabilities.first_n);
     set_bool(L, "last_n", capabilities.last_n);
     set_bool(L, "position_selection", capabilities.position_selection);
+    set_bool(L, "count_retention", capabilities.count_retention);
+    set_bool(L, "append_collection_retention",
+             capabilities.append_collection_retention);
+    set_bool(L, "append_writer", capabilities.append_writer);
     return 1;
   }
   ud = luaL_testudata(L, 1, COLLECTION_MT);
@@ -508,19 +585,28 @@ static int worker(lua_State *L) {
     lc_collection_metadata_req_init(&change);
     rc = options(call, index, metadata_keys, 1);
     if (rc == LC_OK)
-      rc = retention(call, index, &change.has_retention_seconds,
-                     &change.retention_seconds);
+      rc = retention_field(call, index, "retention_seconds",
+                           &change.has_retention_seconds,
+                           &change.retention_seconds);
+    if (rc == LC_OK)
+      rc = position_field(call, index, "max_entries", &change.has_max_entries,
+                          &change.max_entries);
     if (rc == LC_OK && call->operation == ENTRY_METADATA)
       rc = position(call, 2, &seq);
-  } else if (call->operation == APPEND) {
+  } else if (call->operation == APPEND || call->operation == APPEND_BEGIN) {
     lc_collection_append_req_init(&append);
     rc = options(call, 2, append_keys, 1);
     if (rc == LC_OK)
       rc = text_field(call, 2, "append_id", 0, &append.append_id);
     if (rc == LC_OK)
-      rc = retention(call, 2, &append.has_retention_seconds,
-                     &append.retention_seconds);
+      rc = retention_field(call, 2, "retention_seconds",
+                           &append.has_retention_seconds,
+                           &append.retention_seconds);
     if (rc == LC_OK)
+      rc = retention_field(call, 2, "collection_retention_seconds",
+                           &append.has_collection_retention_seconds,
+                           &append.collection_retention_seconds);
+    if (rc == LC_OK && call->operation == APPEND)
       rc = lcdc_source_from_value(L, 3, &call->source, &call->error);
   } else if (call->operation == APPEND_STATUS)
     rc = text(call, 2, 0, &value);
@@ -577,6 +663,18 @@ static int worker(lua_State *L) {
     rc = lc_collection_append(handle, &append, call->source, &entry,
                               &call->error);
     break;
+  case APPEND_BEGIN:
+    writing = lua_newuserdatauv(L, sizeof(*writing), 1);
+    memset(writing, 0, sizeof(*writing));
+    luaL_setmetatable(L, WRITER_MT);
+    lua_pushvalue(L, 1);
+    lua_setiuservalue(L, -2, 1);
+    if (ud->handle == NULL)
+      rc = invalid(call, "collection closed during writer allocation");
+    else
+      rc = lc_collection_append_begin(ud->handle, &append, &writing->handle,
+                                      &call->error);
+    return rc == LC_OK ? 1 : failure(L, call, rc);
   case APPEND_STATUS:
     rc = lc_collection_append_status(handle, value, &status, &call->error);
     break;
@@ -669,6 +767,10 @@ COLLECTION_METHOD(describe, DESCRIBE)
 COLLECTION_METHOD(metadata, METADATA)
 COLLECTION_METHOD(entry_metadata, ENTRY_METADATA)
 COLLECTION_METHOD(append, APPEND)
+COLLECTION_METHOD(append_begin, APPEND_BEGIN)
+COLLECTION_METHOD(writer_write, WRITER_WRITE)
+COLLECTION_METHOD(writer_commit, WRITER_COMMIT)
+COLLECTION_METHOD(writer_abort, WRITER_ABORT)
 COLLECTION_METHOD(append_status, APPEND_STATUS)
 COLLECTION_METHOD(read_entries, READ)
 COLLECTION_METHOD(delete_entry, DELETE_ENTRY)
@@ -686,12 +788,18 @@ void lcdc_collections_install(lua_State *L) {
                                      {"metadata", metadata},
                                      {"entry_metadata", entry_metadata},
                                      {"append", append},
+                                     {"append_begin", append_begin},
                                      {"append_status", append_status},
                                      {"read", read_entries},
                                      {"delete_entry", delete_entry},
                                      {"drop", drop},
                                      {"close", collection_close},
                                      {NULL, NULL}};
+  static const luaL_Reg writer_methods[] = {{"write", writer_write},
+                                            {"commit", writer_commit},
+                                            {"abort", writer_abort},
+                                            {"close", writer_close},
+                                            {NULL, NULL}};
   luaL_newmetatable(L, CALL_MT);
   lua_pushcfunction(L, call_gc);
   lua_setfield(L, -2, "__gc");
@@ -702,5 +810,12 @@ void lcdc_collections_install(lua_State *L) {
   lua_pushvalue(L, -1);
   lua_setfield(L, -2, "__index");
   luaL_setfuncs(L, methods, 0);
+  lua_pop(L, 1);
+  luaL_newmetatable(L, WRITER_MT);
+  lua_pushcfunction(L, writer_close);
+  lua_setfield(L, -2, "__gc");
+  lua_pushvalue(L, -1);
+  lua_setfield(L, -2, "__index");
+  luaL_setfuncs(L, writer_methods, 0);
   lua_pop(L, 1);
 }

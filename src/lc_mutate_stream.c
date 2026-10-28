@@ -15,7 +15,7 @@
 extern time_t timegm(struct tm *tm_value);
 #endif
 
-#define LC_MS_SCRATCH 65536U
+#define LC_MS_SCRATCH 16384U
 
 typedef lc_utf8_state lc_ms_utf8_state;
 
@@ -139,43 +139,56 @@ static int lc_ms_write_bytes(FILE *out, const void *bytes, size_t length,
 }
 
 static int lc_ms_copy_file(FILE *input, FILE *output, lc_error *error) {
-  unsigned char buffer[LC_MS_SCRATCH];
+  unsigned char *buffer;
   size_t nread;
+  int rc;
 
   if (input == NULL || output == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "invalid local mutate copy stream", NULL, NULL, NULL);
   }
+  buffer = (unsigned char *)lc_alloc_with_allocator(NULL, LC_MS_SCRATCH);
+  if (buffer == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate mutation copy buffer", NULL, NULL,
+                        NULL);
+  }
+  rc = LC_OK;
   if (fflush(output) != 0 || ftruncate(fileno(output), 0) != 0 ||
       fseek(output, 0L, SEEK_SET) != 0 || fseek(input, 0L, SEEK_SET) != 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to reset local mutate no-op stream",
-                        strerror(errno), NULL, NULL);
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to reset local mutate no-op stream",
+                      strerror(errno), NULL, NULL);
+    goto done;
   }
   clearerr(input);
   clearerr(output);
   for (;;) {
-    nread = fread(buffer, 1U, sizeof(buffer), input);
+    nread = fread(buffer, 1U, LC_MS_SCRATCH, input);
     if (nread != 0U && fwrite(buffer, 1U, nread, output) != nread) {
-      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                          "failed to write local mutate no-op stream",
-                          strerror(errno), NULL, NULL);
+      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to write local mutate no-op stream",
+                        strerror(errno), NULL, NULL);
+      goto done;
     }
-    if (nread < sizeof(buffer)) {
+    if (nread < LC_MS_SCRATCH) {
       if (ferror(input)) {
-        return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                            "failed to read local mutate no-op stream",
-                            strerror(errno), NULL, NULL);
+        rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to read local mutate no-op stream",
+                          strerror(errno), NULL, NULL);
+        goto done;
       }
       break;
     }
   }
   if (fflush(output) != 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to flush local mutate no-op stream",
-                        strerror(errno), NULL, NULL);
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to flush local mutate no-op stream",
+                      strerror(errno), NULL, NULL);
   }
-  return LC_OK;
+done:
+  lc_free_with_allocator(NULL, buffer);
+  return rc;
 }
 
 static int lc_ms_lonejson_rewrite_error(lc_error *error, lonejson_status status,
@@ -234,36 +247,51 @@ static int lc_ms_utf8_push(lc_ms_utf8_state *state, unsigned char byte,
 static int lc_ms_copy_source_bytes(FILE *out, lc_source *source,
                                    int validate_text, int strict_text,
                                    int *out_text_ok, lc_error *error) {
-  unsigned char buffer[LC_MS_SCRATCH];
+  unsigned char *buffer;
   size_t nread;
   size_t i;
   lc_ms_utf8_state utf8;
   int text_ok;
+  int rc;
 
+  buffer = (unsigned char *)lc_alloc_with_allocator(NULL, LC_MS_SCRATCH);
+  if (buffer == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate mutation source buffer", NULL, NULL,
+                        NULL);
+  }
+  rc = LC_OK;
   memset(&utf8, 0, sizeof(utf8));
   text_ok = validate_text ? 1 : 0;
   for (;;) {
-    nread = source->read(source, buffer, sizeof(buffer), error);
+    nread = source->read(source, buffer, LC_MS_SCRATCH, error);
     if (nread == 0U) {
+      if (error != NULL && error->code != LC_OK) {
+        rc = error->code;
+        goto done;
+      }
       break;
     }
-    if (lc_ms_write_bytes(out, buffer, nread, error) != LC_OK) {
-      return LC_ERR_TRANSPORT;
+    rc = lc_ms_write_bytes(out, buffer, nread, error);
+    if (rc != LC_OK) {
+      goto done;
     }
     for (i = 0; i < nread; ++i) {
       if (validate_text && text_ok) {
         if (buffer[i] == '\0') {
           text_ok = 0;
           if (strict_text) {
-            return lc_ms_set_error(error, "invalid UTF-8 in textfile mutation",
-                                   NULL);
+            rc = lc_ms_set_error(error, "invalid UTF-8 in textfile mutation",
+                                 NULL);
+            goto done;
           }
           continue;
         }
         if (lc_ms_utf8_push(&utf8, buffer[i], error) != LC_OK) {
           if (strict_text) {
-            return lc_ms_set_error(error, "invalid UTF-8 in textfile mutation",
-                                   NULL);
+            rc = lc_ms_set_error(error, "invalid UTF-8 in textfile mutation",
+                                 NULL);
+            goto done;
           }
           lc_error_cleanup(error);
           lc_error_init(error);
@@ -274,14 +302,17 @@ static int lc_ms_copy_source_bytes(FILE *out, lc_source *source,
   }
   if (validate_text && text_ok && utf8.remaining != 0) {
     if (strict_text) {
-      return lc_ms_set_error(error, "invalid UTF-8 in textfile mutation", NULL);
+      rc = lc_ms_set_error(error, "invalid UTF-8 in textfile mutation", NULL);
+      goto done;
     }
     text_ok = 0;
   }
   if (out_text_ok != NULL) {
     *out_text_ok = text_ok;
   }
-  return LC_OK;
+done:
+  lc_free_with_allocator(NULL, buffer);
+  return rc;
 }
 
 static int lc_ms_open_file_source(const lc_mutation_value *value,

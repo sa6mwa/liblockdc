@@ -16,7 +16,7 @@ int lc_collection_retention_maintain(lc_collection *self, int *dropped,
   lc_pouch_collection_record record;
   lc_collection_delete_res deleted;
   lc_pouch_unix_seconds now, parent;
-  lc_u64 captured, ordinal, file_segment, file_end;
+  lc_u64 captured, ordinal, file_segment, file_end, trim_budget;
   size_t count, selected, i;
   int fd, rooted, rc, commit_pin;
   *dropped = 0;
@@ -28,6 +28,7 @@ int lc_collection_retention_maintain(lc_collection *self, int *dropped,
   rc = lc_collection_root_begin(collection->pouch, &scope, &guard, error);
   rooted = rc == LC_OK;
   captured = 0U;
+  trim_budget = 0U;
   parent = 0;
   fd = -1;
   file_segment = file_end = 0U;
@@ -40,7 +41,12 @@ int lc_collection_retention_maintain(lc_collection *self, int *dropped,
       if (rc == LC_OK) {
         captured =
             collection->order.retention_present ? collection->order.count : 0U;
-        parent = collection->head.retention;
+        parent = lc_collection_retention_deadline(collection);
+        if (collection->head.max_entries != 0U &&
+            collection->order.live_count > collection->head.max_entries) {
+          trim_budget =
+              collection->order.live_count - collection->head.max_entries;
+        }
       }
       lc_collection_capture_leave(collection, &commit_pin);
     }
@@ -95,6 +101,19 @@ int lc_collection_retention_maintain(lc_collection *self, int *dropped,
   }
   if (fd >= 0)
     (void)close(fd);
+  /* Age deletion runs first so it can satisfy the cap without unnecessarily
+   * deleting an older, unexpired entry. Each trim selects the current oldest
+   * and rechecks policy/count under mutation authority, releasing it after
+   * each deletion. The captured surplus bounds work even if new appends keep
+   * arriving, without spreading an existing backlog over many worker ticks. */
+  for (ordinal = 0U; rc == LC_OK && !*dropped && ordinal < trim_budget;
+       ++ordinal) {
+    rc = lc_collection_trim_entry(self, &deleted, error);
+    if (rc == LC_OK && !deleted.deleted)
+      break;
+    if (rc == LC_OK && !deleted.already_deleted && out != NULL)
+      ++out->retention_deleted_state_count;
+  }
   if (rooted)
     lc_collection_root_end(&scope, &guard);
   lc_collection_call_end(&call);

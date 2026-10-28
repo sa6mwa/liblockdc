@@ -119,8 +119,8 @@ static int append_json(fixture *f, const char *id, const char *json,
   assert_int_equal(
       lc_source_from_memory(json, strlen(json), &f->source, &f->error), LC_OK);
   rc = lc_pouch_collection_record_append(f->pouch, f->fd, leaf, f->id, id,
-                                         position, generation, 0, f->source,
-                                         out, &f->error);
+                                         position, generation, 0, 0, 0,
+                                         f->source, out, &f->error);
   lc_source_close(f->source);
   f->source = NULL;
   return rc;
@@ -184,7 +184,7 @@ static void test_retention_metadata_references_body_and_compacts(void **state) {
           LC_OK);
       assert_int_equal(lc_pouch_collection_record_append(
                            f->pouch, f->fd, leaf, f->id, "retained", 5, 7, -60,
-                           f->source, &original, &f->error),
+                           0, 0, f->source, &original, &f->error),
                        LC_OK);
       lc_source_close(f->source);
       f->source = NULL;
@@ -341,15 +341,17 @@ static void test_retention_uses_publication_clock_and_rolls_back(void **state) {
   source.source.read = delayed_record_read;
   source.f = f;
   assert_int_equal(lc_pouch_collection_record_append(
-                       f->pouch, f->fd, leaf, f->id, "slow", 1, 1, -60,
-                       &source.source, &record, &f->error),
+                       f->pouch, f->fd, leaf, f->id, "slow", 1, 1, -60, 1,
+                       -7776000, &source.source, &record, &f->error),
                    LC_OK);
   assert_int_equal(record.retention, 2060);
   assert_int_equal(record.updated_at_unix, 2000);
+  assert_true(record.has_collection_retention);
+  assert_int_equal(record.collection_retention, 7778000);
   saved_end = file_end(f);
   assert_int_equal(lc_pouch_collection_record_append(
                        f->pouch, f->fd, leaf, f->id, "overflow", 2, 2,
-                       LC_I64_MIN, &source.source, &failed, &f->error),
+                       LC_I64_MIN, 0, 0, &source.source, &failed, &f->error),
                    LC_ERR_INVALID);
   assert_false(failed.published);
   assert_int_equal(file_end(f), saved_end);
@@ -357,7 +359,7 @@ static void test_retention_uses_publication_clock_and_rolls_back(void **state) {
   source.offset = 0;
   assert_int_equal(lc_pouch_collection_record_append(
                        f->pouch, f->fd, leaf, f->id, "overflow", 2, 2,
-                       -LC_I64_MAX, &source.source, &failed, &f->error),
+                       -LC_I64_MAX, 0, 0, &source.source, &failed, &f->error),
                    LC_ERR_INVALID);
   assert_false(failed.published);
   assert_int_equal(file_end(f), saved_end);
@@ -366,7 +368,7 @@ static void test_retention_uses_publication_clock_and_rolls_back(void **state) {
   source.fail_clock = 1;
   f->now = 1000;
   assert_int_equal(lc_pouch_collection_record_append(
-                       f->pouch, f->fd, leaf, f->id, "clock", 2, 2, -60,
+                       f->pouch, f->fd, leaf, f->id, "clock", 2, 2, -60, 0, 0,
                        &source.source, &failed, &f->error),
                    LC_ERR_TRANSPORT);
   assert_false(failed.published);
@@ -800,7 +802,7 @@ static void test_relocation_crosses_large_buffer_boundaries(void **state) {
                                             &f->source, &f->error),
                    LC_OK);
   assert_int_equal(lc_pouch_collection_record_append(
-                       f->pouch, f->fd, leaf, f->id, "large", 1U, 1U, 0,
+                       f->pouch, f->fd, leaf, f->id, "large", 1U, 1U, 0, 0, 0,
                        f->source, &original, &f->error),
                    LC_OK);
   lc_source_close(f->source);

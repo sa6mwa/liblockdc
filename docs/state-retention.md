@@ -160,6 +160,16 @@ with no selected retention need no timestamp backfill. A retention-bearing
 COMMIT missing its required timestamp must not be repaired by guessing replay
 time; report that inconsistent state and preserve it for recovery.
 
+Successful release of an implicit, single-key native lease retires the decision
+created for its retention change after applying commit or rollback. Normal
+renewals therefore leave no terminal transaction backlog for the next client
+open. In NoSync mode, retirement first synchronizes the participant namespace;
+the cleanup cannot outlive the state it proves applied. Cleanup failure remains
+an uncertain release error with a recoverable decision, never proof of rollback.
+Explicit decisions, explicitly acquired transactions, joined transactions and
+managed/external XA retain their existing outcome and recovery rules. Startup
+still recovers interrupted work and decisions left by older clients.
+
 ## Pouch persistence and maintenance
 
 Store retention in the canonical state-record metadata, separately from the

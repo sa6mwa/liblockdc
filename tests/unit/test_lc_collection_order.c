@@ -405,8 +405,41 @@ test_snapshot_rebuild_keeps_interleaved_deletion_generations(void **state) {
   assert_true(f->order.generation == 11);
 }
 
+static void test_oldest_live_hint_skips_gaps_and_survives_reopen(void **state) {
+  fixture *f = *state;
+  lc_collection_order_row row;
+  const lc_u64 total = LC_COLLECTION_ORDER_PAGE_ROWS * 3 + 7;
+  int found;
+  for (lc_u64 i = 1; i <= total; ++i)
+    append(f, i);
+  /* Leave a deleted prefix with a deliberately conservative lower bound. */
+  for (lc_u64 i = 2; i < total; ++i)
+    remove_position(f, i);
+  remove_position(f, 1);
+  assert_int_equal(
+      lc_collection_order_oldest(&f->order, &row, &found, &f->error), LC_OK);
+  assert_true(found && row.position == total &&
+              f->order.first_live == total - 1);
+  remove_position(f, total);
+  lc_collection_order_close(&f->order);
+  assert_int_equal(lc_collection_order_open(f->path, 0, &f->order, &f->error),
+                   LC_OK);
+  assert_true(f->order.first_live == total && f->order.live_count == 0);
+  assert_int_equal(
+      lc_collection_order_oldest(&f->order, &row, &found, &f->error), LC_OK);
+  assert_false(found);
+  append(f, LC_U64_MAX);
+  assert_int_equal(
+      lc_collection_order_oldest(&f->order, &row, &found, &f->error), LC_OK);
+  assert_true(found && row.position == LC_U64_MAX &&
+              f->order.first_live == total);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test_setup_teardown(
+          test_oldest_live_hint_skips_gaps_and_survives_reopen, setup,
+          teardown),
       cmocka_unit_test_setup_teardown(test_empty_and_exclusive_bounds, setup,
                                       teardown),
       cmocka_unit_test_setup_teardown(test_full_unsigned_positions_are_keys,

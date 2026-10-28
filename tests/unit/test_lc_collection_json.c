@@ -497,8 +497,117 @@ static void test_push_codec_does_not_complete_failed_producers(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_incremental_json_finish_abort_and_terminal_states(void **state) {
+  const char *text = " {\"key\":\"\\u20ac \xe2\x82\xac\",\"n\":123} ";
+  lc_collection_json_writer *writer = NULL;
+  lc_sink *sink = NULL;
+  lc_error error;
+  lc_u64 written;
+  const void *bytes;
+  size_t length;
+  (void)state;
+  lc_error_init(&error);
+  assert_int_equal(lc_sink_to_memory(&sink, &error), LC_OK);
+  assert_int_equal(lc_collection_json_writer_open(sink, NULL, &writer, &error),
+                   LC_OK);
+  assert_int_equal(lc_collection_json_writer_write(writer, NULL, 0, &error),
+                   LC_OK);
+  for (size_t i = 0; i < strlen(text); ++i)
+    assert_int_equal(
+        lc_collection_json_writer_write(writer, text + i, 1, &error), LC_OK);
+  assert_int_equal(lc_collection_json_writer_finish(writer, &written, &error),
+                   LC_OK);
+  assert_int_equal(lc_sink_memory_bytes(sink, &bytes, &length, &error), LC_OK);
+  assert_true(length == written && length != 0);
+  assert_int_equal(lc_collection_json_writer_write(writer, " ", 1, &error),
+                   LC_ERR_INVALID);
+  lc_collection_json_writer_close(writer);
+  writer = NULL;
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(lc_collection_json_writer_open(sink, NULL, &writer, &error),
+                   LC_OK);
+  assert_int_equal(lc_collection_json_writer_write(writer, "{", 1, &error),
+                   LC_OK);
+  assert_int_equal(lc_collection_json_writer_finish(writer, &written, &error),
+                   LC_ERR_INVALID);
+  lc_collection_json_writer_close(writer);
+  writer = NULL;
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(lc_collection_json_writer_open(sink, NULL, &writer, &error),
+                   LC_OK);
+  assert_int_equal(
+      lc_collection_json_writer_write(writer, "{\"x\":\"partial", 13, &error),
+      LC_OK);
+  lc_collection_json_writer_close(writer); /* Abort without inventing EOF. */
+  lc_sink_close(sink);
+  lc_error_cleanup(&error);
+}
+
+typedef struct chunk_output {
+  lc_sink pub;
+  size_t bytes;
+  size_t calls;
+  size_t largest;
+  int fail;
+} chunk_output;
+
+static int chunk_write(lc_sink *self, const void *bytes, size_t count,
+                       lc_error *error) {
+  chunk_output *out = (chunk_output *)self;
+  (void)bytes;
+  if (out->fail) {
+    lc_error_set(error, LC_ERR_TIMEOUT, 0, "chunk backpressure failure", NULL,
+                 NULL, NULL);
+    return 0;
+  }
+  out->bytes += count;
+  ++out->calls;
+  if (count > out->largest)
+    out->largest = count;
+  return 1;
+}
+
+static void
+test_incremental_output_is_bounded_and_flushed_before_eof(void **state) {
+  lc_collection_json_writer *writer = NULL;
+  chunk_output out = {0};
+  lc_error error;
+  lc_u64 written;
+  char fragment[16384];
+  (void)state;
+  memset(fragment, 'x', sizeof(fragment));
+  out.pub.write = chunk_write;
+  lc_error_init(&error);
+  assert_int_equal(
+      lc_collection_json_writer_open(&out.pub, NULL, &writer, &error), LC_OK);
+  assert_int_equal(
+      lc_collection_json_writer_write(writer, "{\"s\":\"", 6, &error), LC_OK);
+  for (unsigned int i = 0; i < 4; ++i) {
+    assert_int_equal(lc_collection_json_writer_write(writer, fragment,
+                                                     sizeof(fragment), &error),
+                     LC_OK);
+    /* Backpressure reaches the sink before EOF, including a short tail. */
+    assert_true(out.bytes >= (i + 1U) * sizeof(fragment));
+  }
+  assert_true(out.largest <= 4096 && out.calls < 100);
+  out.fail = 1;
+  assert_int_equal(lc_collection_json_writer_write(writer, "\"}", 2, &error),
+                   LC_ERR_TIMEOUT);
+  assert_string_equal(error.message, "chunk backpressure failure");
+  assert_int_equal(lc_collection_json_writer_finish(writer, &written, &error),
+                   LC_ERR_INVALID);
+  lc_collection_json_writer_close(writer);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test(
+          test_incremental_output_is_bounded_and_flushed_before_eof),
+      cmocka_unit_test(test_incremental_json_finish_abort_and_terminal_states),
       cmocka_unit_test(test_compacts_across_every_input_boundary),
       cmocka_unit_test(test_rejects_invalid_and_nonobject_inputs),
       cmocka_unit_test(test_source_and_sink_failures_are_preserved),

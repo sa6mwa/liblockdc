@@ -9,6 +9,7 @@
 #include "lc_pouch_namespace.h"
 #include "lc_pouch_path.h"
 #include "lc_pouch_query_index.h"
+#include "lc_pouch_recode.h"
 #include "lc_pouch_retention.h"
 
 #include <openssl/crypto.h>
@@ -42,7 +43,8 @@
 
 static uint64_t lc_pouch_next_writer_marker_id;
 static pthread_mutex_t lc_pouch_writer_marker_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t lc_pouch_root_manifest_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int lc_pouch_resolve_compression(lc_pouch *pouch, const char *stored,
+                                        lc_error *error);
 static pthread_mutex_t lc_pouch_writer_root_lock_mutex =
     PTHREAD_MUTEX_INITIALIZER;
 
@@ -57,6 +59,7 @@ struct lc_pouch_writer_root_lock_entry {
   dev_t device;
   ino_t inode;
   int fd;
+  pthread_mutex_t manifest_mutex;
   unsigned long shared_holders;
   unsigned long exclusive_holders;
   struct lc_pouch_writer_root_lock_entry *next;
@@ -3591,6 +3594,8 @@ static void lc_pouch_init_options(lc_pouch *pouch,
           : 1;
   pouch->compression = lc_strdup_with_allocator(
       &pouch->allocator, lc_pouch_compression_option(options));
+  pouch->compression_explicit =
+      options && options->compression && *options->compression;
 }
 
 static void lc_pouch_detect_filesystem_capabilities(lc_pouch *pouch) {
@@ -4075,6 +4080,7 @@ static int lc_pouch_warm_open_namespaces(lc_pouch *pouch, lc_error *error) {
 }
 
 static int lc_pouch_validate_root_crypto_mode(lc_pouch *pouch,
+                                              int *write_manifest,
                                               lc_error *error) {
   char stored_key_id[128];
   char stored_layout[64];
@@ -4082,7 +4088,6 @@ static int lc_pouch_validate_root_crypto_mode(lc_pouch *pouch,
   char stored_compression[sizeof("zlib")];
   char *requested_key_id;
   const char *requested_mode;
-  const char *requested_compression;
   unsigned long stored_version;
   int found_crypto_mode;
   int found_compression;
@@ -4091,12 +4096,9 @@ static int lc_pouch_validate_root_crypto_mode(lc_pouch *pouch,
   int rc;
 
   requested_key_id = NULL;
+  *write_manifest = 1;
   requested_mode =
       lc_pouch_crypto_enabled(pouch->crypto) ? "encrypted" : "plaintext";
-  requested_compression =
-      pouch->compression != NULL && strcmp(pouch->compression, "zlib") == 0
-          ? "zlib"
-          : "none";
   stored_version = 0UL;
   found_crypto_mode = 0;
   found_compression = 0;
@@ -4174,12 +4176,6 @@ static int lc_pouch_validate_root_crypto_mode(lc_pouch *pouch,
         "pouch root crypto mode cannot be changed after initialization", NULL,
         NULL, "pouch");
   }
-  if (strcmp(stored_compression, requested_compression) != 0) {
-    return lc_error_set(
-        error, LC_ERR_INVALID, 0L,
-        "pouch root compression mode cannot be changed after initialization",
-        NULL, NULL, "pouch");
-  }
   if (strcmp(stored_mode, "plaintext") == 0 && stored_key_id[0] != '\0') {
     return lc_error_set(
         error, LC_ERR_INVALID, 0L,
@@ -4187,7 +4183,8 @@ static int lc_pouch_validate_root_crypto_mode(lc_pouch *pouch,
         NULL, "pouch");
   }
   if (strcmp(stored_mode, "encrypted") != 0) {
-    return LC_OK;
+    *write_manifest = 0;
+    return lc_pouch_resolve_compression(pouch, stored_compression, error);
   }
   if (stored_key_id[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -4206,7 +4203,8 @@ static int lc_pouch_validate_root_crypto_mode(lc_pouch *pouch,
         NULL, "pouch");
   }
   lc_free_with_allocator(NULL, requested_key_id);
-  return LC_OK;
+  *write_manifest = 0;
+  return lc_pouch_resolve_compression(pouch, stored_compression, error);
 }
 
 static int lc_pouch_root_manifest_lock(lc_pouch *pouch, int *out,
@@ -4267,6 +4265,7 @@ static void lc_pouch_root_manifest_unlock(int fd) {
 static int lc_pouch_ensure_root(lc_pouch *pouch, lc_error *error) {
   char *namespaces_path;
   int manifest_mutex_locked;
+  int write_manifest;
   int lock_fd;
   int pthread_rc;
   int rc;
@@ -4283,16 +4282,11 @@ static int lc_pouch_ensure_root(lc_pouch *pouch, lc_error *error) {
                         "failed to allocate pouch namespaces path", NULL, NULL,
                         NULL);
   }
-  rc = lc_pouch_path_ensure_directory(
-      namespaces_path, "failed to create pouch namespaces directory", error);
-  lc_free_with_allocator(&pouch->allocator, namespaces_path);
-  if (rc != LC_OK) {
-    return rc;
-  }
   manifest_mutex_locked = 0;
   lock_fd = -1;
-  pthread_rc = pthread_mutex_lock(&lc_pouch_root_manifest_mutex);
+  pthread_rc = pthread_mutex_lock(&pouch->writer_root_lock->manifest_mutex);
   if (pthread_rc != 0) {
+    lc_free_with_allocator(&pouch->allocator, namespaces_path);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to lock pouch root manifest mutex",
                         strerror(pthread_rc), NULL, "pouch");
@@ -4300,14 +4294,18 @@ static int lc_pouch_ensure_root(lc_pouch *pouch, lc_error *error) {
   manifest_mutex_locked = 1;
   rc = lc_pouch_root_manifest_lock(pouch, &lock_fd, error);
   if (rc == LC_OK) {
-    rc = lc_pouch_validate_root_crypto_mode(pouch, error);
+    rc = lc_pouch_validate_root_crypto_mode(pouch, &write_manifest, error);
   }
-  if (rc == LC_OK) {
+  if (rc == LC_OK)
+    rc = lc_pouch_path_ensure_directory(
+        namespaces_path, "failed to create pouch namespaces directory", error);
+  lc_free_with_allocator(&pouch->allocator, namespaces_path);
+  if (rc == LC_OK && write_manifest) {
     rc = lc_pouch_write_root_manifest(pouch, error);
   }
   lc_pouch_root_manifest_unlock(lock_fd);
   if (manifest_mutex_locked) {
-    pthread_mutex_unlock(&lc_pouch_root_manifest_mutex);
+    pthread_mutex_unlock(&pouch->writer_root_lock->manifest_mutex);
   }
   return rc;
 }
@@ -4413,6 +4411,7 @@ static void lc_pouch_writer_root_lock_release(lc_pouch *pouch) {
     fl.l_whence = SEEK_SET;
     (void)fcntl(entry->fd, F_SETLK, &fl);
     (void)close(entry->fd);
+    (void)pthread_mutex_destroy(&entry->manifest_mutex);
     lc_free_with_allocator(&entry->allocator, entry);
   }
   pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
@@ -4526,6 +4525,17 @@ static int lc_pouch_writer_root_lock_acquire(lc_pouch *pouch, int mode,
                         "pouch");
   }
   entry->allocator = pouch->allocator;
+  saved_errno = pthread_mutex_init(&entry->manifest_mutex, NULL);
+  if (saved_errno != 0) {
+    fl.l_type = F_UNLCK;
+    (void)fcntl(fd, F_SETLK, &fl);
+    (void)close(fd);
+    lc_free_with_allocator(&pouch->allocator, entry);
+    pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0,
+                        "failed to initialize root manifest mutex",
+                        strerror(saved_errno), NULL, "pouch");
+  }
   entry->device = st.st_dev;
   entry->inode = st.st_ino;
   entry->fd = fd;
@@ -5914,5 +5924,293 @@ int lc_pouch_ensure_namespace(lc_pouch *pouch, const char *ns,
     fields[2] = lc_log_code_field(error);
     lc_log_error(pouch->logger, "manifest.recover_staged.error", fields, 3U);
   }
+  return rc;
+}
+
+#ifdef LOCKDC_TEST_BUILD
+lc_pouch_recode_hook_fn lc_pouch_recode_test_hook;
+void *lc_pouch_recode_test_context;
+#endif
+
+const char *lc_pouch_compression_mode(const lc_pouch *pouch) {
+  return pouch->compression;
+}
+
+static int lc_pc_phase(int phase, lc_error *error) {
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_pouch_recode_test_hook)
+    return lc_pouch_recode_test_hook(lc_pouch_recode_test_context, phase,
+                                     error);
+#else
+  (void)phase;
+  (void)error;
+#endif
+  return LC_OK;
+}
+
+static int lc_pc_mode(lc_pouch *pouch, const char *mode, lc_error *error) {
+  lc_pouch_crypto_open_options options;
+  char *copy;
+  int rc = LC_OK;
+  if (!strcmp(pouch->compression, mode))
+    return LC_OK;
+  copy = lc_strdup_with_allocator(&pouch->allocator, mode);
+  if (!copy)
+    return lc_error_set(error, LC_ERR_NOMEM, 0,
+                        "failed to select root compression", NULL, NULL,
+                        "pouch");
+  if (!pouch->crypto && !strcmp(mode, "zlib")) {
+    memset(&options, 0, sizeof(options));
+    options.compression_enabled = 1;
+    rc = lc_pouch_crypto_open(&pouch->allocator, &options, &pouch->crypto, NULL,
+                              error);
+  }
+  if (rc == LC_OK) {
+    lc_pouch_crypto_set_compression(pouch->crypto, !strcmp(mode, "zlib"));
+    lc_free_with_allocator(&pouch->allocator, pouch->compression);
+    pouch->compression = copy;
+  } else
+    lc_free_with_allocator(&pouch->allocator, copy);
+  return rc;
+}
+
+static int lc_pc_exists(const char *path, int *exists, lc_error *error) {
+  struct stat st;
+  *exists = 0;
+  if (lstat(path, &st) == 0) {
+    *exists = 1;
+    return LC_OK;
+  }
+  return errno == ENOENT
+             ? LC_OK
+             : lc_error_set(error, LC_ERR_TRANSPORT, 0,
+                            "failed to inspect compression conversion",
+                            strerror(errno), path, "pouch");
+}
+
+static void lc_pc_log(lc_pouch *pouch, const char *event, int warning,
+                      const char *from, const char *to, lc_u64 input,
+                      lc_u64 output, lc_u64 elapsed, int recovered) {
+  pslog_field fields[7];
+  fields[0] = lc_log_str_field("path", pouch->root_path);
+  fields[1] = lc_log_str_field("from", from);
+  fields[2] = lc_log_str_field("to", to);
+  fields[3] = lc_log_u64_field("input_bytes", input);
+  fields[4] = lc_log_u64_field("output_bytes", output);
+  fields[5] = lc_log_u64_field("elapsed_ms", elapsed);
+  fields[6] = lc_log_bool_field("recovered", recovered);
+  if (warning)
+    lc_log_warn(pouch->logger, event, fields, 7);
+  else
+    lc_log_info(pouch->logger, event, fields, 7);
+}
+
+/* Ready means every replacement file and directory is durable. The intent is
+ * removed only after the new manifest and old-tree reclamation are durable. */
+static int lc_pc_publish(lc_pouch *pouch, const char *intent, const char *fresh,
+                         const char *old, const char *current,
+                         const char *stored, const char *target,
+                         lc_error *error) {
+  int has_current, has_old, has_fresh, rc;
+  rc = lc_pc_exists(current, &has_current, error);
+  if (rc == LC_OK)
+    rc = lc_pc_exists(old, &has_old, error);
+  if (rc == LC_OK)
+    rc = lc_pc_exists(fresh, &has_fresh, error);
+  if (rc != LC_OK)
+    return rc;
+  if (has_fresh && !has_old && has_current) {
+    if (rename(current, old) != 0)
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0,
+                          "failed to preserve source namespaces",
+                          strerror(errno), NULL, "pouch");
+    has_current = 0;
+    has_old = 1;
+    rc = lc_pouch_path_fsync_directory(
+        pouch->root_path, "failed to sync preserved namespaces", error);
+    if (rc == LC_OK)
+      rc = lc_pc_phase(2, error);
+  }
+  if (rc == LC_OK && has_fresh && has_old && !has_current) {
+    if (rename(fresh, current) != 0)
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0,
+                          "failed to install converted namespaces",
+                          strerror(errno), NULL, "pouch");
+    has_fresh = 0;
+    has_current = 1;
+    rc = lc_pouch_path_fsync_directory(
+        pouch->root_path, "failed to sync converted namespaces", error);
+    if (rc == LC_OK)
+      rc = lc_pc_phase(3, error);
+  }
+  if (rc == LC_OK &&
+      (!has_current || has_fresh || (!has_old && strcmp(stored, target))))
+    rc = lc_error_set(error, LC_ERR_PROTOCOL, 0,
+                      "compression conversion publication is incomplete", NULL,
+                      NULL, "pouch");
+  if (rc == LC_OK)
+    rc = lc_pc_mode(pouch, target, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_write_root_manifest(pouch, error);
+  if (rc == LC_OK)
+    rc = lc_pc_phase(4, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_recode_remove_tree(old, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_path_fsync_directory(
+        pouch->root_path, "failed to sync conversion reclamation", error);
+  if (rc == LC_OK)
+    rc = lc_pc_phase(5, error);
+  if (rc == LC_OK && unlink(intent) != 0)
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0,
+                      "failed to retire compression intent", strerror(errno),
+                      NULL, "pouch");
+  if (rc == LC_OK)
+    rc = lc_pouch_path_fsync_directory(
+        pouch->root_path, "failed to sync compression completion", error);
+  return rc;
+}
+
+static int lc_pc_read_intent(const char *path, char from[5], char to[5],
+                             lc_u64 *input, lc_u64 *output, lc_error *error) {
+  char bytes[128], *token, *save = NULL, *in, *out;
+  FILE *fp = fopen(path, "rb");
+  size_t count;
+  int rc = LC_OK;
+  if (!fp)
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0,
+                        "failed to read compression intent", strerror(errno),
+                        NULL, "pouch");
+  count = fread(bytes, 1, sizeof(bytes), fp);
+  if (ferror(fp))
+    rc = LC_ERR_TRANSPORT;
+  (void)fclose(fp);
+  if (rc != LC_OK || count == sizeof(bytes))
+    goto invalid;
+  bytes[count] = '\0';
+  token = strtok_r(bytes, "\n", &save);
+  if (!token || strcmp(token, "pouch-compression-v1"))
+    goto invalid;
+  token = strtok_r(NULL, "\n", &save);
+  if (!token || (strcmp(token, "none") && strcmp(token, "zlib")))
+    goto invalid;
+  strcpy(from, token);
+  token = strtok_r(NULL, "\n", &save);
+  if (!token || (strcmp(token, "none") && strcmp(token, "zlib")))
+    goto invalid;
+  strcpy(to, token);
+  in = strtok_r(NULL, "\n", &save);
+  out = strtok_r(NULL, "\n", &save);
+  if (!in || !out || !strcmp(from, to) || !lc_u64_parse_base10(in, input) ||
+      !lc_u64_parse_base10(out, output) || strtok_r(NULL, "\n", &save))
+    goto invalid;
+  return LC_OK;
+invalid:
+  return lc_error_set(error, LC_ERR_PROTOCOL, 0,
+                      "invalid Pouch compression conversion intent", NULL, NULL,
+                      "pouch");
+}
+
+static int lc_pouch_resolve_compression(lc_pouch *pouch, const char *stored,
+                                        lc_error *error) {
+  char requested[5], previous[5], target[5], text[128], in[32], out[32];
+  char *intent, *fresh, *old, *current;
+  struct timespec started = {0, 0}, ended = {0, 0};
+  lc_u64 input = 0, output = 0, elapsed = 0;
+  int pending, shared, rc;
+  strcpy(requested, pouch->compression);
+  strcpy(previous, stored);
+  intent = lc_pouch_path_join(&pouch->allocator, pouch->root_path,
+                              ".compression-ready");
+  fresh = lc_pouch_path_join(&pouch->allocator, pouch->root_path,
+                             ".compression-new");
+  old = lc_pouch_path_join(&pouch->allocator, pouch->root_path,
+                           ".compression-old");
+  current =
+      lc_pouch_path_join(&pouch->allocator, pouch->root_path, "namespaces");
+  rc = intent && fresh && old && current ? lc_pc_exists(intent, &pending, error)
+                                         : LC_ERR_NOMEM;
+  shared = pouch->writer_root_lock_mode == LC_POUCH_WRITER_ROOT_LOCK_SHARED;
+  if (rc == LC_OK && !pending &&
+      (!pouch->compression_explicit || !strcmp(requested, stored))) {
+    rc = lc_pc_mode(pouch, stored, error);
+    goto done;
+  }
+  if (rc == LC_OK && shared) {
+    rc = lc_pouch_writer_root_lock_change(
+        pouch, LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE, error);
+    if (rc == LC_ERR_INVALID) {
+      lc_pc_log(pouch, "compression.convert.refused", 1, stored, requested, 0,
+                0, 0, pending);
+      lc_error_cleanup(error);
+      lc_error_init(error);
+      rc = pending
+               ? lc_error_set(
+                     error, LC_ERR_PENDING, 0,
+                     "compression recovery requires exclusive root ownership",
+                     NULL, NULL, "pouch")
+               : lc_pc_mode(pouch, stored, error);
+      goto done;
+    }
+  }
+  if (rc == LC_OK && pending) {
+    rc = lc_pc_read_intent(intent, previous, target, &input, &output, error);
+    if (rc == LC_OK) {
+      (void)clock_gettime(CLOCK_MONOTONIC, &started);
+      lc_pc_log(pouch, "compression.convert.start", 1, previous, target, input,
+                output, 0, 1);
+      rc = lc_pc_publish(pouch, intent, fresh, old, current, stored, target,
+                         error);
+      (void)clock_gettime(CLOCK_MONOTONIC, &ended);
+      elapsed = (lc_u64)(ended.tv_sec - started.tv_sec) * 1000 +
+                (ended.tv_nsec - started.tv_nsec) / 1000000;
+      if (rc == LC_OK) {
+        lc_pc_log(pouch, "compression.convert.complete", 0, previous, target,
+                  input, output, elapsed, 1);
+        strcpy(previous, target);
+      }
+    }
+  }
+  if (rc == LC_OK && pouch->compression_explicit &&
+      strcmp(requested, previous)) {
+    (void)clock_gettime(CLOCK_MONOTONIC, &started);
+    lc_pc_log(pouch, "compression.convert.start", 1, previous, requested, 0, 0,
+              0, 0);
+    rc = lc_pc_mode(pouch, requested, error);
+    if (rc == LC_OK)
+      rc = lc_pouch_recode_build(pouch, current, fresh, &input, &output, error);
+    if (rc == LC_OK)
+      rc = lc_pc_phase(0, error);
+    if (rc == LC_OK) {
+      (void)lc_u64_format_base10(input, in, sizeof(in));
+      (void)lc_u64_format_base10(output, out, sizeof(out));
+      (void)snprintf(text, sizeof(text),
+                     "pouch-compression-v1\n%s\n%s\n%s\n%s\n", previous,
+                     requested, in, out);
+      rc = lc_pouch_path_write_text_file(intent, text, error);
+    }
+    if (rc == LC_OK)
+      rc = lc_pc_phase(1, error);
+    if (rc == LC_OK)
+      rc = lc_pc_publish(pouch, intent, fresh, old, current, previous,
+                         requested, error);
+    (void)clock_gettime(CLOCK_MONOTONIC, &ended);
+    elapsed = (lc_u64)(ended.tv_sec - started.tv_sec) * 1000 +
+              (ended.tv_nsec - started.tv_nsec) / 1000000;
+    if (rc == LC_OK)
+      lc_pc_log(pouch, "compression.convert.complete", 0, previous, requested,
+                input, output, elapsed, 0);
+  }
+  if (rc == LC_OK && shared)
+    rc = lc_pouch_writer_root_lock_change(
+        pouch, LC_POUCH_WRITER_ROOT_LOCK_SHARED, error);
+done:
+  lc_free_with_allocator(&pouch->allocator, intent);
+  lc_free_with_allocator(&pouch->allocator, fresh);
+  lc_free_with_allocator(&pouch->allocator, old);
+  lc_free_with_allocator(&pouch->allocator, current);
+  if (rc != LC_OK && error && error->code == LC_OK)
+    lc_error_set(error, rc, 0, "failed to resolve Pouch root compression", NULL,
+                 NULL, "pouch");
   return rc;
 }

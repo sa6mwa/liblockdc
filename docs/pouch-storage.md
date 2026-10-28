@@ -1277,9 +1277,13 @@ root/
 ```
 
 The root `manifest` records the root mode: plaintext, crypto, compression, and
-crypto+compression. Plaintext and transformed roots cannot mix. Opening a root
-with a different mode must fail. The initial release does not contain a
-plaintext/transformed migration path.
+crypto+compression. Encryption policy and key identity cannot change on open.
+Omitted compression inherits the stored mode (none for a new root). Explicit
+`none` or `zlib` converts the entire root synchronously when exclusive ownership
+is available; other active writers cause a warning and use of the stored mode.
+Conversion preserves logical identities and retained history, streams payloads
+in bounded chunks, and recovers interrupted publication before opening. See
+[compression changes on open](pouch-compression.md) for space and recovery rules.
 
 When a root is first opened by a release that supports historical binary
 control records, Pouch completes the required migration before becoming

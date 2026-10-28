@@ -2601,9 +2601,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
                           NULL);
     }
     client->pouch_compression = lc_strdup_with_allocator(
-        &config->allocator, pouch_open_options.compression);
-    if (pouch_open_options.compression != NULL &&
-        client->pouch_compression == NULL) {
+        &config->allocator, lc_pouch_compression_mode(client->pouch));
+    if (client->pouch_compression == NULL) {
       lc_client_close_method(&client->pub);
       lc_engine_error_cleanup(&engine_error);
       lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
@@ -3062,7 +3061,9 @@ int lc_sink_memory_reserve(lc_sink *sink, size_t capacity, lc_error *error) {
 }
 
 int lc_copy(lc_source *src, lc_sink *dst, size_t *written, lc_error *error) {
-  unsigned char buffer[65536];
+  unsigned char small[2048];
+  unsigned char *buffer;
+  size_t capacity;
   size_t total;
   size_t nread;
   int rc;
@@ -3077,22 +3078,43 @@ int lc_copy(lc_source *src, lc_sink *dst, size_t *written, lc_error *error) {
     lc_error_cleanup(error);
     lc_error_init(error);
   }
+  /* Short copies avoid a large allocation. Long copies keep the bulk chunk on
+   * the heap so callbacks can compose copies on default musl worker stacks. */
+  buffer = small;
+  capacity = sizeof(small);
   total = 0U;
   for (;;) {
-    nread = src->read(src, buffer, sizeof(buffer), error);
+    nread = src->read(src, buffer, capacity, error);
     if (nread == 0U) {
       if (written != NULL) {
         *written = total;
       }
-      return error != NULL && error->code != LC_OK ? error->code : LC_OK;
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_OK;
+      break;
     }
     rc = dst->write(dst, buffer, nread, error);
     if (!rc) {
-      return error != NULL && error->code != LC_OK ? error->code
-                                                   : LC_ERR_TRANSPORT;
+      rc = error != NULL && error->code != LC_OK ? error->code
+                                                 : LC_ERR_TRANSPORT;
+      break;
     }
     total += nread;
+    if (buffer == small && nread == sizeof(small)) {
+      /* 16 KiB also avoids musl's expensive large-allocation size classes. */
+      buffer = (unsigned char *)lc_alloc_with_allocator(NULL, 16384U);
+      if (buffer == NULL) {
+        rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate stream copy buffer", NULL, NULL,
+                          NULL);
+        break;
+      }
+      capacity = 16384U;
+    }
   }
+  if (buffer != small) {
+    lc_free_with_allocator(NULL, buffer);
+  }
+  return rc;
 }
 
 /* Facade result metadata uses raw libc ownership, including buffers supplied

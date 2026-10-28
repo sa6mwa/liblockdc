@@ -1,5 +1,58 @@
 # Release notes
 
+## 0.24.0
+
+- Upgrade cpkt to 0.6.1, including its libssh2 AES-GCM key cleanup fix. Keep
+  cpktdb at 0.3.1 and use the published core compatibility floor.
+
+- Upgrade liblql to 0.4.0 for allocator-owned workspaces and default musl
+  worker-thread stacks. Its public API and shared-library ABI remain unchanged.
+
+- Keep stream-copy, mutation and Pouch query scratch buffers off worker stacks.
+  Use small bounded chunks for short copies and allocator-owned 16 KiB bulk
+  copy/mutation scratch. Reuse query scratch within each request and release
+  scratch on success and failure.
+
+- Convert Pouch roots synchronously on an explicit compression change, in both
+  directions, preserving states, attachments, collections, cursors and retained
+  transaction history. Omission inherits the stored mode; new roots still use
+  none. Competing writers cause a warning and adoption of the stored mode.
+  Publication is durable and recoverable; payload transformation streams in
+  bounded chunks. Log warning on start/refusal and info on completion.
+
+- Retire fully applied single-key implicit retention transactions on release,
+  preventing successful state renewals from building a synchronous recovery
+  backlog for the next open. Preserve explicit/joined XA outcomes and fence
+  NoSync cleanup behind participant durability.
+
+- Add push-fed collection append writers in C and Lua, sharing the incremental
+  validator and codecs with pull append. Publish the pending canonical inode
+  without a body copy, support explicit abort/close, and recover interrupted
+  publication. Both append forms can atomically renew parent retention only
+  for new membership; retries retain the original deadline observation.
+  These public layout additions share core ABI **7** below.
+
+- Add optional per-collection `max_entries` retention in C and Lua. Keep the
+  newest N live entries using bounded lazy maintenance, preserving positions,
+  retry identities, streaming reads, and existing age-retention behavior.
+  Appends do not trim synchronously. Core ABI advances from released ABI 6 in
+  v0.23.0 to **7** for public collection request/result fields; PostgreSQL
+  provider ABI remains 0. Rebuild C consumers and the provider.
+
+### Upgrading from 0.23.x
+
+Rebuild C consumers and the optional PostgreSQL provider against core ABI **7**
+(`liblockdc.so.7` or `liblockdc.7.dylib`). Collection request/result layouts and
+the client receiver surface have changed; the provider's own ABI remains **0**.
+Existing collections have no count limit unless explicitly configured. Lua
+callers can use the new optional fields without changing existing calls.
+
+Existing Pouch roots retain their stored compression when the option is omitted.
+Explicitly requesting a different mode now converts the root before open returns;
+allow time and disk space for the replacement tree. See
+[compression conversion](docs/pouch-compression.md) for writer exclusion,
+failure recovery and logging behavior.
+
 ## 0.22.0
 
 - Add ordered Pouch collections to C and Lua: immutable JSON bodies, permanent

@@ -70,6 +70,8 @@ function(lc_add_unit_test target_name)
 endfunction()
 
 lc_add_unit_test(lc_unit_streams test_lc_streams.c)
+lc_add_unit_test(lc_unit_stream_scratch test_lc_stream_scratch.c
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
 lc_add_unit_test(lc_unit_pouch_query_terms test_lc_pouch_query_terms.c)
 lc_add_unit_test(lc_unit_collection_index test_lc_collection_index.c)
 lc_add_unit_test(lc_unit_collection_order test_lc_collection_order.c
@@ -245,6 +247,9 @@ target_sources(lc_unit_mutate_stream PRIVATE
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
 )
 lc_add_unit_test(lc_unit_pouch test_lc_pouch.c)
+lc_add_unit_test(lc_unit_pouch_compression test_lc_pouch_compression.c
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+target_compile_definitions(lc_unit_pouch_compression PRIVATE LOCKDC_TEST_BUILD=1)
 lc_add_unit_test(lc_unit_state_retention test_lc_state_retention.c
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
 target_compile_definitions(lc_unit_state_retention PRIVATE LOCKDC_TEST_BUILD=1)

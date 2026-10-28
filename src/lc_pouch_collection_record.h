@@ -21,6 +21,8 @@ typedef struct lc_pouch_collection_record {
   size_t metadata_length;
   lc_pouch_unix_seconds updated_at_unix;
   lc_pouch_unix_seconds retention;
+  lc_pouch_unix_seconds collection_retention;
+  int has_collection_retention;
   unsigned long stored_crc;
   char append_id[129];
   char etag[65];
@@ -32,6 +34,28 @@ typedef struct lc_pouch_collection_record {
   int published;
 } lc_pouch_collection_record;
 
+typedef struct lc_pouch_collection_writer lc_pouch_collection_writer;
+/* fd == -1 selects hash-only retry verification. Position zero selects an
+ * upload context with position assigned at publication. No method owns fd. */
+int lc_pouch_collection_writer_open(
+    lc_pouch *pouch, int fd, const char *container_leaf,
+    const char *collection_id, const char *append_id, uint64_t position,
+    uint64_t generation, lc_pouch_unix_seconds retention,
+    int has_collection_retention, lc_pouch_unix_seconds collection_retention,
+    lc_pouch_collection_writer **out, lc_error *error);
+int lc_pouch_collection_writer_write(lc_pouch_collection_writer *writer,
+                                     const void *bytes, size_t count,
+                                     lc_error *error);
+int lc_pouch_collection_writer_finish(lc_pouch_collection_writer *writer,
+                                      lc_pouch_collection_record *out,
+                                      lc_error *error);
+int lc_pouch_collection_writer_publish(lc_pouch_collection_writer *writer,
+                                       const char *container_leaf,
+                                       uint64_t position, uint64_t generation,
+                                       lc_pouch_collection_record *out,
+                                       lc_error *error);
+void lc_pouch_collection_writer_close(lc_pouch_collection_writer *writer);
+
 /* Caller owns append authority and a repaired tail. Borrows fd and source.
  * Validation failure rolls back the unpublished byte range. After published is
  * set, any error can have a committed outcome and must be reconciled. The
@@ -42,8 +66,9 @@ typedef struct lc_pouch_collection_record {
 int lc_pouch_collection_record_append(
     lc_pouch *pouch, int fd, const char *container_leaf,
     const char *collection_id, const char *append_id, uint64_t position,
-    uint64_t generation, lc_pouch_unix_seconds retention, lc_source *source,
-    lc_pouch_collection_record *out, lc_error *error);
+    uint64_t generation, lc_pouch_unix_seconds retention,
+    int has_collection_retention, lc_pouch_unix_seconds collection_retention,
+    lc_source *source, lc_pouch_collection_record *out, lc_error *error);
 /* Canonical STATE_META referencing the existing immutable payload span.
  * retention follows the same duration/deadline encoding as append, with zero
  * clearing expiry. previous_segment binds

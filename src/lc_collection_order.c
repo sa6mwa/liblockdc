@@ -134,6 +134,9 @@ static int lc_co_root_write(lc_collection_order *order, lc_error *error) {
   memcpy(bytes + 72U, order->query_id, LC_XID_STRING_SIZE - 1U);
   lc_co_put64(bytes + 96U, order->metadata_generation);
   lc_co_put64(bytes + 104U, order->retention_present ? 1U : 0U);
+  lc_co_put64(bytes + 112U, order->first_live);
+  lc_co_put64(bytes + 120U, order->collection_retention_generation);
+  lc_co_put64(bytes + 128U, (lc_u64)order->collection_retention);
   lc_co_seal(bytes, sizeof(bytes));
   return lc_co_io(order->fd, 0U, bytes, sizeof(bytes), 1, error);
 }
@@ -157,7 +160,7 @@ int lc_collection_order_refresh(lc_collection_order *order, lc_error *error) {
                        "collection index header is invalid");
   }
   for (i = 92U; i < sizeof(bytes) - 4U; ++i)
-    if ((i < 96U || i >= 112U) && bytes[i] != 0U)
+    if ((i < 96U || i >= 136U) && bytes[i] != 0U)
       return lc_co_error(error, LC_ERR_PROTOCOL,
                          "collection index header has unknown fields");
   order->count = lc_co_get64(bytes + 8U);
@@ -166,6 +169,12 @@ int lc_collection_order_refresh(lc_collection_order *order, lc_error *error) {
   order->replay_segment = lc_co_get64(bytes + 32U);
   order->replay_offset = lc_co_get64(bytes + 40U);
   order->live_count = lc_co_get64(bytes + 48U);
+  order->first_live = lc_co_get64(bytes + 112U);
+  order->collection_retention_generation = lc_co_get64(bytes + 120U);
+  if (lc_co_get64(bytes + 128U) > (lc_u64)LC_I64_MAX)
+    return lc_co_error(error, LC_ERR_PROTOCOL,
+                       "collection renewal deadline is invalid");
+  order->collection_retention = (lc_unix_seconds)lc_co_get64(bytes + 128U);
   order->snapshot = lc_co_get64(bytes + 56U);
   order->reclaimable_bytes = lc_co_get64(bytes + 64U);
   order->metadata_generation = lc_co_get64(bytes + 96U);
@@ -173,7 +182,8 @@ int lc_collection_order_refresh(lc_collection_order *order, lc_error *error) {
     return lc_co_error(error, LC_ERR_PROTOCOL,
                        "collection retention work hint is invalid");
   order->retention_present = lc_co_get64(bytes + 104U) != 0U;
-  if (order->metadata_generation > order->generation)
+  if (order->metadata_generation > order->generation ||
+      order->collection_retention_generation > order->generation)
     return lc_co_error(error, LC_ERR_PROTOCOL,
                        "collection metadata generation exceeds its watermark");
   memcpy(order->query_id, bytes + 72U, LC_XID_STRING_SIZE - 1U);
@@ -183,7 +193,9 @@ int lc_collection_order_refresh(lc_collection_order *order, lc_error *error) {
                        "collection query projection identity is invalid");
   if ((order->count == 0U && order->upper_position != 0U) ||
       order->upper_position < order->count ||
-      order->generation < order->count || order->live_count > order->count) {
+      order->generation < order->count || order->live_count > order->count ||
+      order->first_live > order->count ||
+      (order->live_count != 0U && order->first_live == order->count)) {
     return lc_co_error(error, LC_ERR_PROTOCOL,
                        "collection index header bounds are inconsistent");
   }
@@ -453,6 +465,8 @@ static int lc_co_append(lc_collection_order *order,
   }
   rc = lc_co_page_write(order, number, &page, error);
   if (rc == LC_OK) {
+    if (order->live_count == 0U)
+      order->first_live = order->count + (row->deleted_at != 0U ? 1U : 0U);
     ++order->count;
     order->live_count += row->deleted_at == 0U ? 1U : 0U;
     if (row->published_at > order->generation) {
@@ -646,6 +660,10 @@ int lc_collection_order_delete(lc_collection_order *order, lc_u64 position,
   if (rc == LC_OK) {
     order->generation = generation;
     --order->live_count;
+    if (ordinal == order->first_live)
+      order->first_live = ordinal + 1U;
+    if (order->live_count == 0U)
+      order->first_live = order->count;
     order->reclaimable_bytes =
         row.stored_bytes > LC_U64_MAX - order->reclaimable_bytes
             ? LC_U64_MAX
@@ -655,6 +673,39 @@ int lc_collection_order_delete(lc_collection_order *order, lc_u64 position,
     rc = lc_co_root_write(order, error);
   }
   return rc;
+}
+
+int lc_collection_order_oldest(lc_collection_order *order,
+                               lc_collection_order_row *row, int *found,
+                               lc_error *error) {
+  lc_collection_order_iter iter;
+  lc_u64 examined;
+  size_t count;
+  int rc;
+  if (order == NULL || order->fd < 0 || row == NULL || found == NULL)
+    return lc_co_error(error, LC_ERR_INVALID,
+                       "oldest collection entry requires order and output");
+  *found = 0;
+  if (order->live_count == 0U)
+    return LC_OK;
+  memset(&iter, 0, sizeof(iter));
+  iter.next = order->first_live;
+  iter.count = order->count;
+  iter.generation = order->generation;
+  iter.through = order->upper_position;
+  do {
+    rc = lc_collection_order_batch(order, &iter, row, 1U, &count, &examined,
+                                   error);
+    if (rc != LC_OK)
+      return rc;
+    if (count != 0U) {
+      order->first_live = iter.next - 1U;
+      *found = 1;
+      return LC_OK;
+    }
+  } while (!iter.done);
+  return lc_co_error(error, LC_ERR_PROTOCOL,
+                     "collection live count contradicts ordered rows");
 }
 
 int lc_collection_order_seek(lc_collection_order *order, lc_u64 after,

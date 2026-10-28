@@ -89,6 +89,12 @@ Each field resolves once during client construction, in this order:
 3. the equivalent `pouch://` endpoint query option;
 4. the established Pouch default.
 
+Compression omission inherits the existing root's stored mode; only new roots
+default to `none`. Explicit `none`/`zlib` requests synchronous whole-root
+conversion when different. Competing writers cause a warning and use of the
+stored mode, while conversion errors fail the open. See
+[compression changes on open](pouch-compression.md).
+
 The selected typed setting always wins. For C callers,
 `pouch_settings.compression = "none"` overrides both the legacy dedicated
 field and `?compression=zlib`. Lua exposes only its nested `pouch` table and

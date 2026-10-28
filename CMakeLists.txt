@@ -86,13 +86,13 @@ set(LOCKDC_NGHTTP2_VERSION "1.70.0" CACHE STRING "Pinned nghttp2 release supplie
 set(LOCKDC_LIBSSH2_VERSION "1.11.1" CACHE STRING "Pinned libssh2 release supplied by cpkt.")
 set(LOCKDC_LONEJSON_VERSION "0.45.0" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
 set(LOCKDC_LONEJSON_ABI_VERSION "26" CACHE STRING "Pinned lonejson shared-library ABI/SOVERSION." FORCE)
-set(LOCKDC_LIBLQL_VERSION "0.3.0" CACHE STRING "Pinned liblql release used for pouch LQL query support." FORCE)
+set(LOCKDC_LIBLQL_VERSION "0.4.0" CACHE STRING "Pinned liblql release used for pouch LQL query support." FORCE)
 set(LOCKDC_LIBLQL_ABI_VERSION "0" CACHE STRING "Pinned liblql shared-library ABI/SOVERSION." FORCE)
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
 set(LOCKDC_PSLOG_VERSION "0.12.0" CACHE STRING "Pinned libpslog release used for SDK logging." FORCE)
-set(LOCKDC_CPKT_VERSION "0.5.2" CACHE STRING "Pinned cpkt dependency bundle version." FORCE)
+set(LOCKDC_CPKT_VERSION "0.6.1" CACHE STRING "Pinned cpkt dependency bundle version." FORCE)
 set(LOCKDC_CPKTDB_VERSION "0.3.1" CACHE STRING "Pinned cpktdb database bundle version." FORCE)
-set(LOCKDC_MIN_ABI_VERSION "6")
+set(LOCKDC_MIN_ABI_VERSION "7")
 set(LOCKDC_ABI_VERSION "${LOCKDC_MIN_ABI_VERSION}" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc.")
 if(LOCKDC_ABI_VERSION MATCHES "^[0-9]+$" AND LOCKDC_ABI_VERSION LESS LOCKDC_MIN_ABI_VERSION)
     set(LOCKDC_ABI_VERSION "${LOCKDC_MIN_ABI_VERSION}" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc." FORCE)
@@ -541,6 +541,7 @@ set(lc_sources
     src/lc_collection_maintenance.c
     src/lc_collection_retention.c
     src/lc_collections.c
+    src/lc_collection_writer.c
     src/lc_consumer_service.c
     src/lc_core.c
     src/lc_intcompat.c
@@ -551,6 +552,7 @@ set(lc_sources
     src/lc_message_api.c
     src/lc_mutate_stream.c
     src/lc_pouch_control_migration.c
+    src/lc_pouch_recode.c
     src/lc_pouch_client.c
     src/lc_pouch_xa.c
     src/lc_xa_store.c

@@ -18,16 +18,21 @@ application's JSON object. Corrections append new entries; individual entries
 may be deleted, but their positions never change.
 
 The public surface provides collection creation/open/list/description/drop,
-append, append-status lookup, individual deletion, and ordered streaming with an
+pull append, push-fed append writers, append-status lookup, individual deletion,
+and ordered streaming with an
 optional LQL predicate and opaque resume cursors. Appends are independently
 atomic; they do not enlist in implicit or managed XA transactions. Collections
 and their entries both support optional retention metadata, including later
 metadata-only changes.
 
+Collections also support an optional `max_entries` live-entry limit. Maintenance
+removes oldest positions until the newest N live states remain; append remains
+independently atomic and never synchronously trims the collection.
+
 Position ranges and first-N input windows are implemented on that same read
 operation, before LQL filtering. Last-N selection, explicit position sets,
 payload projection, body mutation,
-subscriptions, consumer groups, count-based trimming,
+subscriptions, consumer groups,
 and CAI integration remain outside the current implementation. Do not
 expose inactive selection options or silently accept them. Ordered seek and
 reverse traversal are required storage primitives now, so last-N
@@ -137,7 +142,9 @@ creating another transaction outcome log.
 
 ## Append and retry
 
-An append accepts exactly one JSON object through `lc_source`. Arrays, scalars,
+An append accepts exactly one JSON object through `lc_source` or an owned
+push-fed writer. [Incremental appends](collection-writer.md) describe the writer
+lifecycle, pending canonical storage, and atomic parent renewal. Arrays, scalars,
 empty input, trailing non-whitespace, malformed JSON, source failure, and limit
 violations fail before publication. Validation and compaction of structural
 whitespace are incremental. Preserve JSON values and member order; this is not
@@ -177,7 +184,7 @@ Successful acknowledgement meets the configured durability policy. An error
 after canonical publication may have an uncertain outcome and must not be
 reported as proof that nothing was appended.
 
-With `durable_sync=1`, an append pins its exact canonical file and holds a
+With `durable_sync=1`, a pull append pins its exact canonical file and holds a
 shared commit barrier while waiting for the existing root fsync batcher. It
 releases append authority and shared-root mutation authority before that wait,
 so independent callers can append and join the same durable group. Handles in
@@ -197,7 +204,9 @@ receiver to read the preceding committed view during upload. Snapshot capture
 releases its exclusive pin before delivery callbacks. The commit barrier uses
 an advisory `.commit.lock` file with an independent descriptor per call; it
 stores no state or transaction outcomes and introduces no worker or body
-buffer. NoSync appends bypass the commit pin and synchronization wait.
+buffer. Push commit adopts its pending inode as a segment and holds an exclusive
+capture fence through synchronization; no collection lock is held between push
+calls. NoSync appends bypass the synchronization wait.
 
 Keep the canonical binding after individual deletion until collection drop.
 Status lookup reports `absent`, `committed`, or `deleted`, with the original
@@ -450,7 +459,8 @@ There are two independent targets:
 - Collection retention is the collection's own expiry. When maintenance
   removes it, the collection and all remaining entries become inaccessible,
   through the same catalog/drop authority as an explicit drop. It is not a
-  maximum age assigned to each entry. A later append does not renew it.
+  maximum age assigned to each entry. An append preserves it unless that new
+  append explicitly selects atomic parent-retention renewal.
 - Entry retention is that state object's own expiry. Maintenance deletes the
   entry through collection deletion authority, preserving its position gap
   and append retry binding. It does not remove or renew the collection.
@@ -471,6 +481,19 @@ durations and overflow before publication. Ignore the duration when its
 presence flag is zero. An omitted metadata change is an observation/no-op,
 not a renewal. Opening an existing collection never changes retention;
 creation-only retention options on open are rejected.
+
+Both append forms additionally accept `has_collection_retention_seconds` and
+`collection_retention_seconds` for the parent. Omission preserves its deadline;
+zero clears it; positive seconds reset it from the same publication timestamp
+as the entry. Only a newly committed append applies this directive. Duplicate,
+conflicting, aborted and failed-before-publication attempts never renew it.
+The directive is recorded with the canonical retry binding, including after
+entry deletion and compaction. Results/status expose
+`has_collection_retention_expires_at_unix` and
+`collection_retention_expires_at_unix` when the original append selected it.
+This original observation may differ from the parent's current deadline;
+use `describe` for the current value. Generic collections still default to no
+expiry; an inactivity policy is explicitly supplied by the application.
 
 Choose a new append deadline at publication after consuming and validating its
 source, not at upload start. A duplicate append returns the original binding
@@ -514,10 +537,60 @@ a tombstone or drop; physical reclamation continues to respect reader pins,
 grace periods, and the configured durability policy. Entry expiry leaves the
 cursor coverage floor and high-water mark unchanged.
 
+### Count retention
+
+Collection creation and collection `metadata` accept `has_max_entries` and
+uint64 `max_entries`. Omission creates an unlimited collection or preserves an
+existing setting. Explicit zero disables count retention; positive N keeps the
+newest N live entries by permanent position. The setting applies to existing
+and future entries. Opening cannot set it, even to zero. Entry metadata rejects
+this collection-only setting. Descriptions and list callbacks report the
+configured `max_entries`; zero means unlimited. The `count_retention` capability
+is true for Pouch and false for currently unsupported remote collections.
+
+Count retention is eventual, like age retention. Appends and reads can observe
+more than N entries before maintenance catches up. The root's existing worker
+cadence drives cleanup; disabling background compaction also disables automatic
+count cleanup. Explicit non-cleanup-only maintenance can drive it immediately.
+Each collection visit deletes at most the surplus captured at its start,
+releasing mutation authority between individual deletions. New appends cannot
+keep a pass running indefinitely, while an existing backlog can be removed
+without waiting for many maintenance intervals. Cleanup-only passes perform no
+logical deletion.
+Maintenance rechecks the current limit and live count under mutation authority
+before selecting each oldest entry. A raised/disabled limit or concurrent
+explicit deletion cannot make a previously captured surplus over-delete.
+
+An entry's age expiry is independent of the count cap. Maintenance processes
+due entry expirations before count trimming, avoiding unnecessary trimming when
+expiry already satisfies the cap. Parent collection expiry takes precedence
+and drops the entire collection. LQL, read ranges and first-N do not affect
+retention selection. Deleted entries do not count; positions are never reused
+or renumbered. Increasing/disabling a limit never restores deleted entries.
+
+Reuse canonical entry deletion, ordered visibility, retry tombstones, compaction
+and reader protection. The live count determines whether trimming is needed;
+an ordinal hint in the derived ordered index avoids repeatedly traversing an
+already trimmed prefix. It is reconstructed from canonical records after an
+unclean restart and is not a durable deletion watermark. No body parsing,
+collection-wide sorting, new timer or append-time trim is needed.
+Count trimming increments `retention_deleted_state_count`; only age expiration
+increments `retention_expired_count`. The cap bounds live states, not physical
+disk use or retained append-identity tombstones. Reclamation still waits for
+compaction and active readers; retry bindings persist until collection drop.
+
+Lua uses canonical uint64 decimal strings for `max_entries`, including `"0"`
+and `"1000"`, with the same omission semantics. Future lockd creation and
+collection metadata requests use `X-Collection-Max-Entries`, also a canonical
+uint64 decimal string. Descriptions report `max_entries` as a decimal string;
+entry metadata and append reject that header. There is no client-side remote
+retention emulation.
+
 ## C and Lua client surface
 
 The public-only [C journal example](../examples/collection_journal.c) creates
-a temporary named collection, appends/retries entries, changes retention
+a temporary named collection, uses pull and push appends with atomic renewal,
+retries entries, changes retention
 metadata, streams raw bodies with separate boundary callbacks, and verifies
 deletion before dropping the collection. Build `lc_example_collection_journal`
 and pass a `pouch:///absolute/path` endpoint. SDK tests compile and execute the
@@ -536,8 +609,9 @@ zero/default initializers. Keep physical storage and query-plan types private.
 | `client.list_collections` / `lc_client_list_collections` | Visit collection descriptions in namespace/name order without entry bodies |
 | `client.collection_capabilities` / `lc_client_collection_capabilities` | Report endpoint-local collection/filter/index/resume support and later selection capabilities |
 | `collection.describe` / `lc_collection_describe` | Return ID, name, namespace, current upper boundary, live count, indexing availability, and collection retention |
-| `collection.metadata` / `lc_collection_metadata` | Change only collection retention metadata and return its description |
-| `collection.append` / `lc_collection_append` | Consume `lc_source`, with required append ID and optional entry retention; return position, ETag, byte count, duplicate/deleted and retention facts |
+| `collection.metadata` / `lc_collection_metadata` | Change collection expiry and/or max_entries and return its description |
+| `collection.append` / `lc_collection_append` | Consume `lc_source`, with required append ID and optional entry/parent retention; return position, ETag, byte count, duplicate/deleted and retention facts |
+| `collection.append_begin` / `lc_collection_append_begin` | Return an owned writer accepting bounded raw JSON fragments through `write`, then `commit` or `abort`; always `close` it |
 | `collection.append_status` / `lc_collection_append_status` | Resolve an append ID without supplying its body |
 | `collection.entry_metadata` / `lc_collection_entry_metadata` | Change retention metadata for a live position, preserving its body and identity; return entry facts |
 | `collection.read` / `lc_collection_read` | Write raw JSONL to `lc_sink`, with optional separate metadata callback, LQL, cursor, and cancellation |
@@ -625,7 +699,7 @@ new version inferred from the liblockdc release number.
 | `POST B` | JSON `{"name":"..."}`; 201 description including new collection ID |
 | `GET B` | Stream bounded-size collection descriptions as NDJSON; require successful HTTP message completion, without entry bodies or control records |
 | `GET C` | 200 description; with `X-Collection-ID` validates a bound handle |
-| `PATCH C/metadata` | Required `X-Collection-ID`; empty body and optional retention header; 200 updated description |
+| `PATCH C/metadata` | Required `X-Collection-ID`; empty body and optional retention and/or max-entries headers; 200 updated description |
 | `DELETE C` | Required `X-Collection-ID`; 204 logical drop |
 | `POST C/entries` | Required `X-Collection-ID` and `Idempotency-Key`; `application/json` streaming object; 201 append result, or 200 for an identical retry |
 | `GET C/appends/{append_id}` | Required `X-Collection-ID`; 200 append status, including `state=absent` when no binding is committed |
@@ -634,13 +708,15 @@ new version inferred from the liblockdc release number.
 | `POST C/entries/read` | Required `X-Collection-ID`; JSON with optional `selector_lql`, `cursor`, `after`, `through`, `first_n`; one streaming multipart response with raw state bodies and separate metadata headers |
 
 The capabilities response uses boolean fields `collections`, `lql_filter`,
-`resume`, `checkpoint`, `ranges`, `first_n`, `last_n`, and `position_selection`.
+`resume`, `checkpoint`, `ranges`, `first_n`, `last_n`, `position_selection`,
+`count_retention`, `append_writer`, and `append_collection_retention`.
 Wire bounds/counts use canonical uint64 decimal strings, preserving exact values
 through JSON runtimes with limited numeric precision. Omission, zero, ranges,
 input limits and both cursor purposes have the same semantics as the C/Lua
 read options above.
-Only the first four are true in v1. Descriptions use `namespace`, `name`,
-`collection_id`, `upper_position`, `live_count`, and boolean `query_indexing`.
+Pouch currently supports all except `last_n` and `position_selection`.
+Descriptions use `namespace`, `name`, `collection_id`, `upper_position`,
+`live_count`, `max_entries`, and boolean `query_indexing`.
 Append results use `collection_id`, `append_id`, `position`, `etag`, `bytes`,
 `duplicate`, and `deleted`; append-status adds `state` and omits unassigned
 entry facts when absent. Deletion results identify the position and carry
@@ -657,6 +733,15 @@ observations; they never change the raw JSON body. No extra request is needed
 when retention is omitted. Collection methods remain unsupported on remote
 lockd until its collection capability is implemented; normal state calls to
 older servers retain their existing compatibility behavior.
+
+Append also accepts `X-Collection-Retention-Seconds` to apply the parent
+directive atomically with new membership. Results/status optionally report
+`collection_retention_expires_at_unix` for the original directive, including
+zero for clearing. Unsupported directives fail explicitly. A future remote
+push writer sends one streaming request body to the normal append route:
+successful request EOF commits, while abort closes the unfinished request.
+It needs no server-side writer session or batch/XA endpoint. Lost responses
+still require append-status reconciliation rather than assuming rollback.
 
 Creation/drop are catalog-atomic. A repeated drop of the already-dropped bound
 ID may succeed, but it never removes a replacement collection with another ID.
@@ -988,6 +1073,11 @@ strict synchronization, encryption, and zlib respectively when set to `1`;
 they default to `0`. Keep strict-sync runs small and compare durability modes
 separately. No benchmark introduces a body cache or buffers streamed output.
 
+`LOCKDC_COLLECTION_BENCH_PUSH=1` selects the public append writer and feeds
+4096-byte fragments; the default uses pull append. Push adopts a canonical
+segment per commit, so compare its small-entry metadata cost separately from
+the pull active-segment fast path. Both workloads verify the same raw results.
+
 `LOCKDC_COLLECTION_BENCH_WRITERS` selects 1..32 concurrent append callers
 (default 1), each using its own receiver and input buffer. Set
 `LOCKDC_COLLECTION_BENCH_SHARED=1` for shared-writer root policy; the default
@@ -1043,9 +1133,9 @@ LOCKDC_VALGRIND_TESTS='lc_unit_collection_index lc_unit_collection_sync lc_unit_
 CMOCKA_SKIP_FILTER='test_crash_*' bash scripts/valgrind.sh
 ```
 
-Follow the public C ABI policy when adding client receiver fields. The current
-unreleased ABI target is 6, derived from released ABI 5 in v0.21.0; adding this
-feature before that next release does not advance it again to 7. Do not tie
+Follow the public C ABI policy when adding client receiver fields. Version
+0.24.0 uses ABI 7, advancing from released ABI 6 in v0.23.0. Adding count
+retention changes public collection request/result layouts. Do not tie
 Pouch record or HTTP protocol version markers to the repository release tag.
 
 Document the final C declarations, Lua facade, ownership, errors, and server

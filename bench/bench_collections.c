@@ -48,8 +48,11 @@ static void *collection_append_worker(void *context) {
   lc_collection_append_res result;
   lc_error error;
   lc_source *source;
+  lc_collection_writer *writer;
+  size_t offset, take;
   char id[64];
   long i;
+  int push = collection_enabled("LOCKDC_COLLECTION_BENCH_PUSH", 0);
   lc_error_init(&error);
   lc_collection_append_req_init(&request);
   if (worker->gate != NULL) {
@@ -65,11 +68,28 @@ static void *collection_append_worker(void *context) {
     snprintf(id, sizeof(id), "event-%ld", i);
     request.append_id = id;
     source = NULL;
-    worker->rc = lc_source_from_memory(worker->body, worker->body_bytes,
-                                       &source, &error);
-    if (worker->rc == LC_OK)
-      worker->rc = lc_collection_append(worker->collection, &request, source,
-                                        &result, &error);
+    writer = NULL;
+    if (push) {
+      worker->rc = lc_collection_append_begin(worker->collection, &request,
+                                              &writer, &error);
+      for (offset = 0; offset < worker->body_bytes && worker->rc == LC_OK;
+           offset += take) {
+        take = worker->body_bytes - offset;
+        if (take > 4096U)
+          take = 4096U;
+        worker->rc = lc_collection_writer_write(writer, worker->body + offset,
+                                                take, &error);
+      }
+      if (worker->rc == LC_OK)
+        worker->rc = lc_collection_writer_commit(writer, &result, &error);
+      lc_collection_writer_close(writer);
+    } else {
+      worker->rc = lc_source_from_memory(worker->body, worker->body_bytes,
+                                         &source, &error);
+      if (worker->rc == LC_OK)
+        worker->rc = lc_collection_append(worker->collection, &request, source,
+                                          &result, &error);
+    }
     lc_source_close(source);
     if (worker->rc == LC_OK &&
         (result.position == 0U || result.position > (uint64_t)worker->entries ||
@@ -296,10 +316,11 @@ int bench_collections(long entries) {
     goto done;
   printf("collection-config entries=%ld padding=%lu writers=%ld shared=%d "
          "index=%d sync=%d "
-         "crypto=%d compression=%s\n",
+         "crypto=%d compression=%s push=%d\n",
          entries, (unsigned long)padding, writers, !settings.single_writer,
          settings.query_indexing_enabled, settings.durable_sync, key != NULL,
-         settings.compression);
+         settings.compression,
+         collection_enabled("LOCKDC_COLLECTION_BENCH_PUSH", 0));
   start = collection_now();
   rc = collection_append_many(client, collection, body, body_bytes, entries,
                               writers, &error);

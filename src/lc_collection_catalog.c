@@ -279,7 +279,8 @@ static int lc_catalog_open(lc_client *self, const lc_collection_config *config,
     return rc;
   }
   rc = lc_pouch_client_public_namespace(client, config->ns, &ns, error);
-  if (rc == LC_OK && !create && config->has_retention_seconds)
+  if (rc == LC_OK && !create &&
+      (config->has_retention_seconds || config->has_max_entries))
     rc = lc_collection_failure(error, LC_ERR_INVALID, NULL,
                                "opening a collection cannot set retention");
   if (rc == LC_OK)
@@ -311,7 +312,7 @@ static int lc_catalog_open(lc_client *self, const lc_collection_config *config,
        * its head distinguishes that case from a damaged live partition. */
       existing = NULL;
       rc = lc_collection_open_bound(client, ns, name, id, base, catalog, 0, 0,
-                                    &existing, error);
+                                    0, &existing, error);
       if (rc == LC_ERR_INVALID && error->server_code != NULL &&
           strcmp(error->server_code, "collection_stale") == 0) {
         if (unlink(catalog) != 0 && errno != ENOENT)
@@ -347,7 +348,7 @@ static int lc_catalog_open(lc_client *self, const lc_collection_config *config,
             config->has_retention_seconds
                 ? -(lc_pouch_unix_seconds)config->retention_seconds
                 : 0,
-            out, error);
+            config->has_max_entries ? config->max_entries : 0U, out, error);
       if (rc == LC_OK)
         rc = lc_collection_catalog_write(catalog, id, config->name, error);
       if (rc != LC_OK && *out != NULL) {
@@ -392,6 +393,9 @@ int lc_client_collection_capabilities_method(lc_client *self,
   if (client->is_pouch) {
     out->collections = out->lql_filter = out->resume = out->checkpoint = 1;
     out->ranges = out->first_n = 1;
+    out->count_retention = 1;
+    out->append_collection_retention = 1;
+    out->append_writer = 1;
   }
   return LC_OK;
 }
@@ -540,7 +544,7 @@ int lc_client_list_collections_method(lc_client *self, const char *ns,
     }
     collection = NULL;
     rc = lc_collection_open_bound(client, ns, items[i].name, items[i].id, base,
-                                  path, 0, 0, &collection, error);
+                                  path, 0, 0, 0, &collection, error);
     lc_client_free(client, path);
     if (rc == LC_ERR_INVALID && error->server_code != NULL &&
         strcmp(error->server_code, "collection_stale") == 0) {

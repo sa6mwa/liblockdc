@@ -62,7 +62,11 @@ uses a local Pouch journal; remote lockd participation is unsupported.
 See [release notes](CHANGELOG.md) for changes and ABI requirements.
 [Ordered collections](docs/collections.md) provide Pouch journals with immutable
 JSON bodies, permanent positions, LQL filtering, raw ordered streaming, and
-optional collection/entry retention metadata through the C and Lua APIs. The
+optional collection/entry age retention and per-collection live-entry limits
+through the C and Lua APIs. Count limits lazily retain the newest N entries
+without trimming on append. [Push-fed append writers](docs/collection-writer.md)
+accept bounded raw JSON fragments; either append form can renew parent retention
+atomically with a new entry. The
 same contract defines a future lockd server interface; remote collections are
 currently unsupported.
 The executable direct deployment pair is
@@ -96,8 +100,9 @@ below remain fully supported for deployment compatibility and are overridden
 per field by typed settings. See [typed Pouch open settings](docs/pouch-open-settings-api.md).
 Common legacy options are:
 
-- `compression=zlib` for streaming at-rest zlib
-  compression
+- `compression=zlib` for streaming at-rest zlib compression. Omission inherits
+  an existing root; explicitly changing mode converts it before open returns
+  when no other writers are active. See [compression changes](docs/pouch-compression.md).
 - `crypto_key_file=/path/to/pouch.key` with
   `crypto_generate_key_file=true` for encrypted local roots
 - `durable_sync=true` and `fsync_batch_max_ops=<u64>` for root-scoped durable
@@ -134,6 +139,11 @@ without retention. See [state retention](docs/state-retention.md).
 Version 0.22.0 advances the core shared-library ABI from 5 to **6**. Rebuild C
 consumers and the optional PostgreSQL provider; mapped C `save()` calls also
 need the new options argument. See [upgrade instructions](CHANGELOG.md#upgrading-from-021x).
+
+Version 0.24.0 advances the core ABI to **7** from ABI 6 in v0.23.0 for
+collection retention fields and the incremental append-writer surface. Rebuild C
+consumers and the optional PostgreSQL provider; its own ABI remains 0. See
+[upgrade instructions](CHANGELOG.md#upgrading-from-023x).
 
 The public API remains the same receiver-function SDK surface for remote and
 Pouch clients. State bodies, queue payloads, attachments, scan output,
@@ -200,7 +210,7 @@ That command provisions the pinned Linux host MIG helper in the shared toolchain
 cache, without obtaining Apple content. Darwin configure requires both tools;
 MIG is build tooling and is excluded from SDK packages.
 
-The pinned `cpkt` 0.5.2 GNU SDKs require glibc 2.43 or newer at
+The pinned `cpkt` 0.6.1 GNU SDKs require glibc 2.43 or newer at
 deployment. This does not change the `liblockdc` public ABI, but deployments
 using the shared GNU SDK must upgrade their runtime accordingly. Development
 executables, tests, examples, Lua module checks, and SDK consumer probes run
@@ -211,11 +221,11 @@ The separately pinned dependencies are:
 
 | Dependency | Version | Use |
 | --- | --- | --- |
-| [cpkt](https://github.com/c89systems/cpkt) | 0.5.2 | Core SDK dependencies and Lua runtime |
+| [cpkt](https://github.com/c89systems/cpkt) | 0.6.1 | Core SDK dependencies and Lua runtime |
 | [cpktdb](https://github.com/c89systems/cpktdb) | 0.3.1 | Optional PostgreSQL C89 facade and database SDK |
 | lonejson | 0.45.0 (ABI 26) | JSON parsing, mapping, and streaming |
 | libpslog | 0.12.0 | SDK diagnostics |
-| liblql | 0.3.0 | Pouch query support |
+| liblql | 0.4.0 | Pouch query support |
 | cmocka | 2.0.2 | Unit tests only; target-specific static library from cpkt |
 
 OpenSSL, curl, zlib, nghttp2, libssh2, and Lua come from cpkt.
@@ -225,8 +235,8 @@ Core and database SDKs remain in separate `cpkt/install` and `cpktdb/install`
 prefixes under each target's dependency root. cpktdb records its exact core build
 pin as provenance and requests a compatible minimum core through CMake. Core's
 declared compatibility floor governs independent upgrades; matching major/minor
-versions alone do not establish compatibility. cpkt 0.5.2 accepts baselines from
-0.2.0 through 0.5.2; cpktdb 0.3.1 requires at least 0.5.1. Target and payload
+versions alone do not establish compatibility. cpkt 0.6.1 accepts baselines from
+0.2.0 through 0.6.1; cpktdb 0.3.1 requires at least 0.5.1. Target and payload
 integrity checks remain enforced. `scripts/deps.sh` pins each provider release and
 checksum independently; cpktdb is acquired/discovered only when PostgreSQL is
 enabled. Consumers use the official imported targets. pkg-config consumers must
@@ -379,7 +389,7 @@ generated state with the candidate version and intended optional capabilities:
 
 ```bash
 make clean
-LOCKDC_VERSION_OVERRIDE=0.22.0 LOCKDC_BUILD_POSTGRES=ON \
+LOCKDC_VERSION_OVERRIDE=0.24.0 LOCKDC_BUILD_POSTGRES=ON \
   make prerelease release-matrix
 ```
 

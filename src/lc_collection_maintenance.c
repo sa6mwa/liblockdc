@@ -415,7 +415,7 @@ static int lc_mc_partition(lc_pouch *pouch, const char *ns, const char *base,
   }
   if (rc == LC_OK && bound) {
     rc = lc_collection_storage_open(pouch, NULL, ns, name, id, base, catalog, 0,
-                                    0, &collection, error);
+                                    0, 0, &collection, error);
     /* Bulk copying runs after catalog authority is released. */
   } else if (rc == LC_OK) {
     busy = 0;

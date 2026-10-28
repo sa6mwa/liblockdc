@@ -15261,7 +15261,7 @@ static void test_state_compression_streams_segment_payloads(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_state_compression_mode_is_root_invariant(void **state) {
+static void test_state_compression_mode_inherits_root(void **state) {
   lc_pouch *pouch;
   lc_pouch_open_options options;
   lc_error error;
@@ -15286,13 +15286,9 @@ static void test_state_compression_mode_is_root_invariant(void **state) {
 
   memset(&options, 0, sizeof(options));
   rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
-  assert_int_equal(rc, LC_ERR_INVALID);
-  assert_null(pouch);
-  assert_string_equal(
-      error.message,
-      "pouch root compression mode cannot be changed after initialization");
-  lc_error_cleanup(&error);
-  lc_error_init(&error);
+  assert_int_equal(rc, LC_OK);
+  assert_path_file_contains(root, "manifest", "compression=zlib");
+  lc_pouch_close(pouch);
 
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -37218,7 +37214,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_state_legacy_metadata_does_not_mimic_snapshot_query_trailer),
       cmocka_unit_test(test_state_compression_streams_segment_payloads),
-      cmocka_unit_test(test_state_compression_mode_is_root_invariant),
+      cmocka_unit_test(test_state_compression_mode_inherits_root),
       cmocka_unit_test(test_state_crypto_compression_round_trips),
       cmocka_unit_test(
           test_transformed_metadata_replay_defers_body_materialization),

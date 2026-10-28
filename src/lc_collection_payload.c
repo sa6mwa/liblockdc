@@ -38,6 +38,7 @@ int lc_collection_payload_open(lc_collection_payload *payload,
                                lc_error *error) {
   char position[32];
   char context[256];
+  char upload_context[256];
   int n;
   int owned;
   int rc;
@@ -64,11 +65,19 @@ int lc_collection_payload_open(lc_collection_payload *payload,
                                  "collection position cannot be formatted");
   n = snprintf(context, sizeof(context), "collection:%s:%s:%s", collection->id,
                record->append_id, position);
-  if (n < 0 || (size_t)n >= sizeof(context) ||
-      strcmp(record->context, context) != 0)
+  if (n < 0 || (size_t)n >= sizeof(context))
     return lc_collection_failure(
         error, LC_ERR_PROTOCOL, "collection_corrupt",
-        "collection body has a different identity binding");
+        "collection identity context exceeds its bound");
+  if (strcmp(record->context, context) != 0) {
+    n = snprintf(upload_context, sizeof(upload_context),
+                 "collection:%s:%s:upload", collection->id, record->append_id);
+    if (n < 0 || (size_t)n >= sizeof(upload_context) ||
+        strcmp(record->context, upload_context) != 0)
+      return lc_collection_failure(
+          error, LC_ERR_PROTOCOL, "collection_corrupt",
+          "collection body has a different identity binding");
+  }
   if (payload->hash == NULL)
     payload->hash = EVP_MD_CTX_new();
   if (payload->hash == NULL)
@@ -85,7 +94,7 @@ int lc_collection_payload_open(lc_collection_payload *payload,
       return lc_collection_failure(error, LC_ERR_TRANSPORT, NULL,
                                    "failed to pin collection body descriptor");
     return lc_pouch_crypto_source_from_fd_span(
-        collection->pouch->crypto, context, context, owned,
+        collection->pouch->crypto, record->context, context, owned,
         record->payload_offset, record->stored_bytes, record->descriptor,
         &payload->decoded, error);
   }

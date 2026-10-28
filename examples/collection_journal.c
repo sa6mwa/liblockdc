@@ -52,6 +52,35 @@ static int append(lc_collection *collection, const char *id, const char *json,
   return rc;
 }
 
+/* Feed raw fragments directly; no JSON conversion or producer thread. */
+static int append_pushed(lc_collection *collection, lc_error *error) {
+  lc_collection_append_req request;
+  lc_collection_append_res result;
+  lc_collection_writer *writer = NULL;
+  int rc;
+  lc_collection_append_req_init(&request);
+  request.append_id = "second";
+  request.has_collection_retention_seconds = 1;
+  request.collection_retention_seconds = 30L * 24L * 60L * 60L;
+  rc = collection->append_begin(collection, &request, &writer, error);
+  if (rc == LC_OK)
+    rc = writer->write(writer, "{\"event\":", 9U, error);
+  if (rc == LC_OK)
+    rc = writer->write(writer, "\"completed\"}", 12U, error);
+  if (rc == LC_OK)
+    rc = writer->commit(writer, &result, error);
+  if (rc != LC_OK && writer != NULL)
+    (void)writer->abort(writer, NULL);
+  lc_collection_writer_close(writer);
+  if (rc == LC_OK &&
+      (result.position != 2U || result.duplicate || result.deleted ||
+       !result.has_collection_retention_expires_at_unix ||
+       result.collection_retention_expires_at_unix <= 0))
+    rc = lc_error_set(error, LC_ERR_PROTOCOL, 0,
+                      "unexpected push append outcome", NULL, NULL, NULL);
+  return rc;
+}
+
 int main(int argc, char **argv) {
   const char *endpoints[1];
   char name[LC_XID_STRING_SIZE];
@@ -95,7 +124,8 @@ int main(int argc, char **argv) {
   if (rc == LC_OK)
     rc = client->collection_capabilities(client, &capabilities, &error);
   if (rc == LC_OK && (!capabilities.collections || !capabilities.ranges ||
-                      !capabilities.first_n))
+                      !capabilities.first_n || !capabilities.append_writer ||
+                      !capabilities.append_collection_retention))
     rc = lc_error_set(&error, LC_ERR_UNSUPPORTED, 0,
                       "endpoint does not support bounded collection reads",
                       NULL, NULL, NULL);
@@ -108,8 +138,7 @@ int main(int argc, char **argv) {
     rc = append(collection, "first", "{ \"event\" : \"created\" }", 1U, 0,
                 &error);
   if (rc == LC_OK)
-    rc = append(collection, "second", "{\"event\":\"completed\"}", 2U, 0,
-                &error);
+    rc = append_pushed(collection, &error);
   if (rc == LC_OK)
     rc = append(collection, "first", "{\"event\":\"created\"}", 1U, 1, &error);
   /* Metadata clears entry expiry without touching its immutable JSON body. */

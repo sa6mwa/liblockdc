@@ -32,6 +32,8 @@ int lc_pouch_crypto_open(const lc_allocator *allocator,
 void lc_pouch_crypto_close(lc_pouch_crypto *crypto);
 int lc_pouch_crypto_enabled(const lc_pouch_crypto *crypto);
 int lc_pouch_crypto_compression_enabled(const lc_pouch_crypto *crypto);
+/* Open-time policy selection under root ownership, before workers start. */
+void lc_pouch_crypto_set_compression(lc_pouch_crypto *crypto, int enabled);
 int lc_pouch_crypto_key_id(const lc_pouch_crypto *crypto, char **out,
                            lc_error *error);
 int lc_pouch_crypto_stream_to_file(lc_pouch_crypto *crypto, const char *context,
@@ -67,6 +69,18 @@ int lc_pouch_crypto_stream_to_fd_crc_with_compression(
  * partial byte range for the canonical record owner to roll back. */
 typedef int (*lc_pouch_crypto_producer_fn)(void *context, lc_sink *sink,
                                            lc_error *error);
+typedef struct lc_pouch_crypto_output lc_pouch_crypto_writer;
+/* Owns bounded encoder scratch; borrows fd, crypto and context until close.
+ * Finish flushes frames but never fsyncs, closes or publishes the record. */
+int lc_pouch_crypto_writer_open(lc_pouch_crypto *crypto, const char *context,
+                                int fd, int allow_compression,
+                                lc_pouch_crypto_writer **out, lc_error *error);
+lc_sink *lc_pouch_crypto_writer_sink(lc_pouch_crypto_writer *writer);
+int lc_pouch_crypto_writer_finish(lc_pouch_crypto_writer *writer,
+                                  uint64_t *plain_bytes, uint64_t *cipher_bytes,
+                                  unsigned long *stored_crc,
+                                  char **descriptor_out, lc_error *error);
+void lc_pouch_crypto_writer_close(lc_pouch_crypto_writer *writer);
 int lc_pouch_crypto_produce_to_fd(lc_pouch_crypto *crypto, const char *context,
                                   int fd, lc_pouch_crypto_producer_fn producer,
                                   void *producer_context, uint64_t *plain_bytes,

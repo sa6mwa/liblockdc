@@ -174,26 +174,26 @@ pslog_version=$(resolve_cmake_cache_string LOCKDC_PSLOG_VERSION "${LOCKDC_PSLOG_
 cpkt_asset_name="cpkt-$cpkt_version-${preset#deps-}.tar.gz"
 cpkt_download_url="https://github.com/c89systems/cpkt/releases/download/v$cpkt_version/$cpkt_asset_name"
 case "$cpkt_asset_name" in
-  cpkt-0.5.2-x86_64-linux-gnu.tar.gz)
-    cpkt_asset_hash=a8d9647afd745c158069253a958eea9935d4fd240fcb4d129e3e5a0b952a1af9
+  cpkt-0.6.1-x86_64-linux-gnu.tar.gz)
+    cpkt_asset_hash=99625b7889f78b6e467d38e7dbec08d9d0ed6f599ff4571244060ce67c6ca62f
     ;;
-  cpkt-0.5.2-x86_64-linux-musl.tar.gz)
-    cpkt_asset_hash=ea8684f6d0cbc6dfbda5f05113bd0397c5146c4d3f17bc3c5667261608f1a2f0
+  cpkt-0.6.1-x86_64-linux-musl.tar.gz)
+    cpkt_asset_hash=f4b1b0b2b257d2347be7d2b437dbb84891c19e39067bba24464b415dd76eb67e
     ;;
-  cpkt-0.5.2-aarch64-linux-gnu.tar.gz)
-    cpkt_asset_hash=0a1fd5a7226880bac6235585fe4111f67c0db521a9fd0cd0d4376201621b12e4
+  cpkt-0.6.1-aarch64-linux-gnu.tar.gz)
+    cpkt_asset_hash=3c5f172a50b7df7e37e99dbf52014d3b09114cbc143339f1109c23715fa117a1
     ;;
-  cpkt-0.5.2-aarch64-linux-musl.tar.gz)
-    cpkt_asset_hash=8f6b4d815d0e23cb4073ad2fad9354240e22aff27b241faf0854a6be89ee9898
+  cpkt-0.6.1-aarch64-linux-musl.tar.gz)
+    cpkt_asset_hash=bf39981f557b1ed10940ee376bb81d0fa734d3d290e5d95cbc4f786ac466cb93
     ;;
-  cpkt-0.5.2-armhf-linux-gnu.tar.gz)
-    cpkt_asset_hash=cf595c01e85b9aba058be56d2f0100fb68c8f6b2e56ff2a3c4e93e03e560affd
+  cpkt-0.6.1-armhf-linux-gnu.tar.gz)
+    cpkt_asset_hash=c2200e3a4a05ed8807d0bb19b0042179bd47c7ce83174932f521d36aee11b935
     ;;
-  cpkt-0.5.2-armhf-linux-musl.tar.gz)
-    cpkt_asset_hash=1ecdbab12f42544f140de25914202cfb4f6c4b9e0079976209d791387a626567
+  cpkt-0.6.1-armhf-linux-musl.tar.gz)
+    cpkt_asset_hash=eb1ed255f3ea60c82c3973f1246571872b4f0fd7866364e544b5627e5cd3ee98
     ;;
-  cpkt-0.5.2-arm64-apple-darwin.tar.gz)
-    cpkt_asset_hash=8775bddc17c7f61ebb37211a5a821ccbab628f3d6f3783b56ccb549cf67ed29d
+  cpkt-0.6.1-arm64-apple-darwin.tar.gz)
+    cpkt_asset_hash=8f32fe4a9e477196d75a927af329dafcc91eda5e4b505012a7319edcf92e8579
     ;;
   *)
     printf 'unsupported cpkt release asset: %s\n' "$cpkt_asset_name" >&2
@@ -268,26 +268,26 @@ liblql_version=$(resolve_cmake_cache_string LOCKDC_LIBLQL_VERSION "${LOCKDC_LIBL
 liblql_asset_name="liblql-$liblql_version-${preset#deps-}.tar.gz"
 liblql_download_url="https://github.com/sa6mwa/liblql/releases/download/v$liblql_version/$liblql_asset_name"
 case "$liblql_asset_name" in
-  liblql-0.3.0-x86_64-linux-gnu.tar.gz)
-    liblql_asset_hash=fafb04f9af5d9610f77380ac1f848d1edd3d60dcf7ce6a098f6a04e30dd2b47a
+  liblql-0.4.0-x86_64-linux-gnu.tar.gz)
+    liblql_asset_hash=a64ec9860305e48739e35d4609bd03796de7262ab9ca011755c696c85f8f65d3
     ;;
-  liblql-0.3.0-x86_64-linux-musl.tar.gz)
-    liblql_asset_hash=e33a57e5d97337304c8541efaf8ab33bff9060cae600d1fe744a6734dca74ad4
+  liblql-0.4.0-x86_64-linux-musl.tar.gz)
+    liblql_asset_hash=e2ffbcbb67090046a76d1b3f5a4c151d3c2dbe86ab4bdef472c92f0fd2b46d9d
     ;;
-  liblql-0.3.0-aarch64-linux-gnu.tar.gz)
-    liblql_asset_hash=becc67d67c9e50291d1cc0c7bfc124c7945576b773013b37f65e969bb32af4a8
+  liblql-0.4.0-aarch64-linux-gnu.tar.gz)
+    liblql_asset_hash=c092e0dc6aad961f787e9388899e508736946271e94560baf676d5f1bc46c769
     ;;
-  liblql-0.3.0-aarch64-linux-musl.tar.gz)
-    liblql_asset_hash=8981ed9a6d938d1fdcb9da08ebc30df5d48d78bcad423bd1c64e858795d17ccf
+  liblql-0.4.0-aarch64-linux-musl.tar.gz)
+    liblql_asset_hash=2cdc421ee7011c50236ba1219ae93c9afe141618a9599e51c823e7528c438143
     ;;
-  liblql-0.3.0-armhf-linux-gnu.tar.gz)
-    liblql_asset_hash=3a022733ffa7ba808127d04669a6e091b2bdfcf39c9fd3092b9d0769d481db82
+  liblql-0.4.0-armhf-linux-gnu.tar.gz)
+    liblql_asset_hash=de7e7f901d2aa08ecf7c5f1b196cad0fd57f0b215a883d4ad4d906fa81aa0047
     ;;
-  liblql-0.3.0-armhf-linux-musl.tar.gz)
-    liblql_asset_hash=0eddb49271b137e1b5094d8954c7a16ef66f8a8ae009476402272a7e10d5b001
+  liblql-0.4.0-armhf-linux-musl.tar.gz)
+    liblql_asset_hash=cb55af9e0cfca11eda67fd63c4b6a73df52b08ea4c57d03472531e9dc436d7d6
     ;;
-  liblql-0.3.0-arm64-apple-darwin.tar.gz)
-    liblql_asset_hash=24b60e9f73d4341451aeb43e331bb29569f112d0b940130dbf9eb401b054408c
+  liblql-0.4.0-arm64-apple-darwin.tar.gz)
+    liblql_asset_hash=fd5f04631306d0cf6304bf061fa89fae5a5b05a3cd71dc6aefef074447f4c58d
     ;;
   *)
     printf 'unsupported liblql release asset: %s\n' "$liblql_asset_name" >&2

@@ -9,7 +9,7 @@
  * is stored here. Canonical replay repairs an interrupted projection update. */
 #define LC_COLLECTION_ORDER_PAGE_ROWS 63U
 #define LC_COLLECTION_ORDER_PAGE_BYTES 4096U
-#define LC_COLLECTION_ORDER_ROOT_BYTES 128U
+#define LC_COLLECTION_ORDER_ROOT_BYTES 160U
 
 typedef struct lc_collection_order_row {
   lc_u64 position;
@@ -25,6 +25,12 @@ typedef struct lc_collection_order {
   int fd;
   lc_u64 count;
   lc_u64 live_count;
+  /* Conservative ordinal lower bound for the oldest live row. Canonical
+   * replay rebuilds it; advancing it never makes a canonical deletion durable.
+   */
+  lc_u64 first_live;
+  lc_u64 collection_retention_generation;
+  lc_unix_seconds collection_retention;
   lc_u64 generation;
   lc_u64 upper_position;
   lc_u64 replay_segment;
@@ -94,6 +100,12 @@ int lc_collection_order_metadata(lc_collection_order *order,
 int lc_collection_order_find(lc_collection_order *order, lc_u64 position,
                              lc_collection_order_row *row, int *found,
                              lc_error *error);
+/* Current oldest live row, skipping deleted pages from a derived lower bound.
+ * Caller holds exclusive metadata authority. A subsequent delete/checkpoint
+ * persists the improved hint along with the existing projection watermark. */
+int lc_collection_order_oldest(lc_collection_order *order,
+                               lc_collection_order_row *row, int *found,
+                               lc_error *error);
 /* Captures current cardinality, not a body snapshot. The caller pins canonical
  * files and supplies its captured mutation generation for deletion visibility.
  * Bounds are after-exclusive and through-inclusive in either direction. */

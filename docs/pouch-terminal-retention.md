@@ -46,9 +46,10 @@ history should keep it in dedicated archival storage.
 All producers and dispatchers for one namespace must use the same retention
 configuration. Explicit settings are rejected for remote lockd; this policy
 qualifies local Pouch only. The added public configuration and statistics
-fields were introduced in shared-library ABI generation 5. The current core
-ABI is 6, also covering per-object state retention and collections; see
-[upgrade instructions](../CHANGELOG.md#upgrading-from-021x).
+fields were introduced in shared-library ABI generation 5. Version 0.24.0 uses
+core ABI 7 (6 in v0.23.0), covering per-object state retention,
+collections and collection count retention; see
+[upgrade instructions](../CHANGELOG.md#upgrading-from-023x).
 
 ## Scheduling and safety
 

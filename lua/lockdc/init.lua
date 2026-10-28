@@ -17,6 +17,8 @@ Lease.__index = Lease
 
 local Collection = {}
 Collection.__index = Collection
+local CollectionWriter = {}
+CollectionWriter.__index = CollectionWriter
 
 local Message = {}
 Message.__index = Message
@@ -610,6 +612,10 @@ for name, value in pairs(core) do
   if name:match("^XA_") then M[name] = value end
 end
 
+-- pouch.compression omission inherits an existing root (new roots use none).
+-- Explicit none/zlib converts before open returns when exclusively owned;
+-- competing shared writers cause a warning and use of the stored mode.
+-- Conversion errors return the usual structured open error.
 function M.open(config)
   local client, err = core.open(config)
 
@@ -657,6 +663,10 @@ end
 -- Retention metadata can change separately; omitted retention preserves it.
 -- Collection retention drops the collection and all entries; entry retention
 -- deletes only that entry. Both default to no expiry and are reclaimed lazily.
+-- Optional max_entries is a canonical uint64 decimal string ("1000"). It caps
+-- live entries by deleting oldest positions during maintenance, independently
+-- of age expiry. "0" disables it; append may temporarily exceed the cap.
+-- Counts do not include retry tombstones or bound physical disk usage.
 -- Collections are Pouch-only and append independently of implicit/managed XA.
 function Client:create_collection(config)
   local value, err, code = self._core:create_collection(config)
@@ -681,14 +691,40 @@ end
 function Collection:describe() return self._core:describe() end
 -- nil/omitted retention_seconds preserves, 0 clears, positive integer seconds
 -- reset expiry from this commit. Collection policy does not assign entry ages.
+-- max_entries omission preserves; "0" disables; a positive decimal string
+-- changes the cap for existing and future entries without restoring deletions.
+-- describe/list return max_entries; collection_capabilities has count_retention.
 function Collection:metadata(request) return self._core:metadata(request) end
+-- Entry metadata accepts retention_seconds only; max_entries is collection-only.
 function Collection:entry_metadata(position, request)
   return self._core:entry_metadata(position, request)
 end
 -- Exactly one JSON object. Keep append_id before a single-pass upload; retry
 -- the same compact body/ID or inspect append_status after an ambiguous error.
 -- An identical retry preserves the original position and retention deadline.
+-- Both append forms accept collection_retention_seconds for the parent:
+-- omission preserves, 0 clears, positive seconds reset at new publication.
+-- Only new membership renews. Results/status describe the original directive;
+-- describe() reports the parent's current deadline.
 function Collection:append(request, source) return self._core:append(request, source) end
+-- Push raw JSON fragments as they arrive. No JSON conversion, full-value spool
+-- or producer thread is introduced. Close the writer after commit or failure.
+-- collection_retention_seconds is atomic with a new append; omission preserves,
+-- 0 clears, positive seconds reset from commit. Identical retries do not renew.
+function Collection:append_begin(request)
+  local writer, err, code = self._core:append_begin(request)
+  if writer == nil then return nil, err, code end
+  return setmetatable({ _core = writer }, CollectionWriter)
+end
+-- write borrows a raw JSON string for this call; an empty string is not EOF.
+-- write/abort return true; commit returns the append result. Errors follow the
+-- normal nil,error,code convention, including uncertain publication errors.
+-- The owned writer survives public client/collection close. Commit is terminal;
+-- abort cannot undo publication; close/GC abort unfinished work and never commit.
+function CollectionWriter:write(bytes) return self._core:write(bytes) end
+function CollectionWriter:commit() return self._core:commit() end
+function CollectionWriter:abort() return self._core:abort() end
+function CollectionWriter:close() return self._core:close() end
 function Collection:append_status(append_id) return self._core:append_status(append_id) end
 -- Requires a sink. Raw JSONL reaches it directly; cursor/retention facts arrive
 -- separately through on_metadata. Success is nil, result; errors also return
@@ -1088,6 +1124,9 @@ function Lease:keepalive(req)
   return self._core:keepalive(req)
 end
 
+-- Pouch retires automatically completed single-key retention decisions here.
+-- A cleanup error may follow publication; it is not proof of rollback.
+-- Explicit/joined/managed XA retain their separate outcome lifecycle.
 function Lease:release(req)
   local ok, err = normalize_result(self._core:release(req))
 

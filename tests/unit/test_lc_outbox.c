@@ -6052,7 +6052,7 @@ static void test_pouch_evicted_claim_wake_recovers_at_expiry(void **state) {
   lc_outbox_config_init(&outbox_config);
   outbox_config.ns = "outbox-evicted-claim-wake";
   outbox_config.owner = "outbox-evicted-claim-wake-owner";
-  outbox_config.claim_ttl_seconds = 1L;
+  outbox_config.claim_ttl_seconds = outbox_claim_ttl_seconds();
   outbox_config.notification_capacity = 1U;
   outbox_config.recovery_interval_seconds = 0L;
   assert_int_equal(

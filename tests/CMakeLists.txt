@@ -340,6 +340,36 @@ if(TARGET lockdc_lua_core AND LOCKDC_LUA_RUNNABLE)
     target_link_options(lc_lua_xa_test PRIVATE "LINKER:--no-as-needed")
   endif()
   lc_configure_c_test_target(lc_lua_xa_test)
+  # This additional static runner can drive private storage maintenance without
+  # exporting test helpers from the production DSO. Existing Lua suites retain
+  # their shared-library runner and installed-module coverage.
+  get_target_property(lc_lua_test_sources lc_lua_xa_test SOURCES)
+  add_executable(lc_lua_collections_test ${lc_lua_test_sources})
+  target_include_directories(lc_lua_collections_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/lua)
+  target_include_directories(lc_lua_collections_test SYSTEM PRIVATE ${LUA_INCLUDE_DIR})
+  target_compile_definitions(lc_lua_collections_test PRIVATE
+    LOCKDC_TEST_BUILD=1 LOCKDC_LUA_COLLECTION_MAINTENANCE=1)
+  target_link_libraries(lc_lua_collections_test PRIVATE ${lc_test_link_target} Lua::Lua)
+  lc_configure_c_test_target(lc_lua_collections_test)
+  add_test(NAME lua_collection_count_retention_test
+    COMMAND ${CMAKE_COMMAND}
+      -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+      -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+      -DLOCKDC_LUA_XA_BINARY=$<TARGET_FILE:lc_lua_collections_test>
+      -DLOCKDC_LUA_TEST_CASE=collection_count
+      -P ${CMAKE_SOURCE_DIR}/tests/lua_xa_test.cmake)
+  set_tests_properties(lua_collection_count_retention_test PROPERTIES
+    RUN_SERIAL TRUE TIMEOUT 30 LABELS "unit;local;lua;collections;retention")
+  add_test(NAME lua_collection_writer_test
+    COMMAND ${CMAKE_COMMAND}
+      -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+      -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+      -DLOCKDC_LUA_XA_BINARY=$<TARGET_FILE:lc_lua_collections_test>
+      -DLOCKDC_LUA_TEST_CASE=collection_writer
+      -P ${CMAKE_SOURCE_DIR}/tests/lua_xa_test.cmake)
+  set_tests_properties(lua_collection_writer_test PROPERTIES
+    RUN_SERIAL TRUE TIMEOUT 30 LABELS "unit;local;lua;collections;retention")
   add_test(NAME lua_xa_test
     COMMAND ${CMAKE_COMMAND}
       -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
@@ -357,6 +387,15 @@ if(TARGET lockdc_lua_core AND LOCKDC_LUA_RUNNABLE)
       -P ${CMAKE_SOURCE_DIR}/tests/lua_xa_test.cmake)
   set_tests_properties(lua_state_retention_test PROPERTIES
     RUN_SERIAL TRUE TIMEOUT 30 LABELS "unit;local;lua;retention")
+  add_test(NAME lua_compression_test
+    COMMAND ${CMAKE_COMMAND}
+      -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+      -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+      -DLOCKDC_LUA_XA_BINARY=$<TARGET_FILE:lc_lua_xa_test>
+      -DLOCKDC_LUA_TEST_CASE=compression
+      -P ${CMAKE_SOURCE_DIR}/tests/lua_xa_test.cmake)
+  set_tests_properties(lua_compression_test PROPERTIES
+    RUN_SERIAL TRUE TIMEOUT 30 LABELS "unit;local;lua;pouch")
   add_test(NAME lua_collections_test
     COMMAND ${CMAKE_COMMAND}
       -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}

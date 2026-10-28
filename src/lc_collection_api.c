@@ -96,6 +96,37 @@ int lc_collection_append(lc_collection *collection,
     return lc_collection_bad_receiver(error);
   return collection->append(collection, req, source, out, error);
 }
+int lc_collection_append_begin(lc_collection *collection,
+                               const lc_collection_append_req *req,
+                               lc_collection_writer **out, lc_error *error) {
+  if (out != NULL)
+    *out = NULL;
+  if (collection == NULL || collection->append_begin == NULL)
+    return lc_collection_bad_receiver(error);
+  return collection->append_begin(collection, req, out, error);
+}
+int lc_collection_writer_write(lc_collection_writer *writer, const void *bytes,
+                               size_t count, lc_error *error) {
+  if (writer == NULL || writer->write == NULL)
+    return lc_collection_bad_receiver(error);
+  return writer->write(writer, bytes, count, error);
+}
+int lc_collection_writer_commit(lc_collection_writer *writer,
+                                lc_collection_append_res *out,
+                                lc_error *error) {
+  if (writer == NULL || writer->commit == NULL)
+    return lc_collection_bad_receiver(error);
+  return writer->commit(writer, out, error);
+}
+int lc_collection_writer_abort(lc_collection_writer *writer, lc_error *error) {
+  if (writer == NULL || writer->abort == NULL)
+    return lc_collection_bad_receiver(error);
+  return writer->abort(writer, error);
+}
+void lc_collection_writer_close(lc_collection_writer *writer) {
+  if (writer != NULL && writer->close != NULL)
+    writer->close(writer);
+}
 int lc_collection_append_status(lc_collection *collection,
                                 const char *append_id,
                                 lc_collection_append_status_res *out,

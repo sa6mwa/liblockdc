@@ -100,8 +100,10 @@ set(lockdc_lua_documentation_sources
     docs/xa.md
     docs/postgres.md
     docs/pouch-open-settings-api.md
+    docs/pouch-compression.md
     docs/pouch-storage.md
     docs/collections.md
+    docs/collection-writer.md
     docs/state-retention.md
     docs/worst-case-scenario.md
     examples/lua/README.md

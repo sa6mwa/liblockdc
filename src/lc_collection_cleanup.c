@@ -21,9 +21,19 @@ static int lc_cl_number(const char *name, const char *prefix,
 }
 
 /* 0 is unrelated, 1 referenced canonical storage, 2 obsolete canonical
- * storage, 3 an interrupted derived build. The metadata lock freezes head. */
+ * storage, 3 an interrupted derived build, 4 an unpublished append. The
+ * metadata lock freezes head; pending appends additionally own a file lock. */
 static int lc_cl_kind(lc_collection_handle *collection, const char *name) {
   lc_u64 id;
+  char xid[LC_XID_STRING_SIZE];
+  if (strlen(name) == 8U + LC_XID_STRING_SIZE - 1U + 4U &&
+      strncmp(name, "pending-", 8U) == 0 &&
+      strcmp(name + 8U + LC_XID_STRING_SIZE - 1U, ".log") == 0) {
+    memcpy(xid, name + 8U, LC_XID_STRING_SIZE - 1U);
+    xid[LC_XID_STRING_SIZE - 1U] = '\0';
+    if (lc_xid_is_valid(xid))
+      return 4;
+  }
   if (lc_cl_number(name, "seg-", ".log", &id) && id != 0U &&
       id < LC_COLLECTION_SNAPSHOT_BIT)
     return id >= collection->head.tail_segment && id <= collection->head.active
@@ -185,6 +195,7 @@ int lc_collection_cleanup_files(lc_collection_handle *collection,
   int busy;
   int kind;
   int remove;
+  int pending_fd;
   rc = lc_cl_readers(collection, &busy, error);
   if (rc != LC_OK)
     return rc;
@@ -229,7 +240,7 @@ int lc_collection_cleanup_files(lc_collection_handle *collection,
         break;
       continue;
     }
-    if (kind != 2 && kind != 3)
+    if (kind != 2 && kind != 3 && kind != 4)
       continue;
     path = lc_pouch_path_join(&collection->allocator, collection->directory,
                               entry->d_name);
@@ -241,6 +252,30 @@ int lc_collection_cleanup_files(lc_collection_handle *collection,
       break;
     }
     remove = kind == 3;
+    pending_fd = -1;
+    if (kind == 4) {
+      int locked;
+      pending_fd = open(path, O_RDWR | O_CLOEXEC);
+      if (pending_fd < 0 && errno == ENOENT) {
+        lc_free_with_allocator(&collection->allocator, path);
+        continue;
+      }
+      if (pending_fd < 0)
+        rc = lc_collection_failure(
+            error, LC_ERR_TRANSPORT, NULL,
+            "failed to inspect pending collection append");
+      else {
+        do {
+          locked = flock(pending_fd, LOCK_EX | LOCK_NB);
+        } while (locked != 0 && errno == EINTR);
+        if (locked == 0)
+          remove = 1;
+        else if (errno != EWOULDBLOCK && errno != EAGAIN)
+          rc = lc_collection_failure(
+              error, LC_ERR_TRANSPORT, NULL,
+              "failed to lock abandoned collection append");
+      }
+    }
     if (kind == 2) {
       remove = !busy;
       if (strlen(entry->d_name) + 11U > sizeof(leaf))
@@ -281,6 +316,8 @@ int lc_collection_cleanup_files(lc_collection_handle *collection,
       ++out->cleanup_pending_count;
     lc_free_with_allocator(&collection->allocator, path);
     lc_free_with_allocator(&collection->allocator, marker);
+    if (pending_fd >= 0)
+      (void)close(pending_fd);
     if (rc != LC_OK)
       break;
   }

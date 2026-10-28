@@ -10,6 +10,7 @@
 #include "lc_pouch_namespace.h"
 #include "lc_pouch_path.h"
 #include "lc_pouch_query_index.h"
+#include "lc_pouch_recode.h"
 #include "lc_pouch_record.h"
 #include "lc_pouch_retention.h"
 
@@ -17578,22 +17579,26 @@ void lc_pouch_state_read_result_cleanup(const lc_allocator *allocator,
 #define LC_POUCH_COLLECTION_BINDING_BYTES 20U
 #define LC_POUCH_COLLECTION_META_BYTES 1024U
 #define LC_POUCH_COLLECTION_STATE_BINDING_BYTES 32U
+#define LC_POUCH_COLLECTION_PARENT_BINDING_BYTES 40U
 
-static void lc_pouch_collection_state_binding(unsigned char *binding,
-                                              uint64_t published_at,
-                                              uint64_t previous_segment,
-                                              uint64_t previous_offset) {
-  memset(binding, 0, LC_POUCH_COLLECTION_STATE_BINDING_BYTES);
+static size_t lc_pouch_collection_state_binding(
+    unsigned char *binding, uint64_t published_at, uint64_t previous_segment,
+    uint64_t previous_offset, int has_parent, lc_pouch_unix_seconds parent) {
+  size_t size = has_parent ? LC_POUCH_COLLECTION_PARENT_BINDING_BYTES
+                           : LC_POUCH_COLLECTION_STATE_BINDING_BYTES;
+  memset(binding, 0, size);
   lc_pouch_state_put32(binding, LC_POUCH_COLLECTION_BINDING_MAGIC);
+  lc_pouch_state_put32(binding + 4U, has_parent ? 1U : 0U);
   lc_pouch_state_put64(binding + 8U, published_at);
   lc_pouch_state_put64(binding + 16U, previous_segment);
   lc_pouch_state_put64(binding + 24U, previous_offset);
+  if (has_parent)
+    lc_pouch_state_put64(binding + 32U, (uint64_t)parent);
+  return size;
 }
 
 typedef struct lc_pouch_collection_body {
   lc_sink hash_sink;
-  lc_pouch *pouch;
-  lc_source *source;
   lc_sink *encoded;
   EVP_MD_CTX *hash;
 } lc_pouch_collection_body;
@@ -17608,18 +17613,8 @@ static int lc_pouch_collection_hash_write(lc_sink *self, const void *bytes,
                  "pouch");
     return 0;
   }
-  return body->encoded->write(body->encoded, bytes, length, error);
-}
-
-static int lc_pouch_collection_produce_body(void *context, lc_sink *sink,
-                                            lc_error *error) {
-  lc_pouch_collection_body *body;
-  lc_u64 written;
-  body = (lc_pouch_collection_body *)context;
-  body->encoded = sink;
-  body->hash_sink.write = lc_pouch_collection_hash_write;
-  return lc_collection_json_copy(body->source, &body->hash_sink,
-                                 &body->pouch->allocator, &written, error);
+  return body->encoded == NULL ||
+         body->encoded->write(body->encoded, bytes, length, error);
 }
 
 static int lc_pouch_collection_id_valid(const char *id) {
@@ -17644,185 +17639,362 @@ static int lc_pouch_collection_id_valid(const char *id) {
   return 1;
 }
 
-int lc_pouch_collection_record_append(
+struct lc_pouch_collection_writer {
+  lc_pouch *pouch;
+  int fd;
+  int started;
+  int finished;
+  lc_pouch_unix_seconds retention;
+  lc_pouch_unix_seconds parent;
+  char collection_id[LC_XID_STRING_SIZE];
+  lc_pouch_collection_record record;
+  lc_pouch_collection_body body;
+  lc_collection_json_writer *json;
+  lc_pouch_crypto_writer *codec;
+};
+
+void lc_pouch_collection_writer_close(lc_pouch_collection_writer *writer) {
+  lc_pouch *pouch;
+  if (writer == NULL)
+    return;
+  pouch = writer->pouch;
+  lc_collection_json_writer_close(writer->json);
+  lc_pouch_crypto_writer_close(writer->codec);
+  EVP_MD_CTX_free(writer->body.hash);
+  if (writer->started && !writer->record.published)
+    lc_pouch_state_append_fd_rollback(writer->fd, writer->record.record_offset,
+                                      1);
+  lc_free_with_allocator(&pouch->allocator, writer);
+}
+
+int lc_pouch_collection_writer_open(
     lc_pouch *pouch, int fd, const char *container_leaf,
     const char *collection_id, const char *append_id, uint64_t position,
-    uint64_t generation, lc_pouch_unix_seconds retention, lc_source *source,
-    lc_pouch_collection_record *out, lc_error *error) {
+    uint64_t generation, lc_pouch_unix_seconds retention,
+    int has_collection_retention, lc_pouch_unix_seconds collection_retention,
+    lc_pouch_collection_writer **out, lc_error *error) {
   static const char placeholder[] =
       "0000000000000000000000000000000000000000000000000000000000000000";
-  lc_pouch_collection_body body;
+  lc_pouch_collection_writer *writer;
+  lc_pouch_collection_record *record;
   lc_pouch_state_payload_span span;
+  unsigned char binding[LC_POUCH_COLLECTION_PARENT_BINDING_BYTES];
+  unsigned char *meta = NULL;
   lc_pouch_unix_seconds now;
-  unsigned char *meta;
-  unsigned char *final_meta;
-  unsigned char binding[LC_POUCH_COLLECTION_STATE_BINDING_BYTES];
-  char *etag;
-  char *descriptor;
   char version[32];
-  size_t meta_length;
-  size_t final_length;
-  uint64_t start;
-  int context_length;
-  int rc;
-  int started;
-
-  if (out != NULL) {
-    memset(out, 0, sizeof(*out));
-  }
-  if (pouch == NULL || fd < 0 || source == NULL || out == NULL ||
+  size_t binding_length, meta_length;
+  int n, rc;
+  if (out != NULL)
+    *out = NULL;
+  if (pouch == NULL || out == NULL || fd < -1 ||
       !lc_pouch_collection_id_valid(append_id) ||
-      !lc_xid_is_valid(collection_id) || position == 0U || generation == 0U ||
-      retention == LC_I64_MIN ||
-      !lc_pouch_state_payload_container_is_valid(container_leaf)) {
+      !lc_xid_is_valid(collection_id) || retention == LC_I64_MIN ||
+      (has_collection_retention && collection_retention == LC_I64_MIN) ||
+      (fd >= 0 && !lc_pouch_state_payload_container_is_valid(container_leaf)))
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "collection state append arguments are invalid", NULL,
+                        "collection writer arguments are invalid", NULL, NULL,
+                        "pouch");
+  writer = lc_calloc_with_allocator(&pouch->allocator, 1U, sizeof(*writer));
+  if (writer == NULL)
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate collection record writer", NULL,
                         NULL, "pouch");
-  }
-  if (lc_u64_format_base10(position, version, sizeof(version)) < 0) {
+  writer->pouch = pouch;
+  writer->fd = fd;
+  writer->retention = retention;
+  writer->parent = collection_retention;
+  strcpy(writer->collection_id, collection_id);
+  record = &writer->record;
+  record->position = position;
+  record->published_at = record->generation = generation;
+  record->has_collection_retention = has_collection_retention != 0;
+  strcpy(record->append_id, append_id);
+  if (position == 0U)
+    strcpy(version, "upload");
+  else if (lc_u64_format_base10(position, version, sizeof(version)) < 0) {
+    lc_pouch_collection_writer_close(writer);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "collection position could not be formatted", NULL,
                         NULL, "pouch");
   }
-  context_length =
-      snprintf(out->context, sizeof(out->context), "collection:%s:%s:%s",
+  n = snprintf(record->context, sizeof(record->context), "collection:%s:%s:%s",
                collection_id, append_id, version);
-  if (context_length < 0 || (size_t)context_length >= sizeof(out->context)) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "collection payload context exceeds its bound", NULL,
-                        NULL, "pouch");
-  }
-  rc = lc_pouch_now_unix(&now, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  start = 0U;
-  rc = lc_pouch_state_fd_end(fd, &start,
-                             "failed to seek collection segment tail", error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  memset(&span, 0, sizeof(span));
-  memset(&body, 0, sizeof(body));
-  body.pouch = pouch;
-  body.source = source;
-  span.present = 1;
-  span.container_leaf = (char *)container_leaf;
-  span.record_offset = start;
-  meta = NULL;
-  final_meta = NULL;
-  etag = NULL;
-  descriptor = NULL;
-  started = 0;
-  meta_length = 0U;
-  final_length = 0U;
-  out->record_offset = start;
-  out->position = position;
-  out->published_at = generation;
-  out->generation = generation;
-  out->payload_record_offset = start;
-  strcpy(out->payload_container, container_leaf);
-  strcpy(out->append_id, append_id);
-  lc_pouch_collection_state_binding(binding, generation, 0U, 0U);
-  body.hash = EVP_MD_CTX_new();
-  if (body.hash == NULL) {
+  rc = n < 0 || (size_t)n >= sizeof(record->context)
+           ? lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "collection payload context exceeds its bound", NULL,
+                          NULL, "pouch")
+           : LC_OK;
+  writer->body.hash_sink.write = lc_pouch_collection_hash_write;
+  writer->body.hash = EVP_MD_CTX_new();
+  if (rc == LC_OK && writer->body.hash == NULL)
     rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                       "failed to allocate collection payload hash", NULL, NULL,
                       "pouch");
-  } else if (EVP_DigestInit_ex(body.hash, EVP_sha256(), NULL) != 1) {
+  if (rc == LC_OK &&
+      EVP_DigestInit_ex(writer->body.hash, EVP_sha256(), NULL) != 1)
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                       "failed to initialize collection payload hash", NULL,
                       NULL, "pouch");
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_encode_payload_meta(
-        &pouch->allocator, position, now, 0U, 0U, "application/json",
-        placeholder, NULL, &span, out->context, binding, sizeof(binding),
-        LC_POUCH_STATE_RECORD_DESCRIPTOR_RESERVE, 0, 0, 0,
-        retention == 0 ? 0 : 1, &meta, &meta_length, error);
-  }
-  if (rc == LC_OK &&
-      (start > (uint64_t)LC_I64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES -
-                   strlen(append_id) - meta_length)) {
-    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "collection record exceeds file offset range", NULL, NULL,
-                      "pouch");
-  }
-  if (rc == LC_OK) {
-    out->payload_offset = start + LC_POUCH_STATE_RECORD_HEADER_BYTES +
-                          strlen(append_id) + meta_length;
-    started = 1;
-    rc = lc_pouch_state_record_write_prefix(
-        fd, LC_POUCH_STATE_RECORD_STATE_PUT, append_id, strlen(append_id), meta,
-        meta_length, 0U, 0U, LC_POUCH_RECORD_FLAG_PENDING, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_crypto_produce_to_fd(pouch->crypto, out->context, fd,
-                                       lc_pouch_collection_produce_body, &body,
-                                       &out->bytes, &out->stored_bytes,
-                                       &out->stored_crc, &descriptor, 1, error);
-  }
-  if (rc == LC_OK) {
-    etag = lc_pouch_state_hash_final(&pouch->allocator, body.hash, error);
-    if (etag == NULL) {
-      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  if (rc == LC_OK && fd >= 0)
+    rc = lc_pouch_crypto_writer_open(pouch->crypto, record->context, fd, 1,
+                                     &writer->codec, error);
+  writer->body.encoded = lc_pouch_crypto_writer_sink(writer->codec);
+  if (rc == LC_OK)
+    rc = lc_collection_json_writer_open(
+        &writer->body.hash_sink, &pouch->allocator, &writer->json, error);
+  if (rc == LC_OK && fd >= 0) {
+    rc = lc_pouch_now_unix(&now, error);
+    if (rc == LC_OK)
+      rc = lc_pouch_state_fd_end(fd, &record->record_offset,
+                                 "failed to seek collection segment tail",
+                                 error);
+    memset(&span, 0, sizeof(span));
+    span.present = 1;
+    span.container_leaf = (char *)container_leaf;
+    span.record_offset = record->record_offset;
+    record->payload_record_offset = record->record_offset;
+    strcpy(record->payload_container, container_leaf);
+    binding_length = lc_pouch_collection_state_binding(
+        binding, generation, 0, 0, has_collection_retention, 0);
+    meta_length = 0U;
+    if (rc == LC_OK)
+      rc = lc_pouch_state_encode_payload_meta(
+          &pouch->allocator, position, now, 0, 0, "application/json",
+          placeholder, NULL, &span, record->context, binding, binding_length,
+          LC_POUCH_STATE_RECORD_DESCRIPTOR_RESERVE, 0, 0, 0, retention != 0,
+          &meta, &meta_length, error);
+    if (rc == LC_OK &&
+        record->record_offset > (uint64_t)LC_I64_MAX -
+                                    LC_POUCH_STATE_RECORD_HEADER_BYTES -
+                                    strlen(append_id) - meta_length)
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "collection record exceeds file offset range", NULL,
+                        NULL, "pouch");
+    if (rc == LC_OK) {
+      record->metadata_length = meta_length;
+      record->payload_offset = record->record_offset +
+                               LC_POUCH_STATE_RECORD_HEADER_BYTES +
+                               strlen(append_id) + meta_length;
+      writer->started = 1;
+      rc = lc_pouch_state_record_write_prefix(
+          fd, LC_POUCH_STATE_RECORD_STATE_PUT, append_id, strlen(append_id),
+          meta, meta_length, 0, 0, LC_POUCH_RECORD_FLAG_PENDING, error);
     }
   }
+  lc_free_with_allocator(&pouch->allocator, meta);
+  if (rc != LC_OK)
+    lc_pouch_collection_writer_close(writer);
+  else
+    *out = writer;
+  return rc;
+}
+
+int lc_pouch_collection_writer_write(lc_pouch_collection_writer *writer,
+                                     const void *bytes, size_t count,
+                                     lc_error *error) {
+  if (writer == NULL || writer->finished)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "collection record writer is not writable", NULL, NULL,
+                        "pouch");
+  return lc_collection_json_writer_write(writer->json, bytes, count, error);
+}
+
+int lc_pouch_collection_writer_finish(lc_pouch_collection_writer *writer,
+                                      lc_pouch_collection_record *out,
+                                      lc_error *error) {
+  char *etag = NULL, *descriptor = NULL;
+  lc_u64 written;
+  int rc;
+  if (writer == NULL || out == NULL || writer->finished)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "collection record writer cannot finish", NULL, NULL,
+                        "pouch");
+  writer->finished = 1;
+  rc = lc_collection_json_writer_finish(writer->json, &written, error);
+  if (rc == LC_OK) {
+    writer->record.bytes = written;
+    etag = lc_pouch_state_hash_final(&writer->pouch->allocator,
+                                     writer->body.hash, error);
+    if (etag == NULL)
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  if (rc == LC_OK && writer->codec != NULL)
+    rc = lc_pouch_crypto_writer_finish(
+        writer->codec, &writer->record.bytes, &writer->record.stored_bytes,
+        &writer->record.stored_crc, &descriptor, error);
   if (rc == LC_OK && descriptor != NULL &&
-      strlen(descriptor) >= sizeof(out->descriptor)) {
+      strlen(descriptor) >= sizeof(writer->record.descriptor))
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "collection crypto descriptor exceeds reserved metadata",
                       NULL, NULL, "pouch");
-  }
-  if (rc == LC_OK)
-    rc = lc_pouch_now_unix(&now, error);
-  if (rc == LC_OK)
-    rc = lc_pouch_retention_resolve(retention, now, &out->retention, error);
   if (rc == LC_OK) {
-    out->updated_at_unix = now;
-    strcpy(out->etag, etag);
-    if (descriptor != NULL) {
-      strcpy(out->descriptor, descriptor);
-    }
-    span.payload_offset = out->payload_offset;
-    span.payload_length = out->stored_bytes;
-    span.payload_crc = out->stored_crc;
-    rc = lc_pouch_state_encode_payload_meta(
-        &pouch->allocator, position, now, out->bytes, out->stored_bytes,
-        "application/json", etag, descriptor, &span, out->context, binding,
-        sizeof(binding), LC_POUCH_STATE_RECORD_DESCRIPTOR_RESERVE, 0, 0, 0,
-        out->retention, &final_meta, &final_length, error);
+    strcpy(writer->record.etag, etag);
+    if (descriptor != NULL)
+      strcpy(writer->record.descriptor, descriptor);
+    *out = writer->record;
   }
-  if (rc == LC_OK && final_length != meta_length) {
+  lc_free_with_allocator(&writer->pouch->allocator, etag);
+  lc_free_with_allocator(&writer->pouch->allocator, descriptor);
+  lc_collection_json_writer_close(writer->json);
+  writer->json = NULL;
+  lc_pouch_crypto_writer_close(writer->codec);
+  writer->codec = NULL;
+  EVP_MD_CTX_free(writer->body.hash);
+  writer->body.hash = NULL;
+  return rc;
+}
+
+int lc_pouch_collection_writer_publish(lc_pouch_collection_writer *writer,
+                                       const char *container_leaf,
+                                       uint64_t position, uint64_t generation,
+                                       lc_pouch_collection_record *out,
+                                       lc_error *error) {
+  lc_pouch_collection_record *record;
+  lc_pouch_state_payload_span span;
+  unsigned char binding[LC_POUCH_COLLECTION_PARENT_BINDING_BYTES];
+  unsigned char *meta = NULL;
+  char version[32], context[256];
+  char *descriptor = NULL;
+  lc_pouch_unix_seconds now = 0;
+  size_t binding_length, meta_length;
+  int n, rc;
+  if (writer == NULL || out == NULL || !writer->finished || writer->fd < 0 ||
+      writer->record.etag[0] == '\0' || writer->record.published ||
+      position == 0U || generation == 0U ||
+      !lc_pouch_state_payload_container_is_valid(container_leaf))
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "collection record writer cannot publish", NULL, NULL,
+                        "pouch");
+  record = &writer->record;
+  if (lc_u64_format_base10(position, version, sizeof(version)) < 0)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "collection position could not be formatted", NULL,
+                        NULL, "pouch");
+  n = snprintf(context, sizeof(context), "collection:%s:%s:%s",
+               writer->collection_id, record->append_id, version);
+  if (n < 0 || (size_t)n >= sizeof(context))
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "collection binding context exceeds its bound", NULL,
+                        NULL, "pouch");
+  rc = lc_pouch_now_unix(&now, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_retention_resolve(writer->retention, now, &record->retention,
+                                    error);
+  if (rc == LC_OK && record->has_collection_retention)
+    rc = lc_pouch_retention_resolve(writer->parent, now,
+                                    &record->collection_retention, error);
+  if (rc == LC_OK && record->descriptor[0] != '\0' &&
+      strcmp(context, record->context) != 0) {
+    rc = lc_pouch_crypto_rebind_descriptor(writer->pouch->crypto,
+                                           record->descriptor, record->context,
+                                           context, &descriptor, error);
+    if (rc == LC_OK && strlen(descriptor) >= sizeof(record->descriptor))
+      rc = lc_error_set(
+          error, LC_ERR_INVALID, 0L,
+          "collection binding descriptor exceeds reserved metadata", NULL, NULL,
+          "pouch");
+    if (rc == LC_OK)
+      strcpy(record->descriptor, descriptor);
+  }
+  record->position = position;
+  record->published_at = record->generation = generation;
+  record->updated_at_unix = now;
+  strcpy(record->payload_container, container_leaf);
+  memset(&span, 0, sizeof(span));
+  span.present = 1;
+  span.container_leaf = (char *)container_leaf;
+  span.record_offset = record->record_offset;
+  span.payload_offset = record->payload_offset;
+  span.payload_length = record->stored_bytes;
+  span.payload_crc = record->stored_crc;
+  binding_length = lc_pouch_collection_state_binding(
+      binding, generation, 0, 0, record->has_collection_retention,
+      record->collection_retention);
+  meta_length = 0U;
+  if (rc == LC_OK)
+    rc = lc_pouch_state_encode_payload_meta(
+        &writer->pouch->allocator, position, now, record->bytes,
+        record->stored_bytes, "application/json", record->etag,
+        record->descriptor[0] != '\0' ? record->descriptor : NULL, &span,
+        record->context, binding, binding_length,
+        LC_POUCH_STATE_RECORD_DESCRIPTOR_RESERVE, 0, 0, 0, record->retention,
+        &meta, &meta_length, error);
+  if (rc == LC_OK && meta_length != record->metadata_length)
     rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                       "collection state metadata reservation changed size",
                       NULL, "collection_corrupt", "pouch");
-  }
-  out->metadata_length = final_length;
   if (rc == LC_OK) {
-    rc = lc_pouch_state_meta_set_index_seq(final_meta, final_length, generation,
-                                           error);
+    rc =
+        lc_pouch_state_meta_set_index_seq(meta, meta_length, generation, error);
+    if (rc == LC_OK)
+      rc = lc_pouch_state_record_finalize(
+          writer->fd, record->record_offset, LC_POUCH_STATE_RECORD_STATE_PUT,
+          record->append_id, strlen(record->append_id), meta, meta_length,
+          record->stored_bytes, record->stored_crc, error);
+    record->published = rc == LC_OK;
   }
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_record_finalize(
-        fd, start, LC_POUCH_STATE_RECORD_STATE_PUT, append_id,
-        strlen(append_id), final_meta, final_length, out->stored_bytes,
-        out->stored_crc, error);
-    out->published = rc == LC_OK;
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_fd_end(fd, &out->next_offset,
+  if (rc == LC_OK)
+    rc = lc_pouch_state_fd_end(writer->fd, &record->next_offset,
                                "failed to restore collection append offset",
                                error);
+  *out = *record;
+  lc_free_with_allocator(&writer->pouch->allocator, descriptor);
+  lc_free_with_allocator(&writer->pouch->allocator, meta);
+  return rc;
+}
+
+int lc_pouch_collection_record_append(
+    lc_pouch *pouch, int fd, const char *container_leaf,
+    const char *collection_id, const char *append_id, uint64_t position,
+    uint64_t generation, lc_pouch_unix_seconds retention,
+    int has_collection_retention, lc_pouch_unix_seconds collection_retention,
+    lc_source *source, lc_pouch_collection_record *out, lc_error *error) {
+  lc_pouch_collection_writer *writer = NULL;
+  unsigned char *input = NULL;
+  size_t got;
+  int rc;
+  if (out != NULL)
+    memset(out, 0, sizeof(*out));
+  if (pouch == NULL || source == NULL || source->read == NULL || out == NULL ||
+      fd < 0 || position == 0U || generation == 0U)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "collection state append arguments are invalid", NULL,
+                        NULL, "pouch");
+  rc = lc_pouch_collection_writer_open(pouch, fd, container_leaf, collection_id,
+                                       append_id, position, generation,
+                                       retention, has_collection_retention,
+                                       collection_retention, &writer, error);
+  if (rc == LC_OK) {
+    input = lc_alloc_with_allocator(&pouch->allocator,
+                                    LC_COLLECTION_JSON_CHUNK_BYTES);
+    if (input == NULL)
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate collection input chunk", NULL, NULL,
+                        "pouch");
   }
-  if (rc != LC_OK && started && !out->published) {
-    lc_pouch_state_append_fd_rollback(fd, start, 1);
+  while (rc == LC_OK) {
+    got = source->read(source, input, LC_COLLECTION_JSON_CHUNK_BYTES, error);
+    if (error != NULL && error->code != LC_OK) {
+      rc = error->code;
+      break;
+    }
+    if (got > LC_COLLECTION_JSON_CHUNK_BYTES) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "collection source exceeded requested chunk size", NULL,
+                        NULL, "pouch");
+      break;
+    }
+    if (got == 0U) {
+      rc = lc_pouch_collection_writer_finish(writer, out, error);
+      break;
+    }
+    rc = lc_pouch_collection_writer_write(writer, input, got, error);
   }
-  EVP_MD_CTX_free(body.hash);
-  lc_free_with_allocator(&pouch->allocator, meta);
-  lc_free_with_allocator(&pouch->allocator, final_meta);
-  lc_free_with_allocator(&pouch->allocator, descriptor);
-  lc_free_with_allocator(&pouch->allocator, etag);
+  if (rc == LC_OK)
+    rc = lc_pouch_collection_writer_publish(writer, container_leaf, position,
+                                            generation, out, error);
+  lc_free_with_allocator(&pouch->allocator, input);
+  lc_pouch_collection_writer_close(writer);
   return rc;
 }
 
@@ -17832,11 +18004,12 @@ int lc_pouch_collection_record_metadata(
     uint64_t generation, lc_pouch_unix_seconds retention,
     lc_pouch_collection_record *out, lc_error *error) {
   lc_pouch_state_payload_span span;
-  unsigned char binding[LC_POUCH_COLLECTION_STATE_BINDING_BYTES];
+  unsigned char binding[LC_POUCH_COLLECTION_PARENT_BINDING_BYTES];
   unsigned char *meta;
   lc_pouch_unix_seconds now;
   uint64_t start;
   size_t length;
+  size_t binding_length;
   int rc, started;
   if (pouch == NULL || fd < 0 || current == NULL || out == NULL ||
       current == out || !current->published || current->deleted ||
@@ -17862,8 +18035,9 @@ int lc_pouch_collection_record_metadata(
   span.payload_offset = current->payload_offset;
   span.payload_length = current->stored_bytes;
   span.payload_crc = current->stored_crc;
-  lc_pouch_collection_state_binding(binding, current->published_at,
-                                    previous_segment, current->record_offset);
+  binding_length = lc_pouch_collection_state_binding(
+      binding, current->published_at, previous_segment, current->record_offset,
+      current->has_collection_retention, current->collection_retention);
   meta = NULL;
   length = 0U;
   start = 0U;
@@ -17875,7 +18049,7 @@ int lc_pouch_collection_record_metadata(
     rc = lc_pouch_state_encode_payload_meta(
         &pouch->allocator, current->position, now, current->bytes,
         current->stored_bytes, "application/json", current->etag,
-        current->descriptor, &span, current->context, binding, sizeof(binding),
+        current->descriptor, &span, current->context, binding, binding_length,
         0U, 0, 0, 0, out->retention, &meta, &length, error);
   if (rc == LC_OK)
     rc = lc_pouch_state_meta_set_index_seq(meta, length, generation, error);
@@ -17919,6 +18093,7 @@ int lc_pouch_collection_record_delete(lc_pouch *pouch, int fd,
   uint64_t start;
   size_t length;
   size_t trailer;
+  size_t binding_length;
   int rc;
   int started;
   if (pouch == NULL || fd < 0 || current == NULL || out == NULL ||
@@ -17967,8 +18142,10 @@ int lc_pouch_collection_record_delete(lc_pouch *pouch, int fd,
                                            error);
   }
   if (rc == LC_OK) {
-    grown = (unsigned char *)lc_realloc_with_allocator(
-        &pouch->allocator, meta, length + LC_POUCH_COLLECTION_BINDING_BYTES);
+    binding_length = LC_POUCH_COLLECTION_BINDING_BYTES +
+                     (current->has_collection_retention ? 8U : 0U);
+    grown = (unsigned char *)lc_realloc_with_allocator(&pouch->allocator, meta,
+                                                       length + binding_length);
     if (grown == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to retain collection deletion binding", NULL,
@@ -17976,12 +18153,15 @@ int lc_pouch_collection_record_delete(lc_pouch *pouch, int fd,
     } else {
       meta = grown;
       trailer = length - LC_POUCH_STATE_INDEX_TRAILER_BYTES;
-      memmove(meta + trailer + LC_POUCH_COLLECTION_BINDING_BYTES,
-              meta + trailer, LC_POUCH_STATE_INDEX_TRAILER_BYTES);
+      memmove(meta + trailer + binding_length, meta + trailer,
+              LC_POUCH_STATE_INDEX_TRAILER_BYTES);
       lc_pouch_state_put32(meta + trailer, LC_POUCH_COLLECTION_BINDING_MAGIC);
       lc_pouch_state_put64(meta + trailer + 4U, current->bytes);
       lc_pouch_state_put64(meta + trailer + 12U, current->published_at);
-      length += LC_POUCH_COLLECTION_BINDING_BYTES;
+      if (current->has_collection_retention)
+        lc_pouch_state_put64(meta + trailer + 20U,
+                             (uint64_t)current->collection_retention);
+      length += binding_length;
       out->metadata_length = length;
       rc = lc_pouch_state_meta_set_index_seq(meta, length, generation, error);
     }
@@ -18066,6 +18246,7 @@ int lc_pouch_collection_record_read(int fd, uint64_t offset, uint64_t file_end,
   size_t container_length;
   size_t context_length;
   size_t used;
+  size_t binding_length;
   size_t i;
   uint64_t metadata_end;
   int rc;
@@ -18136,11 +18317,12 @@ int lc_pouch_collection_record_read(int fd, uint64_t offset, uint64_t file_end,
   }
   if (header.type == LC_POUCH_STATE_RECORD_STATE_DELETE) {
     etag_length = lc_pouch_state_get16(meta + 16U);
+    binding_length = header.meta_len - 18U - etag_length -
+                     LC_POUCH_STATE_INDEX_TRAILER_BYTES;
     if (etag_length != 64U || header.payload_len != 0U ||
         header.payload_crc != 0U ||
-        header.meta_len != 18U + etag_length +
-                               LC_POUCH_COLLECTION_BINDING_BYTES +
-                               LC_POUCH_STATE_INDEX_TRAILER_BYTES) {
+        (binding_length != LC_POUCH_COLLECTION_BINDING_BYTES &&
+         binding_length != LC_POUCH_COLLECTION_BINDING_BYTES + 8U)) {
       goto corrupt;
     }
     cursor = meta + 18U + etag_length;
@@ -18151,6 +18333,14 @@ int lc_pouch_collection_record_read(int fd, uint64_t offset, uint64_t file_end,
     }
     out->bytes = lc_pouch_state_get64(cursor + 4U);
     out->published_at = lc_pouch_state_get64(cursor + 12U);
+    out->has_collection_retention =
+        binding_length > LC_POUCH_COLLECTION_BINDING_BYTES;
+    if (out->has_collection_retention) {
+      if (lc_pouch_state_get64(cursor + 20U) > (uint64_t)LC_I64_MAX)
+        goto corrupt;
+      out->collection_retention =
+          (lc_pouch_unix_seconds)lc_pouch_state_get64(cursor + 20U);
+    }
     if (out->published_at == 0U || out->published_at >= out->generation) {
       goto corrupt;
     }
@@ -18202,22 +18392,35 @@ int lc_pouch_collection_record_read(int fd, uint64_t offset, uint64_t file_end,
       goto corrupt;
     }
     cursor += container_length;
+    binding_length = lc_pouch_state_get32(meta + used);
     if (!lc_pouch_collection_record_text(out->context, sizeof(out->context),
                                          cursor, context_length) ||
-        lc_pouch_state_get32(meta + used) !=
-            LC_POUCH_COLLECTION_STATE_BINDING_BYTES) {
+        (binding_length != LC_POUCH_COLLECTION_STATE_BINDING_BYTES &&
+         binding_length != LC_POUCH_COLLECTION_PARENT_BINDING_BYTES) ||
+        used + 4U + binding_length + LC_POUCH_STATE_INDEX_TRAILER_BYTES >
+            header.meta_len) {
       goto corrupt;
     }
     cursor = meta + used + 4U;
     if (lc_pouch_state_get32(cursor) != LC_POUCH_COLLECTION_BINDING_MAGIC ||
-        lc_pouch_state_get32(cursor + 4U) != 0U)
+        lc_pouch_state_get32(cursor + 4U) !=
+            (binding_length == LC_POUCH_COLLECTION_PARENT_BINDING_BYTES ? 1U
+                                                                        : 0U))
       goto corrupt;
     out->published_at = lc_pouch_state_get64(cursor + 8U);
     out->previous_segment = lc_pouch_state_get64(cursor + 16U);
     out->previous_offset = lc_pouch_state_get64(cursor + 24U);
+    out->has_collection_retention =
+        binding_length == LC_POUCH_COLLECTION_PARENT_BINDING_BYTES;
+    if (out->has_collection_retention) {
+      if (lc_pouch_state_get64(cursor + 32U) > (uint64_t)LC_I64_MAX)
+        goto corrupt;
+      out->collection_retention =
+          (lc_pouch_unix_seconds)lc_pouch_state_get64(cursor + 32U);
+    }
     if (out->published_at == 0U || out->published_at > out->generation)
       goto corrupt;
-    used += 4U + LC_POUCH_COLLECTION_STATE_BINDING_BYTES;
+    used += 4U + binding_length;
     rc = lc_pouch_state_decode_retention_meta(meta, header.meta_len, used, 0,
                                               &out->retention, error);
     if (rc != LC_OK)
@@ -18388,7 +18591,9 @@ int lc_pouch_collection_record_copy(
     lc_pouch_state_put16(meta + 70U, (unsigned int)new_length);
     lc_pouch_collection_state_binding(meta + container_offset + new_length +
                                           lc_pouch_state_get16(meta + 72U) + 4U,
-                                      source.published_at, 0U, 0U);
+                                      source.published_at, 0U, 0U,
+                                      source.has_collection_retention,
+                                      source.collection_retention);
     if (start > (uint64_t)LC_I64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES -
                     strlen(source.append_id) - meta_length)
       return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -18444,5 +18649,406 @@ int lc_pouch_collection_record_copy(
         "failed to restore collection relocation append offset", error);
   if (rc != LC_OK && !out->published)
     lc_pouch_state_append_fd_rollback(destination_fd, start, 1);
+  return rc;
+}
+
+/* Root compression conversion shares canonical parsing and encoding. Physical
+ * offset maps contain metadata only; every body crosses the codec once. */
+static char *lc_ps_recode_binding(lc_pouch_recode *work,
+                                  lc_pouch_recode_file *file,
+                                  const lc_pouch_state_entry *entry) {
+  char version[32], *context;
+  size_t size;
+  if (file->collection_id[0]) {
+    if (lc_u64_format_base10(entry->version, version, sizeof(version)) < 0)
+      return NULL;
+    size =
+        strlen(file->collection_id) + strlen(entry->key) + strlen(version) + 14;
+    context = lc_alloc_with_allocator(&work->pouch->allocator, size);
+    if (context)
+      (void)snprintf(context, size, "collection:%s:%s:%s", file->collection_id,
+                     entry->key, version);
+    return context;
+  }
+  return lc_pouch_state_crypto_context(
+      &work->pouch->allocator, file->ns, entry->key, entry->version,
+      lc_pouch_state_payload_class(entry->record_type, entry->object_link));
+}
+
+static int lc_ps_recode_meta(lc_pouch_recode *work,
+                             const lc_pouch_state_entry *entry,
+                             const lc_pouch_state_payload_span *span,
+                             const char *descriptor, unsigned char **meta,
+                             size_t *length, lc_error *error) {
+  int rc = lc_pouch_state_encode_payload_meta(
+      &work->pouch->allocator, entry->version, entry->updated_at_unix,
+      entry->bytes,
+      span && span->present ? span->payload_length : entry->cipher_bytes,
+      entry->content_type, entry->etag, descriptor, span,
+      entry->payload_context, entry->metadata, entry->metadata_length,
+      LC_POUCH_STATE_RECORD_DESCRIPTOR_RESERVE, entry->has_query_hidden,
+      entry->query_hidden, entry->staged_delete_marker, entry->retention, meta,
+      length, error);
+  if (rc == LC_OK) {
+    if (entry->object_link)
+      (*meta)[60] |= LC_POUCH_STATE_PAYLOAD_FLAG_OBJECT_LINK;
+    rc = entry->has_query_index_seq
+             ? lc_pouch_state_meta_set_index_sequences(
+                   &work->pouch->allocator, meta, length, entry->index_seq,
+                   entry->query_index_seq, error)
+             : lc_pouch_state_meta_set_index_seq(*meta, *length,
+                                                 entry->index_seq, error);
+  }
+  return rc;
+}
+
+static int lc_ps_recode_body(lc_pouch_recode *work, lc_pouch_recode_file *file,
+                             const lc_pouch_state_entry *entry, int fd,
+                             lc_error *error) {
+  lc_pouch_state_payload_span span = entry->payload_span;
+  lc_pouch_collection_body body;
+  lc_pouch_crypto_writer *codec = NULL;
+  lc_source *source = NULL;
+  char *binding = NULL, *descriptor = NULL, *rebound = NULL, *etag = NULL;
+  const char *context;
+  unsigned char *meta = NULL, *chunk = NULL;
+  size_t length = 0, reserved = 0, got;
+  lc_u64 start = 0, plain = 0, stored = 0;
+  unsigned long crc = 0;
+  int rc;
+  memset(&body, 0, sizeof(body));
+  binding = lc_ps_recode_binding(work, file, entry);
+  if (!binding)
+    return LC_ERR_NOMEM;
+  context = entry->payload_context && *entry->payload_context
+                ? entry->payload_context
+                : binding;
+  rc = lc_pouch_state_fd_end(fd, &start, "failed to locate converted payload",
+                             error);
+  span.container_leaf = file->leaf;
+  span.record_offset = start;
+  span.payload_offset = 0;
+  span.payload_length = 0;
+  span.payload_crc = 0;
+  if (rc == LC_OK)
+    rc = lc_ps_recode_meta(work, entry, &span, NULL, &meta, &reserved, error);
+  if (rc == LC_OK) {
+    span.payload_offset =
+        start + LC_POUCH_RECORD_HEADER_BYTES + strlen(entry->key) + reserved;
+    rc = lc_pouch_state_record_write_prefix(
+        fd, entry->record_type, entry->key, strlen(entry->key), meta, reserved,
+        0, 0, LC_POUCH_RECORD_FLAG_PENDING, error);
+  }
+  lc_free_with_allocator(&work->pouch->allocator, meta);
+  meta = NULL;
+  if (rc == LC_OK)
+    rc = lc_pouch_crypto_source_from_file_span(
+        work->pouch->crypto, context, binding, file->source,
+        entry->payload_span.payload_offset, entry->payload_span.payload_length,
+        entry->descriptor, &source, error);
+  if (rc == LC_OK)
+    rc = lc_pouch_crypto_writer_open(work->pouch->crypto, context, fd, 1,
+                                     &codec, error);
+  body.hash = EVP_MD_CTX_new();
+  body.hash_sink.write = lc_pouch_collection_hash_write;
+  body.encoded = lc_pouch_crypto_writer_sink(codec);
+  if (rc == LC_OK &&
+      (!body.hash || EVP_DigestInit_ex(body.hash, EVP_sha256(), NULL) != 1))
+    rc = lc_error_set(error, LC_ERR_NOMEM, 0,
+                      "failed to initialize conversion hash", NULL, NULL,
+                      "pouch");
+  if (rc == LC_OK) {
+    chunk = lc_alloc_with_allocator(&work->pouch->allocator, 65536);
+    if (!chunk)
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0,
+                        "failed to allocate conversion input chunk", NULL, NULL,
+                        "pouch");
+  }
+  while (rc == LC_OK) {
+    got = source->read(source, chunk, 65536, error);
+    if (error && error->code != LC_OK) {
+      rc = error->code;
+      break;
+    }
+    if (got == 0)
+      break;
+    if (!body.hash_sink.write(&body.hash_sink, chunk, got, error))
+      rc = error && error->code != LC_OK ? error->code : LC_ERR_TRANSPORT;
+  }
+  if (rc == LC_OK)
+    rc = lc_pouch_crypto_writer_finish(codec, &plain, &stored, &crc,
+                                       &descriptor, error);
+  if (rc == LC_OK) {
+    etag = lc_pouch_state_hash_final(&work->pouch->allocator, body.hash, error);
+    if (!etag)
+      rc = LC_ERR_NOMEM;
+    else if (plain != entry->bytes || strcmp(etag, entry->etag))
+      rc = lc_error_set(error, LC_ERR_PROTOCOL, 0,
+                        "conversion payload integrity check failed", entry->key,
+                        NULL, "pouch");
+  }
+  if (rc == LC_OK && descriptor && strcmp(context, binding)) {
+    rc = lc_pouch_crypto_rebind_descriptor(work->pouch->crypto, descriptor,
+                                           context, binding, &rebound, error);
+    if (rc == LC_OK) {
+      lc_free_with_allocator(&work->pouch->allocator, descriptor);
+      descriptor = rebound;
+      rebound = NULL;
+    }
+  }
+  span.payload_length = stored;
+  span.payload_crc = crc;
+  if (rc == LC_OK)
+    rc = lc_ps_recode_meta(work, entry, &span, descriptor, &meta, &length,
+                           error);
+  if (rc == LC_OK && length != reserved)
+    rc = lc_error_set(error, LC_ERR_PROTOCOL, 0,
+                      "converted metadata changed reservation size", NULL, NULL,
+                      "pouch");
+  if (rc == LC_OK)
+    rc = lc_pouch_state_record_finalize(fd, start, entry->record_type,
+                                        entry->key, strlen(entry->key), meta,
+                                        length, stored, crc, error);
+  lc_source_close(source);
+  lc_pouch_crypto_writer_close(codec);
+  EVP_MD_CTX_free(body.hash);
+  lc_free_with_allocator(&work->pouch->allocator, binding);
+  lc_free_with_allocator(&work->pouch->allocator, descriptor);
+  lc_free_with_allocator(&work->pouch->allocator, rebound);
+  lc_free_with_allocator(&work->pouch->allocator, etag);
+  lc_free_with_allocator(&work->pouch->allocator, meta);
+  lc_free_with_allocator(&work->pouch->allocator, chunk);
+  return rc;
+}
+
+int lc_pouch_state_recode_file(lc_pouch_recode *work,
+                               lc_pouch_recode_file *file, lc_error *error) {
+  lc_pouch_state_entry entry;
+  lc_pouch_record_header header;
+  struct stat st;
+  FILE *fp;
+  unsigned char prefix[LC_POUCH_RECORD_HEADER_BYTES], *meta = NULL;
+  size_t length;
+  lc_u64 before, after = 0, limit;
+  int fd, found, truncated, rc = LC_OK;
+  memset(&entry, 0, sizeof(entry));
+  fp = fopen(file->source, "rb");
+  fd =
+      fp ? open(file->target, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600) : -1;
+  if (!fp || fd < 0 || fstat(fileno(fp), &st) != 0 || st.st_size < 0)
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0,
+                      "failed to open canonical conversion file",
+                      strerror(errno), file->source, "pouch");
+  limit = rc == LC_OK ? (lc_u64)st.st_size : 0;
+  while (rc == LC_OK) {
+    before = (lc_u64)ftello(fp);
+    rc = lc_pouch_state_read_next_record(fp, &work->pouch->allocator,
+                                         file->leaf, file->active, 1, limit,
+                                         &entry, &found, &truncated, error);
+    if (rc == LC_OK && !found && truncated && before < limit) {
+      /* Collection replay permits incomplete headers and PENDING tails only.
+       * The generic state parser also tolerates truncated published records;
+       * rejecting those here prevents conversion from discarding live entries.
+       * Inspect only discarded tails, without adding work to healthy records.
+       */
+      if (file->collection_id[0] && limit - before >= sizeof(prefix)) {
+        rc = lc_pouch_collection_record_pread(fileno(fp), before, prefix,
+                                              sizeof(prefix), error);
+        if (rc == LC_OK)
+          rc = lc_pouch_record_header_decode(prefix, &header, error);
+        if (rc == LC_OK && header.flags != LC_POUCH_RECORD_FLAG_PENDING)
+          rc = lc_error_set(error, LC_ERR_PROTOCOL, 0,
+                            "published collection record is truncated",
+                            file->source, "collection_corrupt", "pouch");
+      }
+      /* A collection's retained tail may be the last committed end, just
+       * before an unpublished torn append. Preserve that boundary as well as
+       * physical EOF when dropping the incomplete suffix. */
+      if (rc == LC_OK)
+        rc = lc_pouch_state_fd_end(
+            fd, &after, "failed to locate converted tail boundary", error);
+      if (rc == LC_OK)
+        rc = lc_pouch_recode_offset_add(work, file, before, after, error);
+    }
+    if (rc != LC_OK || !found)
+      break;
+    rc = lc_pouch_state_fd_end(fd, &after, "failed to locate converted record",
+                               error);
+    if (rc == LC_OK)
+      rc = lc_pouch_recode_offset_add(work, file, before, after, error);
+    if (rc == LC_OK && (entry.record_type == LC_POUCH_STATE_RECORD_STATE_PUT ||
+                        entry.record_type == LC_POUCH_STATE_RECORD_OBJECT_PUT))
+      rc = lc_ps_recode_body(work, file, &entry, fd, error);
+    else if (rc == LC_OK &&
+             (entry.record_type == LC_POUCH_STATE_RECORD_STATE_LINK ||
+              entry.record_type == LC_POUCH_STATE_RECORD_STATE_META)) {
+      /* Reserve final descriptor room now; a second pass resolves old spans
+       * to their already encoded bodies, including forward references. */
+      rc = lc_ps_recode_meta(work, &entry, &entry.payload_span,
+                             entry.descriptor, &meta, &length, error);
+      if (rc == LC_OK)
+        rc = lc_pouch_state_record_write_prefix(fd, entry.record_type,
+                                                entry.key, strlen(entry.key),
+                                                meta, length, 0, 0, 0, error);
+    } else if (rc == LC_OK) {
+      rc = lc_pouch_collection_record_pread(fileno(fp), before, prefix,
+                                            sizeof(prefix), error);
+      if (rc == LC_OK)
+        rc = lc_pouch_record_header_decode(prefix, &header, error);
+      length = rc == LC_OK ? (size_t)header.meta_len + header.key_len : 0;
+      meta = rc == LC_OK ? lc_alloc_with_allocator(&work->pouch->allocator,
+                                                   length ? length : 1)
+                         : NULL;
+      if (rc == LC_OK && !meta)
+        rc = LC_ERR_NOMEM;
+      if (rc == LC_OK)
+        rc = lc_pouch_collection_record_pread(
+            fileno(fp), before + sizeof(prefix), meta, length, error);
+      if (rc == LC_OK)
+        rc = lc_pouch_state_record_write_prefix(
+            fd, header.type, (const char *)meta, header.key_len,
+            meta + header.key_len, header.meta_len, 0, 0, header.flags, error);
+    }
+    lc_free_with_allocator(&work->pouch->allocator, meta);
+    meta = NULL;
+    lc_pouch_state_entry_cleanup(&work->pouch->allocator, &entry);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_fd_end(fd, &after, "failed to locate converted end",
+                               error);
+    if (rc == LC_OK)
+      rc = lc_pouch_recode_offset_add(work, file, limit, after, error);
+    if (rc == LC_OK) {
+      work->input_bytes += limit;
+      work->output_bytes += after;
+    }
+  }
+  if (fp)
+    (void)fclose(fp);
+  if (fd >= 0 && close(fd) != 0 && rc == LC_OK)
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0,
+                      "failed to close converted canonical file",
+                      strerror(errno), NULL, "pouch");
+  lc_pouch_state_entry_cleanup(&work->pouch->allocator, &entry);
+  lc_free_with_allocator(&work->pouch->allocator, meta);
+  return rc;
+}
+
+int lc_pouch_state_recode_refs(lc_pouch_recode *work,
+                               lc_pouch_recode_file *file, lc_error *error) {
+  lc_pouch_state_entry entry, body;
+  lc_pouch_recode_file *owner;
+  lc_pouch_state_payload_span span;
+  FILE *fp, *body_fp = NULL;
+  struct stat st;
+  lc_u64 translated, start, limit;
+  unsigned char *meta = NULL;
+  size_t length, reserved;
+  char *old_binding = NULL, *new_binding = NULL, *descriptor = NULL,
+       *verified = NULL;
+  int fd, found, truncated, rc = LC_OK;
+  memset(&entry, 0, sizeof(entry));
+  memset(&body, 0, sizeof(body));
+  fp = fopen(file->target, "rb");
+  fd = fp ? open(file->target, O_RDWR | O_CLOEXEC) : -1;
+  if (!fp || fd < 0 || fstat(fd, &st) != 0 || st.st_size < 0)
+    rc = LC_ERR_TRANSPORT;
+  limit = rc == LC_OK ? (lc_u64)st.st_size : 0;
+  while (rc == LC_OK) {
+    start = (lc_u64)ftello(fp);
+    rc = lc_pouch_state_read_next_record(fp, &work->pouch->allocator,
+                                         file->leaf, 0, 0, limit, &entry,
+                                         &found, &truncated, error);
+    if (rc != LC_OK || !found)
+      break;
+    if ((entry.record_type == LC_POUCH_STATE_RECORD_STATE_LINK ||
+         entry.record_type == LC_POUCH_STATE_RECORD_STATE_META) &&
+        entry.payload_span.present) {
+      reserved = (size_t)((lc_u64)ftello(fp) - start -
+                          LC_POUCH_RECORD_HEADER_BYTES - strlen(entry.key));
+      rc = lc_pouch_recode_find(
+          work, file->scope, entry.payload_span.container_leaf,
+          entry.payload_span.record_offset, &owner, &translated, error);
+      if (rc == LC_OK) {
+        body_fp = fopen(owner->target, "rb");
+        if (!body_fp || fseeko(body_fp, (off_t)translated, SEEK_SET) != 0 ||
+            fstat(fileno(body_fp), &st) != 0)
+          rc = LC_ERR_TRANSPORT;
+      }
+      if (rc == LC_OK)
+        rc = lc_pouch_state_read_next_record(
+            body_fp, &work->pouch->allocator, owner->leaf, 0, 0,
+            (lc_u64)st.st_size, &body, &found, &truncated, error);
+      if (body_fp) {
+        (void)fclose(body_fp);
+        body_fp = NULL;
+      }
+      if (rc == LC_OK &&
+          (!found || !body.payload_span.present ||
+           (body.record_type != LC_POUCH_STATE_RECORD_STATE_PUT &&
+            body.record_type != LC_POUCH_STATE_RECORD_OBJECT_PUT)))
+        rc = lc_error_set(error, LC_ERR_PROTOCOL, 0,
+                          "conversion reference does not name a payload record",
+                          NULL, NULL, "pouch");
+      if (rc == LC_OK) {
+        old_binding = lc_ps_recode_binding(work, owner, &body);
+        new_binding = lc_ps_recode_binding(work, file, &entry);
+        if (!old_binding || !new_binding)
+          rc = LC_ERR_NOMEM;
+      }
+      if (rc == LC_OK && entry.descriptor)
+        rc = lc_pouch_crypto_rebind_descriptor(work->pouch->crypto,
+                                               entry.descriptor, new_binding,
+                                               new_binding, &verified, error);
+      /* References with the same binding must share the payload's exact
+       * descriptor. Rebinding would generate a different authentication nonce
+       * and break collection metadata/body identity checks. */
+      if (rc == LC_OK && body.descriptor &&
+          strcmp(old_binding, new_binding) != 0)
+        rc = lc_pouch_crypto_rebind_descriptor(work->pouch->crypto,
+                                               body.descriptor, old_binding,
+                                               new_binding, &descriptor, error);
+      if (rc == LC_OK) {
+        span = body.payload_span;
+        rc = lc_ps_recode_meta(work, &entry, &span,
+                               descriptor ? descriptor : body.descriptor, &meta,
+                               &length, error);
+        if (rc == LC_OK && length != reserved)
+          rc = LC_ERR_PROTOCOL;
+        if (rc == LC_OK)
+          rc = lc_pouch_state_record_finalize(fd, start, entry.record_type,
+                                              entry.key, strlen(entry.key),
+                                              meta, length, 0, 0, error);
+      }
+    }
+    lc_pouch_state_entry_cleanup(&work->pouch->allocator, &entry);
+    lc_pouch_state_entry_cleanup(&work->pouch->allocator, &body);
+    lc_free_with_allocator(&work->pouch->allocator, meta);
+    meta = NULL;
+    lc_free_with_allocator(&work->pouch->allocator, descriptor);
+    descriptor = NULL;
+    lc_free_with_allocator(&work->pouch->allocator, verified);
+    verified = NULL;
+    lc_free_with_allocator(&work->pouch->allocator, old_binding);
+    old_binding = NULL;
+    lc_free_with_allocator(&work->pouch->allocator, new_binding);
+    new_binding = NULL;
+  }
+  if (rc == LC_OK && (stat(file->source, &st) != 0 ||
+                      fchmod(fd, st.st_mode & 0777) != 0 || fsync(fd) != 0))
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0,
+                      "failed to preserve and sync converted canonical file",
+                      strerror(errno), file->target, "pouch");
+  if (fp)
+    (void)fclose(fp);
+  if (fd >= 0)
+    (void)close(fd);
+  lc_pouch_state_entry_cleanup(&work->pouch->allocator, &entry);
+  lc_pouch_state_entry_cleanup(&work->pouch->allocator, &body);
+  lc_free_with_allocator(&work->pouch->allocator, meta);
+  lc_free_with_allocator(&work->pouch->allocator, descriptor);
+  lc_free_with_allocator(&work->pouch->allocator, verified);
+  lc_free_with_allocator(&work->pouch->allocator, old_binding);
+  lc_free_with_allocator(&work->pouch->allocator, new_binding);
   return rc;
 }
