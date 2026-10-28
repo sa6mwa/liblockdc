@@ -4484,9 +4484,12 @@ static void test_write_binary_txn_record_layout(
       pouch, key, magic, state, has_votes, vote, 1U, error);
 }
 
-static void test_write_binary_lease_record_with_expiry(
+/* Layouts: short LPL1, current LPL2, extended LPL1. A zero body version uses
+ * ordinary automatic version assignment for the existing fixtures. */
+static void test_write_binary_lease_record_with_versions(
     lc_pouch *pouch, const char *key, lc_i64 fencing_token,
-    lc_i64 lease_expires_at_unix, int current_layout, lc_error *error) {
+    lc_i64 lease_expires_at_unix, int layout, lc_pouch_generation state_version,
+    lc_pouch_generation body_version, lc_error *error) {
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result write_result;
   test_binary_buffer buffer;
@@ -4497,7 +4500,7 @@ static void test_write_binary_lease_record_with_expiry(
   memset(&options, 0, sizeof(options));
   memset(&write_result, 0, sizeof(write_result));
   source = NULL;
-  test_binary_buffer_append(&buffer, current_layout ? "LPL2" : "LPL1", 4U);
+  test_binary_buffer_append(&buffer, layout == 1 ? "LPL2" : "LPL1", 4U);
   test_binary_buffer_string(&buffer, "default");
   test_binary_buffer_string(&buffer, key);
   test_binary_buffer_string(&buffer, "prior-owner");
@@ -4505,17 +4508,19 @@ static void test_write_binary_lease_record_with_expiry(
   test_binary_buffer_string(&buffer, "");
   test_binary_buffer_i64(&buffer, fencing_token);
   test_binary_buffer_i64(&buffer, lease_expires_at_unix);
-  if (current_layout) {
+  if (layout != 0) {
     unsigned char txn_explicit;
 
     txn_explicit = 0U;
-    test_binary_buffer_u64(&buffer, 0U);
+    test_binary_buffer_u64(&buffer, state_version);
     test_binary_buffer_append(&buffer, &txn_explicit, sizeof(txn_explicit));
   }
   options.content_type = "application/x-lockdc-pouch-lease";
   options.has_metadata = 1;
   options.metadata = buffer.bytes;
   options.metadata_length = buffer.length;
+  options.has_logical_version = body_version != 0UL;
+  options.logical_version = body_version;
   rc = lc_source_from_memory("{}", 2U, &source, error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(pouch, "default", key, source, &options,
@@ -4524,6 +4529,14 @@ static void test_write_binary_lease_record_with_expiry(
   lc_source_close(source);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
   test_binary_buffer_cleanup(&buffer);
+}
+
+static void test_write_binary_lease_record_with_expiry(
+    lc_pouch *pouch, const char *key, lc_i64 fencing_token,
+    lc_i64 lease_expires_at_unix, int current_layout, lc_error *error) {
+  test_write_binary_lease_record_with_versions(pouch, key, fencing_token,
+                                               lease_expires_at_unix,
+                                               current_layout, 0UL, 0UL, error);
 }
 
 static void test_write_binary_lease_record(lc_pouch *pouch, const char *key,
@@ -27435,6 +27448,78 @@ test_pouch_migrates_legacy_active_lease_state_version(void **state) {
   lc_error_cleanup(&error);
 }
 
+/* The legacy lease snapshot can be ahead of its body, while immediate writes
+ * can put the body ahead of the snapshot. Renewal must preserve both floors. */
+static void
+test_pouch_keepalive_preserves_lease_and_body_versions(void **state) {
+  const lc_pouch_generation snapshots[] = {0UL, 37UL};
+  const lc_pouch_generation bodies[] = {1UL, 41UL};
+  lc_pouch *pouch;
+  lc_client *client;
+  lc_keepalive_op request;
+  lc_keepalive_res result;
+  lc_pouch_state_read_result stored;
+  lc_error error;
+  char root[512];
+  lc_pouch_generation expected;
+  size_t snapshot, body;
+  int layout, renewal, rc;
+
+  (void)state;
+  lc_error_init(&error);
+  make_root("keepalive-version-floors", root, sizeof(root));
+  for (layout = 0; layout < 3; ++layout) {
+    for (snapshot = 0U; snapshot < (layout == 0 ? 1U : 2U); ++snapshot) {
+      for (body = 0U; body < 2U; ++body) {
+        cleanup_root(root);
+        assert_int_equal(lc_pouch_open(root, NULL, NULL, &pouch, &error),
+                         LC_OK);
+        test_write_binary_lease_record_with_versions(
+            pouch, "state/version-floors", 7L, (lc_i64)time(NULL) + 300L,
+            layout, snapshots[snapshot], bodies[body], &error);
+        lc_pouch_close(pouch);
+        test_remove_control_migration_marker(root);
+        open_pouch_client(root, &client, &error);
+        expected = snapshots[snapshot] > bodies[body] ? snapshots[snapshot]
+                                                      : bodies[body];
+        lc_keepalive_op_init(&request);
+        request.lease.ns = "default";
+        request.lease.key = "state/version-floors";
+        request.lease.lease_id = "prior-lease";
+        request.lease.fencing_token = 7L;
+        request.ttl_seconds = 30L;
+        for (renewal = 0; renewal < 2; ++renewal) {
+          memset(&result, 0, sizeof(result));
+          assert_int_equal(lc_keepalive(client, &request, &result, &error),
+                           LC_OK);
+          assert_int_equal(result.version, expected);
+          assert_sha256_text_etag(result.state_etag, "{}");
+          lc_keepalive_res_cleanup(&result);
+        }
+        /* Renewal changes lease metadata, never the body or its CAS version. */
+        memset(&stored, 0, sizeof(stored));
+        assert_int_equal(lc_pouch_state_read_metadata(
+                             ((lc_client_handle *)client)->pouch, "default",
+                             request.lease.key, &stored, &error),
+                         LC_OK);
+        assert_int_equal(stored.version, bodies[body]);
+        assert_sha256_text_etag(stored.etag, "{}");
+        lc_pouch_state_read_result_cleanup(NULL, &stored);
+        ++request.lease.fencing_token;
+        memset(&result, 0, sizeof(result));
+        rc = lc_keepalive(client, &request, &result, &error);
+        lc_keepalive_res_cleanup(&result);
+        assert_int_not_equal(rc, LC_OK);
+        lc_error_cleanup(&error);
+        lc_error_init(&error);
+        lc_client_close(client);
+      }
+    }
+  }
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void
 test_pouch_migration_rejects_malformed_legacy_control_record(void **state) {
   lc_pouch *pouch;
@@ -37414,6 +37499,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_lease_save_streams_mapped_json_and_replays_after_reopen),
       cmocka_unit_test(test_lease_keepalive_and_release_use_local_lifecycle),
+      cmocka_unit_test(test_pouch_keepalive_preserves_lease_and_body_versions),
       cmocka_unit_test(test_acquire_rejects_non_positive_ttl),
       cmocka_unit_test(test_describe_missing_key_returns_not_found),
       cmocka_unit_test(test_acquire_allocation_failure_rolls_back_claim),

@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -2570,6 +2571,245 @@ static void test_pouch_outbox_stateful_delivery_lifecycle(void **state) {
   lc_client_close(client);
   lc_error_cleanup(&error);
   lc_test_tmp_cleanup_path(root, OUTBOX_TMP_PREFIX);
+}
+
+/* Renewals must preserve the current parent and checkpoint CAS snapshots,
+ * including an immediate parent write newer than its lease metadata. */
+static void outbox_assert_stored_body(lc_client *client, const char *key,
+                                      const char *expected) {
+  lc_pouch_state_read_result result;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  lc_error error;
+
+  memset(&result, 0, sizeof(result));
+  lc_error_init(&error);
+  assert_int_equal(lc_pouch_state_read(((lc_client_handle *)client)->pouch,
+                                       "outbox-renewal", key, &result, &error),
+                   LC_OK);
+  assert_int_equal(result.found, expected != NULL);
+  if (expected != NULL) {
+    assert_int_equal(lc_sink_to_memory(&sink, &error), LC_OK);
+    assert_int_equal(lc_copy(result.body, sink, NULL, &error), LC_OK);
+    assert_int_equal(lc_sink_memory_bytes(sink, &bytes, &length, &error),
+                     LC_OK);
+    assert_true(outbox_bytes_contains(bytes, length, expected));
+    lc_sink_close(sink);
+  }
+  lc_pouch_state_read_result_cleanup(&((lc_client_handle *)client)->allocator,
+                                     &result);
+  lc_error_cleanup(&error);
+}
+
+static void outbox_worker_release_gate(void *context);
+
+static void outbox_renewal_terminal_case(int shared, int sequence, int terminal,
+                                         int failure) {
+  char root[256], template_path[256], endpoint[320], checkpoint_key[192];
+  char marker_directory[384];
+  const char *endpoints[1];
+  lc_client_config config;
+  lc_pouch_settings settings;
+  lc_outbox_config outbox_config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_outbox_transaction *transaction;
+  lc_client *client;
+  lc_outbox *outbox;
+  lc_outbox_dispatcher *dispatcher;
+  lc_outbox_job *job;
+  lc_lease *checkpoint;
+  lc_source *source;
+  lc_update_opts options;
+  lc_outbox_retry retry;
+  outbox_pouch_test_clock clock;
+  pthread_barrier_t gates[2];
+  FILE *blocker;
+  lc_error error;
+  int step, rc;
+
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       OUTBOX_TMP_PREFIX "renewal-terminal-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  OUTBOX_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  lc_pouch_settings_init(&settings);
+  settings.set_mask = LC_POUCH_SETTING_SINGLE_WRITER |
+                      LC_POUCH_SETTING_BACKGROUND_COMPACTION |
+                      LC_POUCH_SETTING_QUERY_INDEXING;
+  settings.single_writer = !shared;
+  config.pouch_settings = &settings;
+  assert_int_equal(lc_client_open(&config, &client, &error), LC_OK);
+  lc_outbox_config_init(&outbox_config);
+  outbox_config.ns = "outbox-renewal";
+  outbox_config.claim_ttl_seconds = 30L;
+  assert_int_equal(outbox_public_new(client, &outbox_config, &outbox, &error),
+                   LC_OK);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "renewal";
+  entry.effect_id = "renewal";
+  entry.effect_key = "renewal";
+  entry.kind = "test";
+  entry.destination = "local";
+  entry.payload_digest = "sha256:renewal";
+  lc_outbox_receipt_init(&receipt);
+  assert_int_equal(lc_source_from_memory("{}", 2U, &source, &error), LC_OK);
+  assert_int_equal(outbox_test_outbox_append(outbox, &entry, source,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  lc_source_close(source);
+  assert_int_equal(outbox_test_commit(transaction, &error), LC_OK);
+  outbox_test_transaction_close(transaction);
+  assert_int_equal(outbox_public_get_or_start(outbox, &dispatcher, &error),
+                   LC_OK);
+  assert_int_equal(lc_outbox_dispatcher_notify_outbox_key(
+                       dispatcher, receipt.outbox_key, &error),
+                   LC_OK);
+  assert_int_equal(
+      lc_outbox_dispatcher_next_with_state(dispatcher, 0L, &job, &error),
+      LC_OK);
+  assert_non_null(job);
+  if (failure != 0) {
+    /* Stop private storage work before installing process-wide seams. The
+     * handed-out job stays usable while the worker waits at its release gate.
+     */
+    assert_int_equal(pthread_barrier_init(&gates[0], NULL, 2U), 0);
+    assert_int_equal(pthread_barrier_init(&gates[1], NULL, 2U), 0);
+    lc_outbox_test_before_worker_release_context = gates;
+    lc_outbox_test_before_worker_release_hook = outbox_worker_release_gate;
+    assert_int_equal(lc_outbox_dispatcher_stop(dispatcher, 0L, &error),
+                     LC_ERR_TIMEOUT);
+    (void)pthread_barrier_wait(&gates[0]);
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+  }
+  checkpoint = lc_outbox_job_state(job);
+  assert_non_null(checkpoint);
+  assert_true(snprintf(checkpoint_key, sizeof(checkpoint_key), "%s",
+                       checkpoint->key) > 0);
+  for (step = 0; step < 2; ++step) {
+    if (sequence == 0 || sequence == 2)
+      assert_int_equal(lc_outbox_job_renew(job, 30L, &error), LC_OK);
+    assert_int_equal(
+        lc_source_from_memory(step ? "{\"seen\":2}" : "{\"seen\":1}", 10U,
+                              &source, &error),
+        LC_OK);
+    assert_int_equal(lc_lease_update(checkpoint, source, NULL, &error), LC_OK);
+    lc_source_close(source);
+    if (sequence == 1 || sequence == 2)
+      assert_int_equal(lc_outbox_job_renew(job, 30L, &error), LC_OK);
+    outbox_assert_stored_body(client, checkpoint_key,
+                              step ? "{\"seen\":2}" : "{\"seen\":1}");
+  }
+  /* Renewal must not weaken an explicitly stale checkpoint precondition. */
+  lc_update_opts_init(&options);
+  options.has_if_version = 1;
+  options.if_version = checkpoint->version - 1L;
+  assert_int_equal(lc_source_from_memory("{}", 2U, &source, &error), LC_OK);
+  assert_int_not_equal(lc_lease_update(checkpoint, source, &options, &error),
+                       LC_OK);
+  lc_source_close(source);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  if (failure == 1) {
+    /* A failed cleanup-marker creation precedes the parent decision. Neither
+     * completion nor checkpoint deletion may escape, and retry must work. */
+    assert_true(snprintf(marker_directory, sizeof(marker_directory),
+                         "%s/.lockd", root) > 0);
+    rc = mkdir(marker_directory, 0700);
+    assert_true(rc == 0 || errno == EEXIST);
+    assert_true(snprintf(marker_directory, sizeof(marker_directory),
+                         "%s/.lockd/outbox-state-reclaim", root) > 0);
+    rc = mkdir(marker_directory, 0700);
+    assert_true(rc == 0 || errno == EEXIST);
+    assert_true(snprintf(marker_directory, sizeof(marker_directory),
+                         "%s/.lockd/outbox-state-reclaim/outbox-renewal",
+                         root) > 0);
+    blocker = fopen(marker_directory, "wb");
+    assert_non_null(blocker);
+    assert_int_equal(fclose(blocker), 0);
+    rc = lc_outbox_job_complete(job, NULL, &error);
+    assert_int_equal(unlink(marker_directory), 0);
+    assert_int_not_equal(rc, LC_OK);
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+    outbox_assert_stored_body(client, receipt.outbox_key,
+                              "\"dispatch_state\":\"claimed\"");
+    outbox_assert_stored_body(client, checkpoint_key, "{\"seen\":2}");
+  } else if (failure == 2) {
+    clock.wall.tv_sec = (time_t)job->lease_expires_at_unix + 1;
+    clock.wall.tv_nsec = 0L;
+    lc_pouch_test_queue_time_context = &clock;
+    lc_pouch_test_queue_clock_gettime = outbox_pouch_test_gettime;
+    rc = lc_outbox_job_renew(job, 30L, &error);
+    assert_int_not_equal(rc, LC_OK);
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+    rc = lc_outbox_job_complete(job, NULL, &error);
+    lc_pouch_test_queue_clock_gettime = NULL;
+    lc_pouch_test_queue_time_context = NULL;
+    assert_int_not_equal(rc, LC_OK);
+    outbox_assert_stored_body(client, receipt.outbox_key,
+                              "\"dispatch_state\":\"claimed\"");
+    outbox_assert_stored_body(client, checkpoint_key, "{\"seen\":2}");
+    lc_outbox_job_close(job);
+    goto cleanup;
+  }
+  lc_outbox_retry_init(&retry);
+  retry.delay_seconds = 30L;
+  if (terminal == 0)
+    rc = lc_outbox_job_complete(job, NULL, &error);
+  else if (terminal == 1)
+    rc = lc_outbox_job_retry(job, &retry, &error);
+  else
+    rc = lc_outbox_job_dead_letter(job, "renewed", &error);
+  assert_int_equal(rc, LC_OK);
+  outbox_assert_stored_body(client, receipt.outbox_key,
+                            terminal == 0 ? "\"dispatch_state\":\"completed\""
+                            : terminal == 1
+                                ? "\"dispatch_state\":\"retry_wait\""
+                                : "\"dispatch_state\":\"dead_letter\"");
+  outbox_assert_stored_body(client, checkpoint_key,
+                            terminal == 0 ? NULL : "{\"seen\":2}");
+cleanup:
+  if (failure != 0)
+    (void)pthread_barrier_wait(&gates[1]);
+  assert_int_equal(lc_outbox_dispatcher_stop(dispatcher, -1L, &error), LC_OK);
+  if (failure != 0) {
+    lc_outbox_test_before_worker_release_hook = NULL;
+    lc_outbox_test_before_worker_release_context = NULL;
+    assert_int_equal(pthread_barrier_destroy(&gates[0]), 0);
+    assert_int_equal(pthread_barrier_destroy(&gates[1]), 0);
+  }
+  lc_outbox_dispatcher_close(dispatcher);
+  lc_outbox_close(outbox);
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, OUTBOX_TMP_PREFIX);
+}
+
+static void test_pouch_outbox_stateful_renewal_terminal_versions(void **state) {
+  int shared, sequence, terminal;
+  (void)state;
+  for (shared = 0; shared < 2; ++shared)
+    for (sequence = 0; sequence < 3; ++sequence)
+      for (terminal = 0; terminal < 3; ++terminal)
+        outbox_renewal_terminal_case(shared, sequence, terminal, 0);
+}
+
+static void test_pouch_outbox_stateful_renewal_terminal_failure(void **state) {
+  int shared, failure;
+  (void)state;
+  for (shared = 0; shared < 2; ++shared)
+    for (failure = 1; failure < 3; ++failure)
+      outbox_renewal_terminal_case(shared, 2, 0, failure);
 }
 
 /* If the paired state handoff cannot be constructed, the failed internal
@@ -11839,6 +12079,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts),
       cmocka_unit_test(test_pouch_outbox_stateful_delivery_lifecycle),
+      cmocka_unit_test(test_pouch_outbox_stateful_renewal_terminal_versions),
+      cmocka_unit_test(test_pouch_outbox_stateful_renewal_terminal_failure),
       cmocka_unit_test(test_pouch_outbox_stateful_handoff_failure_rolls_back),
       cmocka_unit_test(test_pouch_outbox_transaction_and_duplicate),
       cmocka_unit_test(test_pouch_duplicate_inbox_handles_json_runtime_failure),

@@ -164,6 +164,75 @@ local function assert_ok(value, err, operation)
   return value
 end
 
+-- A renewed paired claim must retain the parent CAS snapshot through deferred
+-- terminalization. Keep this independent of Vectis and real-time expiry waits.
+do
+  local renewal_client = assert(lockdc.open({
+    endpoints = { "pouch://" .. root .. "/renewal" },
+    pouch = { single_writer = false,
+              crypto_key = assert(lockdc.pouch_crypto_generate_key()) },
+  }))
+  for index, sequence in ipairs({ "", "u", "r", "ru", "ur", "ruru" }) do
+    for _, terminal in ipairs({ "completed", "retry_wait", "dead_letter" }) do
+      local namespace = "renewal-" .. index .. "-" .. terminal
+      local producer = assert(renewal_client:new_outbox({
+        namespace = namespace, claim_ttl_seconds = 30,
+      }))
+      local committed = assert(producer:transaction(function(tx)
+        return tx:append({
+          operation_id = "renewal", effect_id = "renewal", effect_key = "renewal",
+          payload_digest = "sha256:renewal", kind = "renewal", destination = "local",
+        }, "hello")
+      end))
+      local key = committed.outbox_receipts[1].outbox_key
+      local receiver = assert(producer:dispatcher())
+      assert(receiver:notify_outbox_key(key))
+      local checkpoint_key, updates = nil, 0
+      local count, pump_err = receiver:pump({
+        with_state = true, max_jobs = 1, timeout_ms = 0,
+        handlers = { renewal = function(renewed_job)
+          local checkpoint = assert(renewed_job:state())
+          checkpoint_key = checkpoint:info().key
+          for action in sequence:gmatch(".") do
+            if action == "r" then
+              assert(renewed_job:renew(30))
+            else
+              updates = updates + 1
+              assert(checkpoint:update_json({ seen = updates }))
+            end
+          end
+          if updates > 0 then
+            assert(checkpoint:read_json().seen == updates)
+          end
+          if terminal == "completed" then return renewed_job:complete() end
+          if terminal == "retry_wait" then
+            return renewed_job:retry({ delay_seconds = 30 })
+          end
+          return renewed_job:dead_letter("renewed")
+        end },
+      })
+      assert(count == 1, pump_err and pump_err.message)
+      assert(receiver:stop(1000))
+      local envelope = assert(renewal_client:acquire({
+        namespace = namespace, key = key, owner = "inspect", ttl_seconds = 30,
+      }))
+      assert(envelope:read_json().dispatch_state == terminal)
+      assert(envelope:release())
+      if terminal ~= "completed" and updates > 0 then
+        local checkpoint = assert(renewal_client:acquire({
+          namespace = namespace, key = checkpoint_key,
+          owner = "inspect", ttl_seconds = 30,
+        }))
+        assert(checkpoint:read_json().seen == updates)
+        assert(checkpoint:release())
+      end
+      receiver:close()
+      producer:close()
+    end
+  end
+  renewal_client:close()
+end
+
 -- The Lua acquire_for_update facade must preserve Pouch's staged lease rather
 -- than manufacturing a generic clone.  Retaining the callback lease proves it
 -- is invalid once the staging scope has ended.

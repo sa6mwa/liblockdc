@@ -107,6 +107,10 @@ assuming ownership and let the normal fenced expiry/recovery path decide the
 next attempt. This avoids a fresh outbox claim paired with a stale state lease,
 or the reverse.
 
+Renewal preserves the current parent and checkpoint state versions. It may be
+called before or after checkpoint mutations, repeatedly, without invalidating
+the CAS preconditions of a later complete, retry, or dead-letter decision.
+
 Terminal operations first persist the ordinary terminal outbox transition
 under the outbox claim, then release both leases. A successful checkpoint body,
 mutation, metadata operation, removal, or attachment operation is committed

@@ -265,6 +265,12 @@ lc_add_tracking_case(lc_allocator_pouch_compaction lc_unit_pouch
   test_compaction_reclaims_expired_obsolete_files)
 lc_add_tracking_case(lc_allocator_outbox_lifecycle lc_unit_outbox
   test_pouch_outbox_stateful_delivery_lifecycle)
+lc_add_tracking_case(lc_allocator_outbox_renewal lc_unit_outbox
+  test_pouch_outbox_stateful_renewal_terminal_versions)
+lc_add_tracking_case(lc_allocator_outbox_renewal_failure lc_unit_outbox
+  test_pouch_outbox_stateful_renewal_terminal_failure)
+lc_add_tracking_case(lc_allocator_pouch_keepalive_versions lc_unit_pouch
+  test_pouch_keepalive_preserves_lease_and_body_versions)
 add_test(NAME lc_test_case_selection_test COMMAND "${CMAKE_COMMAND}"
   "-DLOCKDC_TEST_RUNNER=${CMAKE_CROSSCOMPILING_EMULATOR}"
   -DLOCKDC_UNIT_DIR=${CMAKE_CURRENT_BINARY_DIR}

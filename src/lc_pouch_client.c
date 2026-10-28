@@ -279,6 +279,7 @@ typedef struct lc_pouch_keepalive_context {
   const lc_keepalive_op *req;
   const char *ns;
   lc_pouch_unix_seconds lease_expires_at_unix;
+  lc_pouch_generation state_version;
   lc_pouch_txn_buffer lease_metadata;
   lc_pouch_state_write_result write_result;
 } lc_pouch_keepalive_context;
@@ -13997,7 +13998,6 @@ int lc_pouch_client_keepalive_method(lc_client *self,
                                      lc_keepalive_res *out, lc_error *error) {
   lc_client_handle *client;
   lc_pouch_keepalive_context keepalive_context;
-  lc_pouch_lease_record lease_record;
   lc_pouch_state_read_result staged_state;
   const char *ns = NULL;
   lc_pouch_unix_seconds lease_expires_at_unix = 0;
@@ -14029,7 +14029,6 @@ int lc_pouch_client_keepalive_method(lc_client *self,
     return rc;
   }
   memset(&keepalive_context, 0, sizeof(keepalive_context));
-  memset(&lease_record, 0, sizeof(lease_record));
   memset(&staged_state, 0, sizeof(staged_state));
   keepalive_context.client = client;
   keepalive_context.req = req;
@@ -14057,15 +14056,12 @@ int lc_pouch_client_keepalive_method(lc_client *self,
   if (rc == LC_OK) {
     memset(out, 0, sizeof(*out));
     out->lease_expires_at_unix = keepalive_context.lease_expires_at_unix;
-    rc = lc_pouch_generation_to_version(keepalive_context.write_result.version,
-                                        &out->version, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_read_lease_record(client, ns, req->lease.key, &lease_record,
-                                    error);
-  }
-  if (rc == LC_OK && lease_record.found) {
-    rc = lc_pouch_generation_to_version(lease_record.state_version,
+    /* Retain the same version floor used when preparing a transaction stage:
+     * immediate writes can advance the body beyond the lease snapshot, while
+     * migrated extended leases can carry a higher snapshot than their body.
+     * A transaction-local stage below still supplies its own visible version.
+     */
+    rc = lc_pouch_generation_to_version(keepalive_context.state_version,
                                         &out->version, error);
   }
   if (rc == LC_OK && lc_pouch_txn_id_present(req->lease.txn_id)) {
@@ -14111,7 +14107,6 @@ int lc_pouch_client_keepalive_method(lc_client *self,
   lc_free_local(state_etag);
   lc_free_with_allocator(NULL, staged_key);
   lc_pouch_state_read_result_cleanup(&client->allocator, &staged_state);
-  lc_pouch_lease_record_cleanup(&lease_record);
   lc_pouch_txn_buffer_cleanup(&keepalive_context.lease_metadata);
   lc_pouch_state_write_result_cleanup(&client->allocator,
                                       &keepalive_context.write_result);
@@ -14142,6 +14137,10 @@ static int lc_pouch_keepalive_prepare_metadata(
   if (rc == LC_OK) {
     if (lease_record.expires_at_unix > ctx->lease_expires_at_unix) {
       ctx->lease_expires_at_unix = lease_record.expires_at_unix;
+    }
+    ctx->state_version = lease_record.state_version;
+    if (state_view->version > ctx->state_version) {
+      ctx->state_version = state_view->version;
     }
     rc = lc_pouch_lease_record_build(
         &ctx->lease_metadata, ctx->ns, ctx->req->lease.key, lease_record.owner,

@@ -87,6 +87,13 @@ to the current layout under root mutation authority; normal runtime readers
 then accept only the current layout. Numeric rolling segments are the sole
 Pouch segment format.
 
+Lease renewal preserves the higher of the committed body version and the
+version snapshot retained in lease metadata. Historical extended lease records
+can retain a higher snapshot; immediate writes can advance the body beyond that
+snapshot. An existing transaction-local stage supplies its own visible version,
+including version zero after a staged deletion. Renewal changes lease metadata
+while preserving the body and its CAS version.
+
 ### Storage API Boundary
 
 Go disk exposes the storage backend in terms of `(namespace, key)`. The

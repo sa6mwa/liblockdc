@@ -1723,6 +1723,8 @@ function OutboxJob:read_payload_json()
   return decode_json(payload), written_or_err
 end
 
+-- Renews both leases for a stateful job. Checkpoint writes may precede or follow
+-- renewal; repeated renewal preserves the versions needed for terminalization.
 function OutboxJob:renew(ttl_seconds)
   return self._core:renew(ttl_seconds)
 end
