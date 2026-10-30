@@ -271,7 +271,7 @@ static char *lc_pouch_path_temp_path(const char *path, unsigned int attempt) {
 static int lc_pouch_path_write_bytes_file_impl(const char *path,
                                                const char *bytes, size_t length,
                                                int sync_file,
-                                               int sync_directory,
+                                               int sync_directory, int mode,
                                                lc_error *error) {
   char *dir;
   char *tmp_path;
@@ -300,7 +300,7 @@ static int lc_pouch_path_write_bytes_file_impl(const char *path,
                           "failed to allocate pouch temp file path", NULL, NULL,
                           NULL);
     }
-    fd = open(tmp_path, O_WRONLY | O_CREAT | O_EXCL, 0666);
+    fd = open(tmp_path, O_WRONLY | O_CREAT | O_EXCL, mode < 0 ? 0666 : 0600);
     if (fd >= 0 || errno != EEXIST) {
       break;
     }
@@ -317,6 +317,10 @@ static int lc_pouch_path_write_bytes_file_impl(const char *path,
   rc = LC_OK;
   if (!lc_pouch_path_write_all(fd, bytes != NULL ? bytes : "", length)) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L, "failed to write pouch file",
+                      strerror(errno), NULL, NULL);
+  } else if (mode >= 0 && fchmod(fd, (mode_t)mode) != 0) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to preserve pouch file permissions",
                       strerror(errno), NULL, NULL);
   } else if (sync_file && fsync(fd) != 0) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L, "failed to fsync pouch file",
@@ -346,29 +350,37 @@ static int lc_pouch_path_write_bytes_file_impl(const char *path,
 int lc_pouch_path_write_text_file(const char *path, const char *text,
                                   lc_error *error) {
   return lc_pouch_path_write_bytes_file_impl(
-      path, text, text != NULL ? strlen(text) : 0U, 1, 1, error);
+      path, text, text != NULL ? strlen(text) : 0U, 1, 1, -1, error);
 }
 
 int lc_pouch_path_write_bytes_file(const char *path, const void *bytes,
                                    size_t length, lc_error *error) {
   return lc_pouch_path_write_bytes_file_impl(path, (const char *)bytes, length,
-                                             1, 1, error);
+                                             1, 1, -1, error);
+}
+
+int lc_pouch_path_write_bytes_file_mode(const char *path, const void *bytes,
+                                        size_t length, unsigned int mode,
+                                        lc_error *error) {
+  return lc_pouch_path_write_bytes_file_impl(path, (const char *)bytes, length,
+                                             1, 1, (int)(mode & 0777U), error);
 }
 
 int lc_pouch_path_write_text_file_defer_dirsync(const char *path,
                                                 const char *text,
                                                 lc_error *error) {
   return lc_pouch_path_write_bytes_file_impl(
-      path, text, text != NULL ? strlen(text) : 0U, 1, 0, error);
+      path, text, text != NULL ? strlen(text) : 0U, 1, 0, -1, error);
 }
 
 int lc_pouch_path_write_text_file_relaxed(const char *path, const char *text,
                                           lc_error *error) {
   return lc_pouch_path_write_bytes_file_impl(
-      path, text, text != NULL ? strlen(text) : 0U, 0, 0, error);
+      path, text, text != NULL ? strlen(text) : 0U, 0, 0, -1, error);
 }
 
 int lc_pouch_path_write_bytes_file_relaxed(const char *path, const char *bytes,
                                            size_t length, lc_error *error) {
-  return lc_pouch_path_write_bytes_file_impl(path, bytes, length, 0, 0, error);
+  return lc_pouch_path_write_bytes_file_impl(path, bytes, length, 0, 0, -1,
+                                             error);
 }

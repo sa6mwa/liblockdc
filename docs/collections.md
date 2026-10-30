@@ -18,12 +18,18 @@ application's JSON object. Corrections append new entries; individual entries
 may be deleted, but their positions never change.
 
 The public surface provides collection creation/open/list/description/drop,
-pull append, push-fed append writers, append-status lookup, individual deletion,
-and ordered streaming with an
-optional LQL predicate and opaque resume cursors. Appends are independently
-atomic; they do not enlist in implicit or managed XA transactions. Collections
+direct and staged pull append, push-fed append writers, append-status lookup,
+individual deletion, and ordered streaming with an optional LQL predicate and
+opaque resume cursors. Appends are independently atomic; they do not enlist in
+implicit or managed XA transactions. Collections
 and their entries both support optional retention metadata, including later
 metadata-only changes.
+
+[Collection leases](collection-leases.md) optionally grant exclusive ownership
+of the entire collection while entries continue to commit individually.
+Unleased collections retain multiwriter behavior. Public committed reads remain
+available by default; private acquisition hides payload reads until release or
+expiry. C and Lua use the same collection receiver methods in either mode.
 
 Collections also support an optional `max_entries` live-entry limit. Maintenance
 removes oldest positions until the newest N live states remain; append remains
@@ -142,10 +148,10 @@ creating another transaction outcome log.
 
 ## Append and retry
 
-An append accepts exactly one JSON object through `lc_source` or an owned
-push-fed writer. [Incremental appends](collection-writer.md) describe the writer
-lifecycle, pending canonical storage, and atomic parent renewal. Arrays, scalars,
-empty input, trailing non-whitespace, malformed JSON, source failure, and limit
+An append accepts exactly one JSON object through a direct/staged `lc_source`
+or an owned push-fed writer. [Incremental appends](collection-writer.md) describe
+the writer lifecycle, bounded encoded staging, and atomic parent renewal.
+Arrays, scalars, empty input, trailing non-whitespace, malformed JSON, source failure, and limit
 violations fail before publication. Validation and compaction of structural
 whitespace are incremental. Preserve JSON values and member order; this is not
 semantic canonicalization or object-key sorting.
@@ -160,9 +166,10 @@ string values much larger than the parser's scratch ceiling.
 Store compact JSON once so reads can stream the stored body and a newline
 without reparsing or materializing the document for presentation. Use lonejson's
 public incremental parser/writer facilities. Its push-fed value stream is a
-sink interface; any bridge to Pouch's pull source must use bounded same-thread
-chunks or a narrow internal append-sink interface. Do not substitute a producer
-thread, a whole-object buffer, or an undisclosed temporary spool.
+sink interface. Push writers validate and encode incrementally into at most
+64 KiB of staging memory, then an anonymous spool. Commit copies encoded bytes
+into shared rolling segments without reparsing or re-encoding. Read output
+remains a direct stream; it is never buffered or spooled as a whole.
 
 Each request requires a caller-supplied `append_id`: 1 to 128 ASCII characters
 from letters, digits, `-`, `_`, `.`, and `~`. It is scoped to the collection ID.
@@ -186,7 +193,7 @@ reported as proof that nothing was appended.
 
 With `durable_sync=1`, a pull append pins its exact canonical file and holds a
 shared commit barrier while waiting for the existing root fsync batcher. It
-releases append authority and shared-root mutation authority before that wait,
+releases append authority before that wait,
 so independent callers can append and join the same durable group. Handles in
 one process share the root batcher; separate processes retain separate batchers
 but can progress concurrently while synchronization is pending.
@@ -204,8 +211,8 @@ receiver to read the preceding committed view during upload. Snapshot capture
 releases its exclusive pin before delivery callbacks. The commit barrier uses
 an advisory `.commit.lock` file with an independent descriptor per call; it
 stores no state or transaction outcomes and introduces no worker or body
-buffer. Push commit adopts its pending inode as a segment and holds an exclusive
-capture fence through synchronization; no collection lock is held between push
+buffer. Push commit copies its encoded staging into the shared active segment
+and uses the same shared commit pin; no collection lock is held between push
 calls. NoSync appends bypass the synchronization wait.
 
 Keep the canonical binding after individual deletion until collection drop.
@@ -482,7 +489,7 @@ presence flag is zero. An omitted metadata change is an observation/no-op,
 not a renewal. Opening an existing collection never changes retention;
 creation-only retention options on open are rejected.
 
-Both append forms additionally accept `has_collection_retention_seconds` and
+All append forms additionally accept `has_collection_retention_seconds` and
 `collection_retention_seconds` for the parent. Omission preserves its deadline;
 zero clears it; positive seconds reset it from the same publication timestamp
 as the entry. Only a newly committed append applies this directive. Duplicate,
@@ -612,6 +619,7 @@ zero/default initializers. Keep physical storage and query-plan types private.
 | `collection.metadata` / `lc_collection_metadata` | Change collection expiry and/or max_entries and return its description |
 | `collection.append` / `lc_collection_append` | Consume `lc_source`, with required append ID and optional entry/parent retention; return position, ETag, byte count, duplicate/deleted and retention facts |
 | `collection.append_begin` / `lc_collection_append_begin` | Return an owned writer accepting bounded raw JSON fragments through `write`, then `commit` or `abort`; always `close` it |
+| `collection.append_staged` / `lc_collection_append_staged` | Consume a borrowed single-pass source through the same writer; source reads hold no publication locks |
 | `collection.append_status` / `lc_collection_append_status` | Resolve an append ID without supplying its body |
 | `collection.entry_metadata` / `lc_collection_entry_metadata` | Change retention metadata for a live position, preserving its body and identity; return entry facts |
 | `collection.read` / `lc_collection_read` | Write raw JSONL to `lc_sink`, with optional separate metadata callback, LQL, cursor, and cancellation |
@@ -709,14 +717,16 @@ new version inferred from the liblockdc release number.
 
 The capabilities response uses boolean fields `collections`, `lql_filter`,
 `resume`, `checkpoint`, `ranges`, `first_n`, `last_n`, `position_selection`,
-`count_retention`, `append_writer`, and `append_collection_retention`.
+`count_retention`, `append_writer`, `append_staged`, `append_collection_retention`,
+`leases`, `lease_takeover`, and `private_reads`.
 Wire bounds/counts use canonical uint64 decimal strings, preserving exact values
 through JSON runtimes with limited numeric precision. Omission, zero, ranges,
 input limits and both cursor purposes have the same semantics as the C/Lua
 read options above.
 Pouch currently supports all except `last_n` and `position_selection`.
 Descriptions use `namespace`, `name`, `collection_id`, `upper_position`,
-`live_count`, `max_entries`, and boolean `query_indexing`.
+`live_count`, `max_entries`, boolean `query_indexing`, and the `lease` observation
+described in [collection ownership](collection-leases.md#future-server-boundary).
 Append results use `collection_id`, `append_id`, `position`, `etag`, `bytes`,
 `duplicate`, and `deleted`; append-status adds `state` and omits unassigned
 entry facts when absent. Deletion results identify the position and carry
@@ -740,8 +750,10 @@ directive atomically with new membership. Results/status optionally report
 zero for clearing. Unsupported directives fail explicitly. A future remote
 push writer sends one streaming request body to the normal append route:
 successful request EOF commits, while abort closes the unfinished request.
-It needs no server-side writer session or batch/XA endpoint. Lost responses
-still require append-status reconciliation rather than assuming rollback.
+Explicit staged pull is a client input policy using that same append route;
+it adds no server-side spool or writer session. Neither form needs a batch/XA
+endpoint. Lost responses still require append-status reconciliation rather than
+assuming rollback.
 
 Creation/drop are catalog-atomic. A repeated drop of the already-dropped bound
 ID may succeed, but it never removes a replacement collection with another ID.
@@ -1074,9 +1086,10 @@ they default to `0`. Keep strict-sync runs small and compare durability modes
 separately. No benchmark introduces a body cache or buffers streamed output.
 
 `LOCKDC_COLLECTION_BENCH_PUSH=1` selects the public append writer and feeds
-4096-byte fragments; the default uses pull append. Push adopts a canonical
-segment per commit, so compare its small-entry metadata cost separately from
-the pull active-segment fast path. Both workloads verify the same raw results.
+4096-byte fragments; the default uses pull append. Both publish into shared
+rolling segments and use the same durability batcher. Push additionally stages
+up to 64 KiB of encoded bytes in memory, then spills/copies larger encoded
+payloads. Both workloads verify the same raw results.
 
 `LOCKDC_COLLECTION_BENCH_WRITERS` selects 1..32 concurrent append callers
 (default 1), each using its own receiver and input buffer. Set
@@ -1133,9 +1146,11 @@ LOCKDC_VALGRIND_TESTS='lc_unit_collection_index lc_unit_collection_sync lc_unit_
 CMOCKA_SKIP_FILTER='test_crash_*' bash scripts/valgrind.sh
 ```
 
-Follow the public C ABI policy when adding client receiver fields. Version
-0.24.0 uses ABI 7, advancing from released ABI 6 in v0.23.0. Adding count
-retention changes public collection request/result layouts. Do not tie
+Follow the public C ABI policy when adding receiver fields. Collection leases,
+receiver methods and staged-append capabilities share core ABI 8, advancing once
+from ABI 7 in v0.24.0; see
+[upgrade instructions](../CHANGELOG.md#upgrading-from-024x).
+Count-retention layouts were introduced with ABI 7. Do not tie
 Pouch record or HTTP protocol version markers to the repository release tag.
 
 Document the final C declarations, Lua facade, ownership, errors, and server

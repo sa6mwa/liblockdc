@@ -669,15 +669,19 @@ end
 -- Counts do not include retry tombstones or bound physical disk usage.
 -- Collections are Pouch-only and append independently of implicit/managed XA.
 function Client:create_collection(config)
+  local receiver = wrap_collection(false)
   local value, err, code = self._core:create_collection(config)
   if value == nil then return nil, err, code end
-  return wrap_collection(value)
+  receiver._core = value
+  return receiver
 end
 
 function Client:open_collection(config)
+  local receiver = wrap_collection(false)
   local value, err, code = self._core:open_collection(config)
   if value == nil then return nil, err, code end
-  return wrap_collection(value)
+  receiver._core = value
+  return receiver
 end
 
 function Client:collection_capabilities()
@@ -689,6 +693,29 @@ function Client:list_collections(options, visitor)
 end
 
 function Collection:describe() return self._core:describe() end
+-- Acquire once before restoring a writable journal. Each append commits while
+-- ownership remains held. Public reads are allowed unless private_read=true;
+-- release/expiry restores public visibility. TTL renewal is separate from
+-- retention. A stale owned receiver never falls back to multiwriter mutation.
+function Collection:acquire(request)
+  -- Reserve the facade table before publishing durable ownership.
+  local receiver = wrap_collection(false)
+  local value, err, code = self._core:acquire(request)
+  if value == nil then return nil, err, code end
+  receiver._core = value
+  return receiver
+end
+-- Explicitly replace exactly the lease ID observed by describe().lease.
+function Collection:takeover(request, observed_lease_id)
+  local receiver = wrap_collection(false)
+  local value, err, code = self._core:takeover(request, observed_lease_id)
+  if value == nil then return nil, err, code end
+  receiver._core = value
+  return receiver
+end
+function Collection:keepalive(request) return self._core:keepalive(request) end
+-- Success closes this receiver. Close/GC alone leaves durable ownership held.
+function Collection:release() return self._core:release() end
 -- nil/omitted retention_seconds preserves, 0 clears, positive integer seconds
 -- reset expiry from this commit. Collection policy does not assign entry ages.
 -- max_entries omission preserves; "0" disables; a positive decimal string
@@ -702,13 +729,25 @@ end
 -- Exactly one JSON object. Keep append_id before a single-pass upload; retry
 -- the same compact body/ID or inspect append_status after an ambiguous error.
 -- An identical retry preserves the original position and retention deadline.
--- Both append forms accept collection_retention_seconds for the parent:
+-- All append forms accept collection_retention_seconds for the parent:
 -- omission preserves, 0 clears, positive seconds reset at new publication.
 -- Only new membership renews. Results/status describe the original directive;
 -- describe() reports the parent's current deadline.
+-- Direct append retains append authority while consuming the source. Use
+-- append_staged for sources that may wait; neither form resets/replays input.
 function Collection:append(request, source) return self._core:append(request, source) end
--- Push raw JSON fragments as they arrive. No JSON conversion, full-value spool
--- or producer thread is introduced. Close the writer after commit or failure.
+-- Explicit staged pull consumes the source once through the same writer used
+-- below, without holding publication locks while reading. It preserves append's
+-- callback/retry rules and accepts the same sources and retention directives.
+-- Useful for slow/concurrent input; direct append can cost less for fast input.
+-- The Lua source adapter is closed on return, including errors. Source failure
+-- publishes nothing; commit/result errors may need append_status reconciliation.
+function Collection:append_staged(request, source)
+  return self._core:append_staged(request, source)
+end
+-- Push raw JSON fragments; Pouch validates/encodes once, buffers up to 64 KiB
+-- of encoded bytes, then uses an anonymous spool for larger entries. Commit
+-- copies those bytes into a shared segment. Close after commit or failure.
 -- collection_retention_seconds is atomic with a new append; omission preserves,
 -- 0 clears, positive seconds reset from commit. Identical retries do not renew.
 function Collection:append_begin(request)

@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #include "../support/lc_test_tmp.h"
 #include "lc_api_internal.h"
@@ -168,12 +169,14 @@ typedef struct allocation_stats {
   size_t peak;
   size_t calls;
   size_t fail_at;
+  size_t reject_above;
 } allocation_stats;
 
 static void *tracked_allocate(void *context, size_t size) {
   allocation_stats *stats = context;
   allocation_header *block;
-  if (++stats->calls == stats->fail_at)
+  if (++stats->calls == stats->fail_at ||
+      (stats->reject_above != 0 && size > stats->reject_above))
     return NULL;
   block = malloc(sizeof(*block) + size);
   if (!block)
@@ -205,7 +208,8 @@ static void *tracked_reallocate(void *context, void *ptr, size_t size) {
     tracked_free(context, ptr);
     return NULL;
   }
-  if (++stats->calls == stats->fail_at)
+  if (++stats->calls == stats->fail_at ||
+      (stats->reject_above != 0 && size > stats->reject_above))
     return NULL;
   block = (allocation_header *)ptr - 1;
   previous = block->size;
@@ -603,8 +607,95 @@ test_incremental_output_is_bounded_and_flushed_before_eof(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_plain_codec_small_heap_and_frame_growth(void **state) {
+  const struct {
+    size_t bytes;
+    size_t limit;
+    int expected;
+  } cases[] = {{0, 16384, LC_OK},    {1, 16384, LC_OK},
+               {2048, 16384, LC_OK}, {2049, 0, LC_OK},
+               {65536, 0, LC_OK},    {65537, 0, LC_OK},
+               {131085, 0, LC_OK},   {2049, 16384, LC_ERR_NOMEM}};
+  unsigned char bytes[2048], readback[2048];
+  (void)state;
+  for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); ++c) {
+    allocation_stats stats = {0};
+    lc_allocator allocator = {tracked_allocate, tracked_reallocate,
+                              tracked_free, &stats};
+    lc_pouch_crypto_open_options options = {0};
+    lc_pouch_crypto *crypto = NULL;
+    lc_pouch_crypto_writer *writer = NULL;
+    lc_error error;
+    char path[] = CODEC_PREFIX "XXXXXX", *descriptor = NULL;
+    uint64_t plain = 99, stored = 99;
+    unsigned long crc = 0, expected_crc = crc32(0L, Z_NULL, 0);
+    size_t offset = 0;
+    int fd, rc = LC_OK;
+    stats.reject_above = cases[c].limit;
+    /* Keep an allocator-owning crypto object; this writer explicitly disables
+     * its compression so the exercised output remains plain bytes. */
+    options.compression_enabled = 1;
+    lc_error_init(&error);
+    fd = lc_test_tmp_mkstemp(path, CODEC_PREFIX);
+    assert_true(fd >= 0);
+    assert_int_equal(
+        lc_pouch_crypto_open(&allocator, &options, &crypto, NULL, &error),
+        LC_OK);
+    assert_int_equal(
+        lc_pouch_crypto_writer_open(crypto, NULL, fd, 0, &writer, &error),
+        LC_OK);
+    while (offset < cases[c].bytes) {
+      size_t take = cases[c].bytes - offset;
+      if (take > sizeof(bytes))
+        take = sizeof(bytes);
+      for (size_t i = 0; i < take; ++i)
+        bytes[i] = (unsigned char)((offset + i) % 251);
+      if (!lc_pouch_crypto_writer_sink(writer)->write(
+              lc_pouch_crypto_writer_sink(writer), bytes, take, &error)) {
+        rc = error.code;
+        break;
+      }
+      expected_crc = crc32(expected_crc, bytes, (uInt)take);
+      offset += take;
+    }
+    assert_int_equal(rc, cases[c].expected);
+    if (rc != LC_OK)
+      assert_false(lc_pouch_crypto_writer_sink(writer)->write(
+          lc_pouch_crypto_writer_sink(writer), "x", 1, &error));
+    assert_int_equal(lc_pouch_crypto_writer_finish(writer, &plain, &stored,
+                                                   &crc, &descriptor, &error),
+                     cases[c].expected);
+    assert_null(descriptor);
+    if (rc == LC_OK) {
+      struct stat st;
+      assert_true(plain == cases[c].bytes && stored == plain);
+      assert_int_equal(crc, expected_crc);
+      assert_int_equal(fstat(fd, &st), 0);
+      assert_true((uint64_t)st.st_size == stored);
+      for (offset = 0; offset < cases[c].bytes;) {
+        size_t take = cases[c].bytes - offset;
+        if (take > sizeof(readback))
+          take = sizeof(readback);
+        assert_int_equal(pread(fd, readback, take, (off_t)offset), take);
+        for (size_t i = 0; i < take; ++i)
+          assert_int_equal(readback[i], (unsigned char)((offset + i) % 251));
+        offset += take;
+      }
+    } else {
+      assert_true(plain == 0 && stored == 0);
+    }
+    lc_pouch_crypto_writer_close(writer);
+    lc_pouch_crypto_close(crypto);
+    assert_int_equal(stats.live, 0);
+    assert_int_equal(close(fd), 0);
+    lc_test_tmp_cleanup_path(path, CODEC_PREFIX);
+    lc_error_cleanup(&error);
+  }
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test(test_plain_codec_small_heap_and_frame_growth),
       cmocka_unit_test(
           test_incremental_output_is_bounded_and_flushed_before_eof),
       cmocka_unit_test(test_incremental_json_finish_abort_and_terminal_states),

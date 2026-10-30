@@ -1,5 +1,55 @@
 # Release notes
 
+## 0.25.0
+
+- Add explicit staged pull through `lc_collection_append_staged` and the Lua
+  `collection:append_staged` facade. Consume sources once through the existing
+  push writer, preserving callback, ownership, retry and retention semantics
+  without holding publication locks during input. Direct pull remains available.
+- Pack push-fed collection appends into shared rolling segments. Validate and
+  encode once, stage up to 64 KiB of encoded bytes on the heap, then spill to
+  an anonymous file. Preserve encrypted spools, lease fencing, atomic retention
+  renewal, recovery and durable group commits without a segment per small entry.
+- Add optional collection-wide leases, atomic creation with initial ownership,
+  conditional takeover and separate keepalive/release. Entries commit under the
+  same held lease; unleased collections retain multiwriter behavior. Default
+  reads remain public, with optional private visibility until release/expiry.
+  Expose the lifecycle through matching C and Lua receivers and capabilities.
+- Advance the core shared-library ABI from 7 to 8 for collection layouts.
+  Extend the collection control-head layout for bounded ownership. Upgrade
+  released heads automatically on Pouch open under exclusive root access,
+  preserving entries, retention and positions without rewriting bodies.
+- Remove ordinary-state transaction serialization from isolated collection
+  operations, allowing renewal/takeover during uploads and independent
+  collections to progress under their existing storage locks.
+
+- Reduce collection append allocation and clearing costs with a per-writer
+  2 KiB plain-output chunk that grows only when needed. Large and transformed
+  bodies retain the existing 64 KiB frame/write cadence.
+- Publish the identity-index header once with its replay checkpoint, reuse
+  metadata stats within each refresh, and reuse the read's selected digest
+  implementation across entries while checking every payload fingerprint.
+- Seal canonical collection history without redundant projection syncs at
+  segment transitions. Clean checkpoints still sync both projections before
+  publishing their marker; unclean recovery rebuilds from canonical records.
+- Extend collection diagnostics with CPU measurements, an explicit storage
+  directory, and optional count-retention maintenance/reopen checks.
+
+### Upgrading from 0.24.x
+
+Rebuild C consumers and the optional PostgreSQL provider against core ABI **8**
+(`liblockdc.so.8` or `liblockdc.8.dylib`). Collection receiver and capability
+layouts changed; the provider's own ABI remains **0**. Existing direct pull calls
+retain their behavior. Staged pull is explicit through `append_staged`, and push
+writers now pack entries into shared rolling segments with bounded encoded
+staging instead of adopting one segment per commit.
+
+Stop all other clients before first opening an older collection root. Pouch
+automatically upgrades collection heads without rewriting entry bodies; a busy
+root returns `LC_ERR_PENDING` / `collection_upgrade_busy`. Interrupted upgrades
+resume on the next open. Do not downgrade or use older binaries on upgraded
+roots. See [collection storage upgrade](docs/collection-leases.md#storage-upgrade).
+
 ## 0.24.0
 
 - Upgrade cpkt to 0.6.1, including its libssh2 AES-GCM key cleanup fix. Keep

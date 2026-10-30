@@ -2,6 +2,7 @@
 
 #include "lc_api_internal.h"
 #include "lc_collection_maintenance.h"
+#include "lc_collection_migration.h"
 #include "lc_intcompat.h"
 #include "lc_log.h"
 #include "lc_pouch_format.h"
@@ -45,6 +46,11 @@ static uint64_t lc_pouch_next_writer_marker_id;
 static pthread_mutex_t lc_pouch_writer_marker_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int lc_pouch_resolve_compression(lc_pouch *pouch, const char *stored,
                                         lc_error *error);
+static int lc_pouch_prepare_collection_heads(lc_pouch *pouch, int stored_bytes,
+                                             lc_error *error);
+static int lc_pouch_writer_root_lock_change(lc_pouch *pouch, int mode,
+                                            lc_error *error);
+static int lc_pc_exists(const char *path, int *exists, lc_error *error);
 static pthread_mutex_t lc_pouch_writer_root_lock_mutex =
     PTHREAD_MUTEX_INITIALIZER;
 
@@ -3658,6 +3664,7 @@ static void lc_pouch_configure_filesystem_capabilities(lc_pouch *pouch) {
 
 static int lc_pouch_write_root_manifest(lc_pouch *pouch, lc_error *error) {
   char manifest[512];
+  struct stat st;
   char *crypto_key_id;
   char *manifest_path;
   int rc;
@@ -3679,11 +3686,21 @@ static int lc_pouch_write_root_manifest(lc_pouch *pouch, lc_error *error) {
   }
   snprintf(manifest, sizeof(manifest),
            "layout=%s\nversion=%lu\ncompression=%s\ncrypto=%s\n"
-           "crypto_key_id=%s\n",
+           "crypto_key_id=%s\ncollection_head_bytes=%u\n",
            LC_POUCH_LAYOUT_NAME, LC_POUCH_LAYOUT_VERSION, pouch->compression,
            lc_pouch_crypto_enabled(pouch->crypto) ? "encrypted" : "plaintext",
-           crypto_key_id != NULL ? crypto_key_id : "");
-  rc = lc_pouch_path_write_text_file(manifest_path, manifest, error);
+           crypto_key_id != NULL ? crypto_key_id : "",
+           LC_COLLECTION_HEAD_BYTES);
+  if (lstat(manifest_path, &st) == 0)
+    rc = lc_pouch_path_write_bytes_file_mode(manifest_path, manifest,
+                                             strlen(manifest),
+                                             (unsigned int)st.st_mode, error);
+  else if (errno == ENOENT)
+    rc = lc_pouch_path_write_text_file(manifest_path, manifest, error);
+  else
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to inspect pouch root manifest permissions",
+                      strerror(errno), NULL, "pouch");
   lc_free_with_allocator(&pouch->allocator, manifest_path);
   lc_free_with_allocator(NULL, crypto_key_id);
   return rc;
@@ -3693,7 +3710,8 @@ static int lc_pouch_root_manifest_read(
     lc_pouch *pouch, char *layout, size_t layout_size, unsigned long *version,
     char *mode, size_t mode_size, char *key_id, size_t key_id_size,
     int *found_manifest, int *found_crypto_mode, char *compression,
-    size_t compression_size, int *found_compression, lc_error *error) {
+    size_t compression_size, int *found_compression, int *collection_head_bytes,
+    lc_error *error) {
   char line[512];
   char *manifest_path;
   FILE *fp;
@@ -3721,6 +3739,7 @@ static int lc_pouch_root_manifest_read(
   *found_manifest = 0;
   *found_crypto_mode = 0;
   *found_compression = 0;
+  *collection_head_bytes = 0;
   manifest_path =
       lc_pouch_path_join(&pouch->allocator, pouch->root_path, "manifest");
   if (manifest_path == NULL) {
@@ -3843,6 +3862,21 @@ static int lc_pouch_root_manifest_read(
       }
       memcpy(compression, value, len + 1U);
       found_compression_mode = 1;
+      continue;
+    }
+    if (strncmp(line, "collection_head_bytes=", 22U) == 0) {
+      char expected[16];
+      (void)snprintf(expected, sizeof(expected), "%u",
+                     LC_COLLECTION_HEAD_BYTES);
+      value = line + 22U;
+      value[strcspn(value, "\r\n")] = '\0';
+      if (*collection_head_bytes != 0 || strcmp(value, expected) != 0) {
+        rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "invalid or unsupported collection head layout", NULL,
+                          NULL, "pouch");
+        break;
+      }
+      *collection_head_bytes = (int)LC_COLLECTION_HEAD_BYTES;
       continue;
     }
     if (strncmp(line, "crypto_key_id=", 14U) == 0) {
@@ -4093,6 +4127,7 @@ static int lc_pouch_validate_root_crypto_mode(lc_pouch *pouch,
   int found_compression;
   int found_manifest;
   int has_namespace_entries;
+  int collection_head_bytes;
   int rc;
 
   requested_key_id = NULL;
@@ -4106,7 +4141,8 @@ static int lc_pouch_validate_root_crypto_mode(lc_pouch *pouch,
       pouch, stored_layout, sizeof(stored_layout), &stored_version, stored_mode,
       sizeof(stored_mode), stored_key_id, sizeof(stored_key_id),
       &found_manifest, &found_crypto_mode, stored_compression,
-      sizeof(stored_compression), &found_compression, error);
+      sizeof(stored_compression), &found_compression, &collection_head_bytes,
+      error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -4183,7 +4219,10 @@ static int lc_pouch_validate_root_crypto_mode(lc_pouch *pouch,
         NULL, "pouch");
   }
   if (strcmp(stored_mode, "encrypted") != 0) {
-    *write_manifest = 0;
+    rc = lc_pouch_prepare_collection_heads(pouch, collection_head_bytes, error);
+    if (rc != LC_OK)
+      return rc;
+    *write_manifest = collection_head_bytes != LC_COLLECTION_HEAD_BYTES;
     return lc_pouch_resolve_compression(pouch, stored_compression, error);
   }
   if (stored_key_id[0] == '\0') {
@@ -4203,7 +4242,10 @@ static int lc_pouch_validate_root_crypto_mode(lc_pouch *pouch,
         NULL, "pouch");
   }
   lc_free_with_allocator(NULL, requested_key_id);
-  *write_manifest = 0;
+  rc = lc_pouch_prepare_collection_heads(pouch, collection_head_bytes, error);
+  if (rc != LC_OK)
+    return rc;
+  *write_manifest = collection_head_bytes != LC_COLLECTION_HEAD_BYTES;
   return lc_pouch_resolve_compression(pouch, stored_compression, error);
 }
 
@@ -4269,6 +4311,7 @@ static int lc_pouch_ensure_root(lc_pouch *pouch, lc_error *error) {
   int lock_fd;
   int pthread_rc;
   int rc;
+  int shared;
 
   rc = lc_pouch_path_ensure_directory(
       pouch->root_path, "failed to create pouch root directory", error);
@@ -4292,6 +4335,7 @@ static int lc_pouch_ensure_root(lc_pouch *pouch, lc_error *error) {
                         strerror(pthread_rc), NULL, "pouch");
   }
   manifest_mutex_locked = 1;
+  shared = pouch->writer_root_lock_mode == LC_POUCH_WRITER_ROOT_LOCK_SHARED;
   rc = lc_pouch_root_manifest_lock(pouch, &lock_fd, error);
   if (rc == LC_OK) {
     rc = lc_pouch_validate_root_crypto_mode(pouch, &write_manifest, error);
@@ -4303,6 +4347,10 @@ static int lc_pouch_ensure_root(lc_pouch *pouch, lc_error *error) {
   if (rc == LC_OK && write_manifest) {
     rc = lc_pouch_write_root_manifest(pouch, error);
   }
+  if (rc == LC_OK && shared &&
+      pouch->writer_root_lock_mode == LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE)
+    rc = lc_pouch_writer_root_lock_change(
+        pouch, LC_POUCH_WRITER_ROOT_LOCK_SHARED, error);
   lc_pouch_root_manifest_unlock(lock_fd);
   if (manifest_mutex_locked) {
     pthread_mutex_unlock(&pouch->writer_root_lock->manifest_mutex);
@@ -4613,6 +4661,37 @@ static int lc_pouch_writer_root_lock_change(lc_pouch *pouch, int mode,
   pouch->writer_root_lock_mode = mode;
   pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
   return LC_OK;
+}
+
+static int lc_pouch_prepare_collection_heads(lc_pouch *pouch, int stored_bytes,
+                                             lc_error *error) {
+  char *intent;
+  int rc, pending;
+  if (stored_bytes == LC_COLLECTION_HEAD_BYTES)
+    return LC_OK;
+  rc = lc_pouch_writer_root_lock_change(
+      pouch, LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE, error);
+  if (rc == LC_ERR_INVALID)
+    return lc_error_set(error, LC_ERR_PENDING, 0L,
+                        "collection upgrade requires exclusive root access; "
+                        "close other clients and retry",
+                        NULL, "collection_upgrade_busy", "pouch");
+  if (rc != LC_OK)
+    return rc;
+  intent = lc_pouch_path_join(&pouch->allocator, pouch->root_path,
+                              ".compression-ready");
+  if (intent == NULL)
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to inspect collection upgrade recovery", NULL,
+                        NULL, "pouch");
+  rc = lc_pc_exists(intent, &pending, error);
+  lc_free_with_allocator(&pouch->allocator, intent);
+  /* A released converter may have staged 128-byte replacement heads. Its
+   * ready tree is authoritative: upgrade after installation, not the source
+   * tree that recovery is about to retire. */
+  if (rc == LC_OK && !pending)
+    rc = lc_collection_migrate_heads(pouch, error);
+  return rc;
 }
 
 static int lc_pouch_writer_root_lock_check_presence(lc_pouch *pouch,
@@ -6009,7 +6088,7 @@ static void lc_pc_log(lc_pouch *pouch, const char *event, int warning,
  * removed only after the new manifest and old-tree reclamation are durable. */
 static int lc_pc_publish(lc_pouch *pouch, const char *intent, const char *fresh,
                          const char *old, const char *current,
-                         const char *stored, const char *target,
+                         const char *stored, const char *target, int recovering,
                          lc_error *error) {
   int has_current, has_old, has_fresh, rc;
   rc = lc_pc_exists(current, &has_current, error);
@@ -6048,6 +6127,8 @@ static int lc_pc_publish(lc_pouch *pouch, const char *intent, const char *fresh,
     rc = lc_error_set(error, LC_ERR_PROTOCOL, 0,
                       "compression conversion publication is incomplete", NULL,
                       NULL, "pouch");
+  if (rc == LC_OK && recovering)
+    rc = lc_collection_migrate_heads(pouch, error);
   if (rc == LC_OK)
     rc = lc_pc_mode(pouch, target, error);
   if (rc == LC_OK)
@@ -6159,7 +6240,7 @@ static int lc_pouch_resolve_compression(lc_pouch *pouch, const char *stored,
       (void)clock_gettime(CLOCK_MONOTONIC, &started);
       lc_pc_log(pouch, "compression.convert.start", 1, previous, target, input,
                 output, 0, 1);
-      rc = lc_pc_publish(pouch, intent, fresh, old, current, stored, target,
+      rc = lc_pc_publish(pouch, intent, fresh, old, current, stored, target, 1,
                          error);
       (void)clock_gettime(CLOCK_MONOTONIC, &ended);
       elapsed = (lc_u64)(ended.tv_sec - started.tv_sec) * 1000 +
@@ -6193,7 +6274,7 @@ static int lc_pouch_resolve_compression(lc_pouch *pouch, const char *stored,
       rc = lc_pc_phase(1, error);
     if (rc == LC_OK)
       rc = lc_pc_publish(pouch, intent, fresh, old, current, previous,
-                         requested, error);
+                         requested, 0, error);
     (void)clock_gettime(CLOCK_MONOTONIC, &ended);
     elapsed = (lc_u64)(ended.tv_sec - started.tv_sec) * 1000 +
               (ended.tv_nsec - started.tv_nsec) / 1000000;

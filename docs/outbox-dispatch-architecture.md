@@ -23,11 +23,11 @@ This cutover splits those roles:
   ownership.
 
 The dispatcher cutover shipped in ABI generation 4 after ABI 3. The terminal
-retention configuration and statistics extend public C layouts and advance
-the ABI to generation 5 from released ABI 4. Per-object state retention advances
-it to generation 6 from released ABI 5. Future incompatible
-public C layout changes require a new ABI generation. There is no compatibility
-constructor and no legacy implicit-thread mode.
+retention configuration and statistics introduced ABI generation 5, followed
+by per-object state retention in ABI 6. Current collection layouts use ABI 8;
+see [ABI compatibility](../README.md#c-abi-and-storage-compatibility). Future
+incompatible public C layout changes require a new ABI generation. There is no
+compatibility constructor and no legacy implicit-thread mode.
 
 `outbox` is deliberately the distributed-systems term for this transactional
 messaging facility. It is not a business-workflow engine: activity graphs,

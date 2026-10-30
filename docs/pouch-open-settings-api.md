@@ -107,11 +107,11 @@ query, compaction, or dispatcher paths.
 These are root-open policy settings. They are not per-query controls:
 `lc_query_req.engine` and `refresh` retain their existing single-query meaning.
 They are also not durable namespace preferences, which remain managed through
-`lc_namespace_config`. The selected settings neither mutate durable root data
-nor create a remote lockd configuration protocol.
+`lc_namespace_config`. Applying settings at open can create control metadata,
+upgrade collection heads or convert the durable compression mode as described
+above. These local effects do not create a remote lockd configuration protocol.
 
 Legacy endpoint query options and `lc_pouch_endpoint_build()` remain supported
 for C deployment compatibility. Lua deliberately rejects Pouch endpoint query
 options and exposes only the typed settings table, which is discoverable,
-type-checked, and makes the
-local-only boundary explicit.
+type-checked, and makes the local-only boundary explicit.

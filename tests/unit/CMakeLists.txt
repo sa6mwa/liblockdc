@@ -86,13 +86,26 @@ lc_add_unit_test(lc_unit_collection_ids test_lc_collection_ids.c
 lc_add_unit_test(lc_unit_collections test_lc_collections.c
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
 target_compile_definitions(lc_unit_collections PRIVATE LOCKDC_TEST_BUILD=1)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  # The full storage table approaches the per-test deadline. Keep append
+  # coverage separate so focused work and cumulative fork/fsync costs stay bounded.
+  set_property(TEST lc_unit_collections APPEND PROPERTY ENVIRONMENT
+    "CMOCKA_SKIP_FILTER=test_push_*")
+  add_test(NAME lc_unit_collections_append COMMAND lc_unit_collections)
+  set_tests_properties(lc_unit_collections_append PROPERTIES
+    LABELS "unit;local" TIMEOUT 60
+    ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT};CMOCKA_TEST_FILTER=test_push_*;CMOCKA_SKIP_FILTER=")
+endif()
 lc_add_unit_test(lc_unit_collection_sync test_lc_collection_sync.c
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
 target_compile_definitions(lc_unit_collection_sync PRIVATE LOCKDC_TEST_BUILD=1)
+lc_add_unit_test(lc_unit_collection_staged test_lc_collection_staged.c
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+target_compile_definitions(lc_unit_collection_staged PRIVATE LOCKDC_TEST_BUILD=1)
 lc_add_unit_test(lc_unit_mixed_storage test_lc_mixed_storage.c
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
 target_compile_definitions(lc_unit_mixed_storage PRIVATE LOCKDC_TEST_BUILD=1)
-foreach(collection_test lc_unit_collection_order lc_unit_collection_json lc_unit_collection_record lc_unit_collection_ids lc_unit_collections lc_unit_collection_sync lc_unit_mixed_storage)
+foreach(collection_test lc_unit_collection_order lc_unit_collection_json lc_unit_collection_record lc_unit_collection_ids lc_unit_collections lc_unit_collection_sync lc_unit_collection_staged lc_unit_mixed_storage)
   target_compile_definitions(${collection_test} PRIVATE
     LC_COLLECTION_TMP_PARENT="${CMAKE_CURRENT_BINARY_DIR}")
 endforeach()

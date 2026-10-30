@@ -447,6 +447,7 @@ int lc_collection_compact(lc_collection *self, int force, int cleanup_only,
   if (rc != LC_OK)
     return rc;
   work.collection = work.call.collection;
+  work.call.maintenance = 1;
   error = work.call.error;
   busy = selected = 0;
   rc = lc_cm_lock(&work, &busy, error);

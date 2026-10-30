@@ -1,5 +1,9 @@
 local lockdc = require("lockdc")
-assert(lockdc.allocator_tracking_configure(true))
+-- Package validation configures tracking before loading the script when enabled.
+-- Direct smoke runs still enable it here; configuration is once per process.
+if os.getenv("LOCKDC_TEST_ALLOCATOR_TRACKING") ~= "1" then
+  assert(lockdc.allocator_tracking_configure(true))
+end
 
 assert(type(lockdc.version_string()) == "string")
 

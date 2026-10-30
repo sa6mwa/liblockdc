@@ -1,4 +1,58 @@
-# liblockdc pouch comparison benchmarks
+# liblockdc Pouch benchmarks
+
+## Native collections
+
+The native collection workload checks append results, raw and filtered JSONL
+record/byte counts, and reads after reopening. It reports wall time and process
+CPU time separately for append/read phases. Build it with:
+
+```sh
+cmake --build --preset x86_64-linux-gnu-release --target lockdc_bench
+./build/x86_64-linux-gnu-release/bench/lockdc_bench 4096 collections
+```
+
+The default storage parent is `/tmp`, which may be RAM-backed. For filesystem
+and sync measurements, choose an existing absolute directory on the intended
+storage device. Each run creates and removes only its owned temporary root:
+
+```sh
+mkdir -p build/collection-perf/storage
+LOCKDC_COLLECTION_BENCH_DIRECTORY="$PWD/build/collection-perf/storage" \
+LOCKDC_COLLECTION_BENCH_PUSH=1 LOCKDC_COLLECTION_BENCH_SYNC=1 \
+  ./build/x86_64-linux-gnu-release/bench/lockdc_bench 256 collections
+```
+
+Additional settings are `LOCKDC_COLLECTION_BENCH_PAYLOAD` (padding bytes,
+default 1024), `WRITERS` (default 1), `SHARED`, `INDEX` (default 1), `CRYPTO`,
+and `COMPRESS`, all with the `LOCKDC_COLLECTION_BENCH_` prefix. Boolean settings
+default off unless noted. Set `MAX_ENTRIES` to a positive value to include a
+controlled maintenance pass after the initial reads, then check retained counts
+and reopened streaming output. This invokes the actual maintenance path directly
+rather than waiting for its background cadence. Zero leaves retention unlimited.
+
+Compare identical workloads in paired runs. Use `strace -f -c` to attribute
+syscalls and sync calls; these counts are not physical device IOPS. Keep
+RAM-backed CPU measurements separate from device-dependent durability latency.
+
+`LOCKDC_COLLECTION_BENCH_LEASE=1` creates the collection with a single lease
+covering every append. It does not renew on each event. With several callers,
+they share that owned receiver. Set `LOCKDC_COLLECTION_BENCH_INDEPENDENT=1` to
+give each caller its own collection instead; this supports leased/unleased
+comparisons without contention on one journal. Append timing covers all entries,
+including caller setup/teardown; reads check the first caller's partition, and
+every partition's committed count/high-water mark is verified. Both flags default
+off. Compare matching `LEASE=0/1` runs with the same inputs and storage directory.
+
+For optional diagnostics outside the benchmark gates, use
+`make compare-collection-layouts` to compare producer layouts, inode growth
+and compaction, or `make compare-collection-pull` to compare direct and staged
+pull with identical fast/slow sources and concurrent writers. Their `-smoke`
+targets check correctness under Debug with allocation tracking. See
+[layout and pull comparisons](../docs/collection-layout-experiment.md).
+`make compare-collection-read` separately compares collection output with raw
+JSONL; see [read comparison limits](../docs/collection-read-comparison.md).
+
+## Go comparisons
 
 This module is intentionally outside the CMake release gate. It is used by the
 root `benchmark-pouch-go*` Makefile targets for opt-in pouch performance and

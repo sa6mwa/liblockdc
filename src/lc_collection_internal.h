@@ -4,6 +4,7 @@
 #include "lc_api_internal.h"
 #include "lc_collection_ids.h"
 #include "lc_collection_maintenance.h"
+#include "lc_collection_migration.h"
 #include "lc_collection_order.h"
 #include "lc_pouch_collection_record.h"
 #include "lc_pouch_internal.h"
@@ -23,6 +24,7 @@ typedef struct lc_collection_head {
   /* Explicit expiry overrides append directives through this generation. */
   lc_u64 retention_generation;
   lc_u64 max_entries;
+  lc_collection_lease_info lease;
   int dropped;
 } lc_collection_head;
 
@@ -62,6 +64,10 @@ typedef struct lc_collection_handle {
   unsigned long references;
   int closed;
   int trusted;
+  /* Immutable receiver credentials, independent of refreshed control metadata.
+   */
+  char lease_id[LC_XID_STRING_SIZE];
+  lc_u64 lease_token;
 } lc_collection_handle;
 
 typedef struct lc_collection_call {
@@ -71,6 +77,7 @@ typedef struct lc_collection_call {
   int callback;
   int source_callback;
   int mode_guard;
+  int maintenance;
   lc_error local_error;
   lc_error *error;
   struct lc_collection_call *next;
@@ -80,7 +87,6 @@ typedef struct lc_collection_guard {
   lc_collection_handle *collection;
   lc_pouch *pouch;
   lc_collection_call *call;
-  lc_pouch_state_shared_mutation_guard *shared;
   int mode;
   int append;
   int commit_fd;
@@ -102,14 +108,19 @@ int lc_collection_append_begin_method(lc_collection *self,
                                       const lc_collection_append_req *req,
                                       lc_collection_writer **out,
                                       lc_error *error);
-/* Publishes a finished private pending inode without replaying its body.
- * The caller keeps fd/path alive and never unlinks a canonical segment. */
-int lc_collection_publish_pending(lc_collection_call *call,
-                                  lc_pouch_collection_writer *writer,
-                                  const char *pending_path, int fd,
-                                  const lc_pouch_collection_record *body,
-                                  lc_collection_append_res *out,
-                                  lc_error *error);
+int lc_collection_append_staged_method(lc_collection *self,
+                                       const lc_collection_append_req *req,
+                                       lc_source *source,
+                                       lc_collection_append_res *out,
+                                       lc_error *error);
+/* Consumes the finished encoder. Copy and rollback happen under append
+ * authority; the staging source remains borrowed. */
+int lc_collection_publish_staged(lc_collection_call *call,
+                                 lc_pouch_collection_writer *writer,
+                                 lc_source *source, lc_u64 ownership_generation,
+                                 const lc_pouch_collection_record *body,
+                                 lc_collection_append_res *out,
+                                 lc_error *error);
 void lc_collection_call_callback(lc_collection_call *call, int enabled,
                                  int source);
 int lc_collection_metadata_enter(lc_collection_handle *collection,
@@ -134,9 +145,32 @@ void lc_collection_root_end(lc_collection_call *scope,
  * pin and returns with metadata held; release metadata before write_leave. */
 int lc_collection_write_enter(lc_collection_call *call,
                               lc_collection_guard *guard, lc_error *error);
+/* Upload admission does not drain in-flight durable append groups. */
+int lc_collection_append_enter(lc_collection_call *call,
+                               lc_collection_guard *guard, lc_error *error);
 void lc_collection_write_leave(lc_collection_guard *guard);
 int lc_collection_head_write(lc_collection_handle *collection, lc_error *error);
 int lc_collection_head_read(lc_collection_handle *collection, lc_error *error);
+/* Root, commit, metadata authority, without waiting for upload append locks. */
+int lc_collection_control_enter(lc_collection_call *call,
+                                lc_collection_guard *guard, lc_error *error);
+void lc_collection_control_leave(lc_collection_guard *guard);
+int lc_collection_lease_check(lc_collection_handle *collection, int mutating,
+                              lc_error *error);
+int lc_collection_lease_observe(lc_collection_handle *collection,
+                                lc_collection_lease_info *out, lc_error *error);
+int lc_collection_lease_initialize(lc_collection_handle *collection,
+                                   const lc_collection_lease_req *req,
+                                   lc_error *error);
+int lc_collection_acquire_method(lc_collection *,
+                                 const lc_collection_lease_req *,
+                                 lc_collection **, lc_error *);
+int lc_collection_takeover_method(lc_collection *,
+                                  const lc_collection_lease_req *, const char *,
+                                  lc_collection **, lc_error *);
+int lc_collection_keepalive_method(lc_collection *, long,
+                                   lc_collection_lease_info *, lc_error *);
+int lc_collection_release_method(lc_collection *, lc_error *);
 lc_pouch_unix_seconds
 lc_collection_retention_deadline(const lc_collection_handle *collection);
 int lc_collection_rotate(lc_collection_handle *collection, int force,
@@ -234,8 +268,8 @@ typedef int (*lc_collection_commit_hook_fn)(void *, lc_collection *,
 extern lc_collection_commit_hook_fn lc_collection_commit_wait_test_hook;
 extern void *lc_collection_commit_wait_test_context;
 enum {
-  LC_COLLECTION_APPEND_NAMED = 1,
-  LC_COLLECTION_APPEND_HEAD,
+  LC_COLLECTION_APPEND_STAGED = 1,
+  LC_COLLECTION_APPEND_PUBLISHED,
   LC_COLLECTION_APPEND_PROJECTED
 };
 typedef int (*lc_collection_append_hook_fn)(void *, lc_collection *, int,

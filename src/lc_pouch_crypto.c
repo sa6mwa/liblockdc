@@ -1964,7 +1964,8 @@ static int lc_pouch_crypto_encrypt_context_begin(EVP_CIPHER_CTX *ctx,
 }
 
 static int lc_pouch_crypto_encrypt_frame(
-    int fd, EVP_CIPHER_CTX *ctx, const unsigned char key[LC_POUCH_DEK_BYTES],
+    int fd, lc_sink *destination, EVP_CIPHER_CTX *ctx,
+    const unsigned char key[LC_POUCH_DEK_BYTES],
     const unsigned char nonce_prefix[LC_POUCH_NONCE_PREFIX_BYTES],
     const char *context, size_t context_len, const unsigned char *core,
     size_t core_len, unsigned long counter, int set_key,
@@ -1993,7 +1994,11 @@ static int lc_pouch_crypto_encrypt_frame(
     *stored_crc =
         (unsigned long)crc32((uLong)*stored_crc, frame, (uInt)frame_len);
   }
-  rc = lc_pouch_crypto_write_all_fd(fd, frame, frame_len, error);
+  rc = destination == NULL
+           ? lc_pouch_crypto_write_all_fd(fd, frame, frame_len, error)
+       : destination->write(destination, frame, frame_len, error) ? LC_OK
+       : error != NULL && error->code != LC_OK ? error->code
+                                               : LC_ERR_TRANSPORT;
   if (rc == LC_OK && cipher_total != NULL) {
     *cipher_total += (uint64_t)frame_len;
   }
@@ -2355,6 +2360,7 @@ typedef struct lc_pouch_crypto_output {
   const lc_allocator *allocator;
   const char *context;
   int fd;
+  lc_sink *destination;
   lc_pouch_crypto_desc desc;
   EVP_CIPHER_CTX *cipher;
   z_stream deflater;
@@ -2363,6 +2369,7 @@ typedef struct lc_pouch_crypto_output {
   size_t core_length;
   unsigned char *plain;
   unsigned char *frame;
+  unsigned char small[2048];
   size_t fill;
   unsigned long counter;
   uint64_t plain_total;
@@ -2384,10 +2391,10 @@ static int lc_pouch_crypto_output_flush(lc_pouch_crypto_output *out,
                           NULL, NULL, "pouch");
     }
     rc = lc_pouch_crypto_encrypt_frame(
-        out->fd, out->cipher, out->key, out->desc.nonce_prefix, out->context,
-        strlen(out->context), out->core, out->core_length, out->counter,
-        out->counter == 0UL, out->plain, terminal ? 0U : out->fill,
-        &out->cipher_total, &out->crc, out->frame,
+        out->fd, out->destination, out->cipher, out->key,
+        out->desc.nonce_prefix, out->context, strlen(out->context), out->core,
+        out->core_length, out->counter, out->counter == 0UL, out->plain,
+        terminal ? 0U : out->fill, &out->cipher_total, &out->crc, out->frame,
         8U + LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES, error);
     if (rc == LC_OK) {
       ++out->counter;
@@ -2397,7 +2404,13 @@ static int lc_pouch_crypto_output_flush(lc_pouch_crypto_output *out,
         out->cipher_total, out->fill,
         "pouch stored byte count exceeds platform limit", error);
     if (rc == LC_OK) {
-      rc = lc_pouch_crypto_write_all_fd(out->fd, out->plain, out->fill, error);
+      rc = out->destination == NULL ? lc_pouch_crypto_write_all_fd(
+                                          out->fd, out->plain, out->fill, error)
+           : out->destination->write(out->destination, out->plain, out->fill,
+                                     error)
+               ? LC_OK
+           : error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_TRANSPORT;
     }
     if (rc == LC_OK) {
       out->crc =
@@ -2414,7 +2427,21 @@ static int lc_pouch_crypto_output_feed(lc_pouch_crypto_output *out,
                                        lc_error *error) {
   size_t target;
   size_t take;
+  unsigned char *grown;
   int rc;
+  /* Plain short writes need no frame allocation. Grow before overflowing the
+   * inline chunk, preserving the existing 64 KiB write cadence for long bodies.
+   * This storage belongs only to this writer, never to a retained cache. */
+  if (out->plain == out->small && count > sizeof(out->small) - out->fill) {
+    grown =
+        lc_alloc_with_allocator(out->allocator, LC_POUCH_FRAME_PLAINTEXT_BYTES);
+    if (grown == NULL)
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to grow pouch streaming buffer", NULL, NULL,
+                          "pouch");
+    memcpy(grown, out->small, out->fill);
+    out->plain = grown;
+  }
   while (count != 0U) {
     target = out->desc.encrypted && out->counter == 0UL
                  ? LC_POUCH_FIRST_FRAME_PLAINTEXT_BYTES
@@ -2541,8 +2568,10 @@ static int lc_pouch_crypto_output_open(lc_pouch_crypto *crypto,
                         "pouch crypto write requires context", NULL, NULL,
                         "pouch");
   }
-  out->plain = (unsigned char *)lc_alloc_with_allocator(
-      out->allocator, LC_POUCH_FRAME_PLAINTEXT_BYTES);
+  out->plain = out->desc.encrypted || out->desc.compressed
+                   ? (unsigned char *)lc_alloc_with_allocator(
+                         out->allocator, LC_POUCH_FRAME_PLAINTEXT_BYTES)
+                   : out->small;
   if (out->plain == NULL) {
     rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                       "failed to allocate pouch streaming buffer", NULL, NULL,
@@ -2608,12 +2637,14 @@ void lc_pouch_crypto_writer_close(lc_pouch_crypto_writer *out) {
   if (out->zlib_initialized)
     (void)deflateEnd(&out->deflater);
   EVP_CIPHER_CTX_free(out->cipher);
-  if (out->plain != NULL)
+  if (out->plain != NULL && out->plain != out->small) {
     OPENSSL_cleanse(out->plain, LC_POUCH_FRAME_PLAINTEXT_BYTES);
+    lc_free_with_allocator(allocator, out->plain);
+  }
+  OPENSSL_cleanse(out->small, sizeof(out->small));
   if (out->frame != NULL)
     OPENSSL_cleanse(out->frame, 8U + LC_POUCH_FRAME_PLAINTEXT_BYTES +
                                     LC_POUCH_GCM_TAG_BYTES);
-  lc_free_with_allocator(allocator, out->plain);
   lc_free_with_allocator(allocator, out->frame);
   lc_free_with_allocator(allocator, out->descriptor);
   OPENSSL_cleanse(out->key, sizeof(out->key));
@@ -2622,31 +2653,48 @@ void lc_pouch_crypto_writer_close(lc_pouch_crypto_writer *out) {
   lc_free_with_allocator(allocator, out);
 }
 
-int lc_pouch_crypto_writer_open(lc_pouch_crypto *crypto, const char *context,
-                                int fd, int allow_compression,
-                                lc_pouch_crypto_writer **result,
-                                lc_error *error) {
+static int lc_pouch_crypto_writer_open_output(
+    lc_pouch_crypto *crypto, const char *context, int fd, lc_sink *destination,
+    int allow_compression, lc_pouch_crypto_writer **result, lc_error *error) {
   lc_pouch_crypto_output *out;
   const lc_allocator *allocator = crypto != NULL ? &crypto->allocator : NULL;
   int rc;
   if (result != NULL)
     *result = NULL;
-  if (fd < 0 || result == NULL)
+  if ((fd < 0 && (destination == NULL || destination->write == NULL)) ||
+      result == NULL)
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch crypto writer requires fd and output", NULL,
                         NULL, "pouch");
-  out = lc_calloc_with_allocator(allocator, 1U, sizeof(*out));
+  out = lc_alloc_with_allocator(allocator, sizeof(*out));
   if (out == NULL)
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch crypto writer", NULL, NULL,
                         "pouch");
   rc = lc_pouch_crypto_output_open(crypto, context, fd, allow_compression, out,
                                    error);
+  out->destination = destination;
   if (rc != LC_OK)
     lc_pouch_crypto_writer_close(out);
   else
     *result = out;
   return rc;
+}
+
+int lc_pouch_crypto_writer_open(lc_pouch_crypto *crypto, const char *context,
+                                int fd, int allow_compression,
+                                lc_pouch_crypto_writer **result,
+                                lc_error *error) {
+  return lc_pouch_crypto_writer_open_output(crypto, context, fd, NULL,
+                                            allow_compression, result, error);
+}
+
+int lc_pouch_crypto_writer_open_sink(lc_pouch_crypto *crypto,
+                                     const char *context, lc_sink *destination,
+                                     lc_pouch_crypto_writer **result,
+                                     lc_error *error) {
+  return lc_pouch_crypto_writer_open_output(crypto, context, -1, destination, 1,
+                                            result, error);
 }
 
 lc_sink *lc_pouch_crypto_writer_sink(lc_pouch_crypto_writer *out) {

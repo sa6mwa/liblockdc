@@ -126,6 +126,10 @@ int lc_collection_ids_refresh(lc_collection_ids *ids, lc_error *error) {
     }
     (void)close(ids->fd);
     ids->fd = replacement;
+    if (fstat(ids->fd, &st) != 0) {
+      return lc_ci_error(error, LC_ERR_TRANSPORT,
+                         "failed to stat replaced collection identity index");
+    }
   }
   rc = lc_ci_io(ids->fd, 0U, bytes, sizeof(bytes), 0, error);
   if (rc != LC_OK) {
@@ -147,10 +151,8 @@ int lc_collection_ids_refresh(lc_collection_ids *ids, lc_error *error) {
     return lc_ci_error(error, LC_ERR_PROTOCOL,
                        "collection identity index bounds are invalid");
   }
-  if (fstat(ids->fd, &st) != 0) {
-    return lc_ci_error(error, LC_ERR_TRANSPORT,
-                       "failed to stat collection identity index");
-  }
+  /* The caller holds metadata authority throughout refresh; reuse the stat of
+   * this descriptor rather than issuing it again after the header read. */
   if (!S_ISREG(st.st_mode) || st.st_size < 0 ||
       (lc_u64)st.st_size !=
           LC_CI_HEADER_BYTES + ids->capacity * LC_CI_ENTRY_BYTES) {
@@ -473,7 +475,6 @@ int lc_collection_ids_put(lc_collection_ids *ids,
     if (ref->generation > ids->generation) {
       ids->generation = ref->generation;
     }
-    rc = lc_ci_header_write(ids, error);
   }
   return rc;
 }

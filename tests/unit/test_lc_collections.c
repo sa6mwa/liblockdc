@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <setjmp.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -14,6 +15,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #include "../support/lc_test_cases.h"
 
@@ -22,6 +24,7 @@
 #include "lc_collection_query.h"
 #include "lc_pouch_crypto.h"
 #include "lc_pouch_path.h"
+#include "lc_pouch_recode.h"
 #include "lc_pouch_record.h"
 
 #define PREFIX LC_COLLECTION_TMP_PARENT "/collections-api-"
@@ -106,6 +109,10 @@ static int setup(void **state) {
 
 static int teardown(void **state) {
   fixture *f = *state;
+  lc_collection_migrate_test_hook = NULL;
+  lc_collection_migrate_test_context = NULL;
+  lc_pouch_recode_test_hook = NULL;
+  lc_pouch_recode_test_context = NULL;
   lc_collection_compact_test_hook = NULL;
   lc_collection_compact_test_context = NULL;
   lc_collection_root_test_hook = NULL;
@@ -1368,7 +1375,7 @@ static void test_remote_unsupported_without_network_requests(void **state) {
   check(f,
         lc_client_collection_capabilities(f->client, &capabilities, &f->error));
   assert_true(!capabilities.collections && !capabilities.lql_filter &&
-              !capabilities.resume);
+              !capabilities.resume && !capabilities.append_staged);
   assert_int_equal(
       lc_client_create_collection(f->client, &collection, &f->a, &f->error),
       LC_ERR_UNSUPPORTED);
@@ -2046,11 +2053,7 @@ test_push_writer_streams_and_publishes_in_commit_order(void **state) {
   lc_collection_append_req req = {0};
   lc_collection_append_res result;
   lc_collection_info info;
-  lc_pouch_record_header header;
   lc_pouch_maintenance_result maintained = {0};
-  struct stat st;
-  unsigned char prefix[32];
-  char path[768];
   static char fragment[16384];
   memset(fragment, 'x', sizeof(fragment));
   set_collection_clock(f, 1000);
@@ -2063,22 +2066,13 @@ test_push_writer_streams_and_publishes_in_commit_order(void **state) {
   for (int i = 0; i < 8; ++i)
     check(f, lc_collection_writer_write(first, fragment, sizeof(fragment),
                                         &f->error));
-  assert_int_equal(pending_appends(f, path, sizeof(path)), 1);
-  f->owned_fd = open(path, O_RDONLY);
-  assert_true(f->owned_fd >= 0);
-  assert_int_equal(fstat(f->owned_fd, &st), 0);
-  assert_true(st.st_size > 65536); /* Canonical bytes arrived before EOF. */
-  assert_int_equal(pread(f->owned_fd, prefix, sizeof(prefix), 0),
-                   sizeof(prefix));
-  check(f, lc_pouch_record_header_decode(prefix, &header, &f->error));
-  assert_int_equal(header.flags, LC_POUCH_RECORD_FLAG_PENDING);
-  close(f->owned_fd);
-  f->owned_fd = -1;
+  /* Oversized input has an anonymous encoded spool, never a canonical inode. */
+  assert_int_equal(pending_appends(f, NULL, 0), 0);
   check(f, lc_collection_describe(f->a, &info, &f->error));
   assert_int_equal(info.live_count, 0);
   check(f, maintain(f, 0, 1, &maintained));
   assert_int_equal(pending_appends(f, NULL, 0),
-                   1); /* Live producer survives GC. */
+                   0); /* Maintenance cannot consume a producer's spool. */
   append(f, "pull", "{\"n\":1}", 1);
   req.append_id = "second";
   req.has_collection_retention_seconds = 0;
@@ -2190,56 +2184,161 @@ static int push_at_publication(void *context, lc_collection *collection,
                       "injected append publication failure", NULL, NULL, NULL);
 }
 
+static void test_segment_seals_recover_lost_projections(void **state) {
+  fixture *f = *state;
+  char paths[2][768], expected[512];
+  check(f, lc_pouch_crypto_generate_key_string(&f->crypto_key, &f->error));
+  for (int mode = 0; mode < 8; ++mode) {
+    for (int loss = 0; loss < 3; ++loss) {
+      close_handles(f);
+      snprintf(f->endpoint, sizeof(f->endpoint), "pouch://%s/lost-%d-%d",
+               f->root, mode, loss);
+      int descriptors[2], exited;
+      assert_int_equal(pipe(descriptors), 0);
+      pid_t child = fork();
+      assert_true(child >= 0);
+      if (child == 0) {
+        close(descriptors[0]);
+        open_client(f, mode & 4 ? f->crypto_key : NULL, (mode & 2) != 0,
+                    mode & 1);
+        set_collection_clock(f, 1000);
+        bind_collection(f, "events", 1, &f->a);
+        for (unsigned int position = 1; position <= 40; ++position) {
+          char id[32], json[32];
+          snprintf(id, sizeof(id), "event-%u", position);
+          snprintf(json, sizeof(json), "{\"n\":%u}", position);
+          if (position <= 3) {
+            lc_collection_writer *writer = NULL;
+            lc_collection_append_req req = {id, 1, 30, 1, 100};
+            lc_collection_append_res result;
+            check(f,
+                  lc_collection_append_begin(f->a, &req, &writer, &f->error));
+            check(f, lc_collection_writer_write(writer, json, strlen(json),
+                                                &f->error));
+            check(f, lc_collection_writer_commit(writer, &result, &f->error));
+            assert_int_equal(result.position, position);
+            lc_collection_writer_close(writer);
+          } else {
+            append(f, id, json, position);
+          }
+        }
+        lc_collection_delete_res deleted;
+        check(f, lc_collection_delete_entry(f->a, 2, &deleted, &f->error));
+        lc_collection_handle *handle = f->a->impl;
+        assert_true(handle->head.active > 4);
+        memset(paths, 0, sizeof(paths));
+        snprintf(paths[0], sizeof(paths[0]), "%s", handle->order_path);
+        snprintf(paths[1], sizeof(paths[1]), "%s", handle->ids_path);
+        assert_int_equal(write(descriptors[1], paths, sizeof(paths)),
+                         sizeof(paths));
+        close(descriptors[1]);
+        /* No clean-close marker or projection flush. Model power loss of the
+         * derived files independently of the surviving canonical history. */
+        _exit(49);
+      }
+      close(descriptors[1]);
+      assert_int_equal(waitpid(child, &exited, 0), child);
+      assert_true(WIFEXITED(exited) && WEXITSTATUS(exited) == 49);
+      assert_int_equal(read(descriptors[0], paths, sizeof(paths)),
+                       sizeof(paths));
+      close(descriptors[0]);
+      for (int index = 0; index < 2; ++index) {
+        if (loss == 2) {
+          assert_int_equal(unlink(paths[index]), 0);
+        } else if (index == loss) {
+          int fd = open(paths[index], O_WRONLY);
+          assert_true(fd >= 0);
+          assert_int_equal(ftruncate(fd, 13), 0);
+          assert_int_equal(close(fd), 0);
+        }
+      }
+      open_client(f, mode & 4 ? f->crypto_key : NULL, (mode & 2) != 0,
+                  mode & 1);
+      set_collection_clock(f, 1000);
+      bind_collection(f, "events", 0, &f->a);
+      lc_collection_info info;
+      lc_collection_append_res result;
+      check(f, lc_collection_describe(f->a, &info, &f->error));
+      assert_true(info.live_count == 39 && info.upper_position == 40 &&
+                  info.retention_expires_at_unix == 1100);
+      check(f, append_json(f, f->a, "event-2", "{\"n\":2}", &result));
+      assert_true(result.duplicate && result.deleted && result.position == 2);
+      append(f, "next", "{\"n\":41}", 41);
+      size_t used = 0;
+      for (unsigned int position = 1; position <= 41; ++position)
+        if (position != 2)
+          used += (size_t)snprintf(expected + used, sizeof(expected) - used,
+                                   "{\"n\":%u}\n", position);
+      check(f, read_into_memory(f, NULL));
+      assert_output(f, expected);
+      assert_int_equal(f->read.completed_records, 40);
+      lc_pouch_maintenance_result maintained = {0};
+      check(f, maintain(f, 1, 0, &maintained));
+      lc_pouch_maintenance_result_cleanup(NULL, &maintained);
+      check(f, read_into_memory(f, NULL));
+      assert_output(f, expected);
+    }
+  }
+}
+
 static void test_push_writer_recovers_every_publication_boundary(void **state) {
   fixture *f = *state;
   lc_collection_append_req req = {"after", 0, 0, 1, 20};
   lc_collection_append_res result;
   lc_collection_append_status_res status;
   lc_collection_info info;
-  for (int phase = LC_COLLECTION_APPEND_NAMED;
-       phase <= LC_COLLECTION_APPEND_PROJECTED; ++phase) {
-    close_handles(f);
-    snprintf(f->endpoint, sizeof(f->endpoint), "pouch://%s/crash-%d", f->root,
-             phase);
-    pid_t child = fork();
-    assert_true(child >= 0);
-    if (child == 0) {
-      lc_collection_writer *writer = NULL;
-      push_fault fault = {phase, 1, 0, NULL};
+  for (int staged = 0; staged < 2; ++staged) {
+    for (int phase = LC_COLLECTION_APPEND_STAGED;
+         phase <= LC_COLLECTION_APPEND_PROJECTED; ++phase) {
+      close_handles(f);
+      snprintf(f->endpoint, sizeof(f->endpoint), "pouch://%s/crash-%d-%d",
+               f->root, staged, phase);
+      pid_t child = fork();
+      assert_true(child >= 0);
+      if (child == 0) {
+        lc_collection_writer *writer = NULL;
+        push_fault fault = {phase, 1, 0, NULL};
+        open_client(f, NULL, 0, 0);
+        set_collection_clock(f, 1000);
+        bind_collection(f, "events", 1, &f->a);
+        append(f, "before", "{}", 1);
+        lc_collection_append_test_hook = push_at_publication;
+        lc_collection_append_test_context = &fault;
+        if (staged) {
+          check(f, lc_source_from_memory("{}", 2, &f->source, &f->error));
+          (void)lc_collection_append_staged(f->a, &req, f->source, &result,
+                                            &f->error);
+        } else {
+          check(f, lc_collection_append_begin(f->a, &req, &writer, &f->error));
+          check(f, lc_collection_writer_write(writer, "{}", 2, &f->error));
+          (void)lc_collection_writer_commit(writer, &result, &f->error);
+        }
+        _exit(46);
+      }
+      int exited;
+      assert_int_equal(waitpid(child, &exited, 0), child);
+      assert_true(WIFEXITED(exited) && WEXITSTATUS(exited) == 45);
       open_client(f, NULL, 0, 0);
-      set_collection_clock(f, 1000);
-      bind_collection(f, "events", 1, &f->a);
-      append(f, "before", "{}", 1);
-      check(f, lc_collection_append_begin(f->a, &req, &writer, &f->error));
-      check(f, lc_collection_writer_write(writer, "{}", 2, &f->error));
-      lc_collection_append_test_hook = push_at_publication;
-      lc_collection_append_test_context = &fault;
-      (void)lc_collection_writer_commit(writer, &result, &f->error);
-      _exit(46);
+      bind_collection(f, "events", 0, &f->a);
+      check(f, lc_collection_describe(f->a, &info, &f->error));
+      uint64_t count = phase == LC_COLLECTION_APPEND_STAGED ? 1 : 2;
+      assert_true(info.live_count == count && info.upper_position == count);
+      assert_int_equal(info.retention_expires_at_unix, count == 1 ? 0 : 1020);
+      check(f, lc_collection_append_status(f->a, "after", &status, &f->error));
+      assert_int_equal(status.state, count == 1
+                                         ? LC_COLLECTION_APPEND_ABSENT
+                                         : LC_COLLECTION_APPEND_COMMITTED);
+      /* Cross rotation after replay/repair of the interrupted append. */
+      for (unsigned int i = 0; i < 14; ++i) {
+        char id[32];
+        snprintf(id, sizeof(id), "next-%u", i);
+        append(f, id, "{}", ++count);
+      }
+      assert_true(((lc_collection_handle *)f->a->impl)->head.active > 1);
+      check(f, lc_collection_describe(f->a, &info, &f->error));
+      assert_int_equal(info.retention_expires_at_unix,
+                       phase == LC_COLLECTION_APPEND_STAGED ? 0 : 1020);
     }
-    int exited;
-    assert_int_equal(waitpid(child, &exited, 0), child);
-    assert_true(WIFEXITED(exited) && WEXITSTATUS(exited) == 45);
-    open_client(f, NULL, 0, 0);
-    bind_collection(f, "events", 0, &f->a);
-    check(f, lc_collection_describe(f->a, &info, &f->error));
-    uint64_t count = phase == LC_COLLECTION_APPEND_NAMED ? 1 : 2;
-    assert_true(info.live_count == count && info.upper_position == count);
-    assert_int_equal(info.retention_expires_at_unix, count == 1 ? 0 : 1020);
-    check(f, lc_collection_append_status(f->a, "after", &status, &f->error));
-    assert_int_equal(status.state, count == 1 ? LC_COLLECTION_APPEND_ABSENT
-                                              : LC_COLLECTION_APPEND_COMMITTED);
-    /* Cross rotation through any unreferenced segment left before head. It
-     * must never block appends or become committed merely by being present. */
-    for (unsigned int i = 0; i < 14; ++i) {
-      char id[32];
-      snprintf(id, sizeof(id), "next-%u", i);
-      append(f, id, "{}", ++count);
-    }
-    assert_true(((lc_collection_handle *)f->a->impl)->head.active > 1);
-    check(f, lc_collection_describe(f->a, &info, &f->error));
-    assert_int_equal(info.retention_expires_at_unix,
-                     phase == LC_COLLECTION_APPEND_NAMED ? 0 : 1020);
   }
 }
 
@@ -2258,7 +2357,13 @@ static void test_push_writer_abandoned_files_and_deferred_close(void **state) {
     bind_collection(f, "events", 1, &f->a);
     check(f, lc_collection_append_begin(f->a, &req, &writer, &f->error));
     check(f,
-          lc_collection_writer_write(writer, "{\"partial\":", 11, &f->error));
+          lc_collection_writer_write(writer, "{\"partial\":\"", 12, &f->error));
+    char *chunk = malloc(8192);
+    assert_non_null(chunk);
+    memset(chunk, 'x', 8192);
+    for (unsigned int i = 0; i < 16; ++i)
+      check(f, lc_collection_writer_write(writer, chunk, 8192, &f->error));
+    free(chunk);
     _exit(0);
   }
   int exited;
@@ -2266,7 +2371,7 @@ static void test_push_writer_abandoned_files_and_deferred_close(void **state) {
   assert_true(WIFEXITED(exited) && WEXITSTATUS(exited) == 0);
   open_client(f, NULL, 0, 0);
   bind_collection(f, "events", 0, &f->a);
-  assert_int_equal(pending_appends(f, NULL, 0), 1);
+  assert_int_equal(pending_appends(f, NULL, 0), 0);
   check(f, maintain(f, 0, 1, &maintained));
   assert_int_equal(pending_appends(f, NULL, 0), 0);
   req.append_id = "closed-during-commit";
@@ -2325,9 +2430,7 @@ static void test_push_writer_expiry_and_replacement_fence(void **state) {
   lc_pouch_maintenance_result_cleanup(NULL, &maintained);
 }
 
-static void
-test_push_writer_nosync_loss_recovers_parent_and_count(void **state) {
-  fixture *f = *state;
+static void writer_nosync_loss(fixture *f, int staged) {
   lc_collection_info info;
   lc_collection_append_res result;
   close_handles(f);
@@ -2344,14 +2447,26 @@ test_push_writer_nosync_loss_recovers_parent_and_count(void **state) {
     config.retention_seconds = 100;
     check(f, lc_client_create_collection(f->client, &config, &f->a, &f->error));
     append(f, "before", "{}", 1);
-    check(f, lc_collection_append_begin(f->a, &req, &writer, &f->error));
-    check(f, lc_collection_writer_write(writer, "{}", 2, &f->error));
-    check(f, lc_collection_writer_commit(writer, &result, &f->error));
-    lc_collection_writer_close(writer);
     lc_collection_handle *handle = f->a->impl;
+    off_t durable_end = lseek(handle->active_fd, 0, SEEK_END);
+    assert_true(durable_end > 0);
+    assert_int_equal(fsync(handle->active_fd), 0);
+    if (staged) {
+      check(f, lc_source_from_memory("{}", 2, &f->source, &f->error));
+      check(f, lc_collection_append_staged(f->a, &req, f->source, &result,
+                                           &f->error));
+      lc_source_close(f->source);
+      f->source = NULL;
+    } else {
+      check(f, lc_collection_append_begin(f->a, &req, &writer, &f->error));
+      check(f, lc_collection_writer_write(writer, "{}", 2, &f->error));
+      check(f, lc_collection_writer_commit(writer, &result, &f->error));
+      lc_collection_writer_close(writer);
+    }
     set_entry_limit(f, f->a, 10);
     if (fsync(handle->order.fd) != 0 || fsync(handle->ids.fd) != 0 ||
-        ftruncate(handle->active_fd, 0) != 0 || fsync(handle->active_fd) != 0)
+        ftruncate(handle->active_fd, durable_end) != 0 ||
+        fsync(handle->active_fd) != 0)
       _exit(11);
     _exit(0);
   }
@@ -2367,6 +2482,16 @@ test_push_writer_nosync_loss_recovers_parent_and_count(void **state) {
   set_collection_clock(f, 1020);
   check(f, append_parent_retention(f, "new", "{}", 30, &result));
   assert_int_equal(result.collection_retention_expires_at_unix, 1050);
+}
+
+static void
+test_push_writer_nosync_loss_recovers_parent_and_count(void **state) {
+  fixture *f = *state;
+  for (int staged = 0; staged < 2; ++staged) {
+    snprintf(f->endpoint, sizeof(f->endpoint), "pouch://%s/loss-%d", f->root,
+             staged);
+    writer_nosync_loss(f, staged);
+  }
 }
 
 static void
@@ -3980,8 +4105,1472 @@ test_selection_coalesced_nonmatches_preserve_input_budget(void **state) {
               f->read.upper_position == total);
 }
 
+static void test_collection_lease_lifecycle_and_mutation_fences(void **state) {
+  fixture *f = *state;
+  lc_collection_lease_req req = {"cai", 30, 0};
+  lc_collection_lease_info renewed;
+  lc_collection_info info;
+  lc_collection_append_res entry;
+  lc_collection_delete_res deleted;
+  lc_collection_metadata_req change = {1, 120, 0, 0};
+  lc_collection *other = NULL;
+  lc_pouch_maintenance_result maintained = {0};
+  bind_collection(f, "events", 1, &f->a);
+  set_collection_clock(f, 1000);
+  check(f, lc_collection_acquire(f->a, &req, &f->b, &f->error));
+  assert_int_equal(lc_collection_acquire(f->a, &req, &other, &f->error),
+                   LC_ERR_INVALID);
+  assert_string_equal(f->error.server_code, "collection_leased");
+  assert_null(other);
+  assert_int_equal(append_json(f, f->a, "unauthorized", "{}", &entry),
+                   LC_ERR_INVALID);
+  assert_int_equal(lc_collection_delete_entry(f->a, 1, &deleted, &f->error),
+                   LC_ERR_INVALID);
+  assert_int_equal(lc_collection_metadata(f->a, &change, &info, &f->error),
+                   LC_ERR_INVALID);
+  assert_int_equal(
+      lc_collection_entry_metadata(f->a, 1, &change, &entry, &f->error),
+      LC_ERR_INVALID);
+  assert_int_equal(lc_collection_drop(f->a, &f->error), LC_ERR_INVALID);
+  check(f, append_json(f, f->b, "first", "{\"n\":1}", &entry));
+  check(f, append_json(f, f->b, "second", "{\"n\":2}", &entry));
+  assert_int_equal(entry.position, 2);
+  check(f, read_into_memory(f, NULL));
+  assert_output(f, "{\"n\":1}\n{\"n\":2}\n");
+  check(f, lc_collection_metadata(f->b, &change, &info, &f->error));
+  assert_true(info.lease.active && info.retention_expires_at_unix == 1120);
+  set_collection_clock(f, 1010);
+  check(f, lc_collection_keepalive(f->b, 60, &renewed, &f->error));
+  assert_true(renewed.active && renewed.expires_at_unix == 1070);
+  check(f, lc_collection_describe(f->a, &info, &f->error));
+  assert_true(info.retention_expires_at_unix == 1120);
+  check(f, maintain(f, 1, 0, &maintained));
+  lc_pouch_maintenance_result_cleanup(NULL, &maintained);
+  check(f, lc_collection_describe(f->a, &info, &f->error));
+  assert_string_equal(info.lease.lease_id, renewed.lease_id);
+  check(f, lc_collection_release(f->b, &f->error));
+  f->b = NULL;
+  check(f, append_json(f, f->a, "third", "{\"n\":3}", &entry));
+  check(f, lc_collection_acquire(f->a, &req, &f->b, &f->error));
+  check(f, lc_collection_describe(f->b, &info, &f->error));
+  assert_true(info.lease.fencing_token > renewed.fencing_token);
+  check(f, append_json(f, f->b, "first", "{\"n\":1}", &entry));
+  assert_true(entry.duplicate && entry.position == 1);
+}
+
+static void
+test_collection_private_lease_takeover_expiry_and_stale_writers(void **state) {
+  fixture *f = *state;
+  lc_collection_lease_req req = {"cai", 30, 1};
+  lc_collection_info info;
+  lc_collection_lease_info renewed;
+  lc_collection_append_req append_req = {"pending", 0, 0, 0, 0};
+  lc_collection_append_res entry;
+  lc_collection_append_status_res status;
+  lc_collection_writer *writer = NULL;
+  lc_collection *replacement = NULL, *contender = NULL;
+  bind_collection(f, "events", 1, &f->a);
+  append(f, "seed", "{}", 1);
+  set_collection_clock(f, 1000);
+  check(f, lc_collection_acquire(f->a, &req, &f->b, &f->error));
+  check(f, lc_collection_describe(f->a, &info, &f->error));
+  assert_true(info.lease.active && info.lease.private_read);
+  assert_int_equal(read_into_memory(f, NULL), LC_ERR_INVALID);
+  assert_string_equal(f->error.server_code, "collection_private");
+  assert_output(f, "");
+  check(f, lc_collection_append_begin(f->b, &append_req, &writer, &f->error));
+  check(f, lc_collection_writer_write(writer, "{}", 2, &f->error));
+  check(f, lc_collection_takeover(f->a, &req, info.lease.lease_id, &replacement,
+                                  &f->error));
+  assert_int_equal(lc_collection_takeover(f->a, &req, info.lease.lease_id,
+                                          &contender, &f->error),
+                   LC_ERR_INVALID);
+  assert_string_equal(f->error.server_code, "lease_changed");
+  assert_null(contender);
+  assert_int_equal(lc_collection_writer_commit(writer, &entry, &f->error),
+                   LC_ERR_INVALID);
+  lc_collection_writer_close(writer);
+  assert_int_equal(lc_collection_keepalive(f->b, 60, &renewed, &f->error),
+                   LC_ERR_INVALID);
+  assert_int_equal(lc_collection_release(f->b, &f->error), LC_ERR_INVALID);
+  assert_int_equal(append_json(f, f->b, "old", "{}", &entry), LC_ERR_INVALID);
+  check(f, lc_collection_append_status(f->a, "pending", &status, &f->error));
+  assert_int_equal(status.state, LC_COLLECTION_APPEND_ABSENT);
+  check(f, append_json(f, replacement, "pending", "{}", &entry));
+  lc_collection *public_handle = f->a;
+  f->a = replacement;
+  check(f, read_into_memory(f, NULL));
+  assert_output(f, "{}\n{}\n");
+  f->a = public_handle;
+  set_collection_clock(f, 1030);
+  check(f, read_into_memory(f, NULL));
+  assert_output(f, "{}\n{}\n");
+  assert_int_equal(append_json(f, replacement, "expired", "{}", &entry),
+                   LC_ERR_INVALID);
+  check(f, append_json(f, f->a, "unleased", "{}", &entry));
+  lc_collection_close(replacement);
+}
+
+typedef struct lease_source {
+  lc_source source;
+  fixture *f;
+  lc_collection *replacement;
+  int called;
+  int release;
+} lease_source;
+
+static void *renew_during_upload(void *context) {
+  lease_source *source = context;
+  lc_error error;
+  lc_collection_lease_info info;
+  lc_error_init(&error);
+  assert_int_equal(lc_collection_keepalive(source->f->b, 60, &info, &error),
+                   LC_OK);
+  assert_true(info.active && info.expires_at_unix == 1070);
+  lc_error_cleanup(&error);
+  return NULL;
+}
+
+static void *takeover_during_upload(void *context) {
+  lease_source *source = context;
+  lc_collection_lease_req req = {"replacement", 30, 0};
+  lc_collection_info info;
+  lc_collection *loser = NULL;
+  lc_error error;
+  lc_error_init(&error);
+  assert_int_equal(lc_collection_acquire(source->f->a, &req, &loser, &error),
+                   LC_ERR_INVALID);
+  assert_null(loser);
+  assert_int_equal(lc_collection_describe(source->f->a, &info, &error), LC_OK);
+  assert_int_equal(lc_collection_takeover(source->f->a, &req,
+                                          info.lease.lease_id,
+                                          &source->replacement, &error),
+                   LC_OK);
+  assert_int_equal(lc_collection_takeover(source->f->a, &req,
+                                          info.lease.lease_id, &loser, &error),
+                   LC_ERR_INVALID);
+  assert_null(loser);
+  lc_error_cleanup(&error);
+  return NULL;
+}
+
+static size_t lease_source_read(lc_source *self, void *bytes, size_t capacity,
+                                lc_error *error) {
+  lease_source *source = (lease_source *)self;
+  lc_collection_lease_req req = {"replacement", 30, 0};
+  lc_collection *observer = source->release ? source->f->b : source->f->a;
+  (void)error;
+  if (source->called++)
+    return 0;
+  assert_true(capacity >= 2);
+  if (source->release == 2) {
+    set_collection_clock(source->f, 1030);
+    memcpy(bytes, "{}", 2);
+    return 2;
+  }
+  if (source->release == 3) {
+    pthread_t thread;
+    set_collection_clock(source->f, 1010);
+    assert_int_equal(pthread_create(&thread, NULL, renew_during_upload, source),
+                     0);
+    assert_int_equal(pthread_join(thread, NULL), 0);
+    memcpy(bytes, "{}", 2);
+    return 2;
+  }
+  if (source->release) {
+    check(source->f, lc_collection_acquire(observer, &req, &source->replacement,
+                                           &source->f->error));
+    check(source->f,
+          lc_collection_release(source->replacement, &source->f->error));
+    source->replacement = NULL;
+  } else {
+    pthread_t thread;
+    assert_int_equal(
+        pthread_create(&thread, NULL, takeover_during_upload, source), 0);
+    assert_int_equal(pthread_join(thread, NULL), 0);
+  }
+  memcpy(bytes, "{}", 2);
+  return 2;
+}
+
+static void test_collection_pull_publication_rechecks_ownership(void **state) {
+  fixture *f = *state;
+  lc_collection_lease_req req = {"cai", 30, 0};
+  lc_collection_append_req append_req = {"crossing", 0, 0, 0, 0};
+  lc_collection_append_res entry;
+  lc_collection_append_status_res status;
+  check(f, lc_pouch_crypto_generate_key_string(&f->crypto_key, &f->error));
+  for (int mode = 0; mode < 8; ++mode) {
+    append_req.append_id = "crossing";
+    close_handles(f);
+    snprintf(f->endpoint, sizeof(f->endpoint), "pouch://%s/pull-lease-%d",
+             f->root, mode);
+    open_client(f, mode & 4 ? f->crypto_key : NULL, (mode & 2) != 0, mode & 1);
+    bind_collection(f, "events", 1, &f->a);
+    set_collection_clock(f, 1000);
+    check(f, lc_collection_acquire(f->a, &req, &f->b, &f->error));
+    lease_source source = {{0}, f, NULL, 0, 0};
+    source.source.read = lease_source_read;
+    assert_int_equal(lc_collection_append(f->b, &append_req, &source.source,
+                                          &entry, &f->error),
+                     LC_ERR_INVALID);
+    check(f, lc_collection_append_status(f->a, "crossing", &status, &f->error));
+    assert_int_equal(status.state, LC_COLLECTION_APPEND_ABSENT);
+    check(f, lc_collection_release(source.replacement, &f->error));
+    source.replacement = NULL;
+    source.called = 0;
+    source.release = 1;
+    /* An unleased upload must also notice an entire acquire/release cycle. */
+    assert_int_equal(lc_collection_append(f->a, &append_req, &source.source,
+                                          &entry, &f->error),
+                     LC_ERR_INVALID);
+    check(f, append_json(f, f->a, "crossing", "{}", &entry));
+    assert_int_equal(entry.position, 1);
+    lc_collection_close(f->b);
+    f->b = NULL;
+    check(f, lc_collection_acquire(f->a, &req, &f->b, &f->error));
+    source.called = 0;
+    source.release = 3;
+    append_req.append_id = "renewed";
+    check(f, lc_collection_append(f->b, &append_req, &source.source, &entry,
+                                  &f->error));
+    assert_int_equal(entry.position, 2);
+  }
+}
+
+static void test_collection_lease_initial_creation_and_restart(void **state) {
+  fixture *f = *state;
+  lc_collection_lease_req req = {"initial", 60, 1};
+  lc_collection_config config = {0};
+  lc_collection_info info;
+  lc_collection_append_res entry;
+  config.name = "owned";
+  config.lease = &req;
+  set_collection_clock(f, 1000);
+  check(f, lc_client_create_collection(f->client, &config, &f->b, &f->error));
+  check(f, append_json(f, f->b, "saved", "{}", &entry));
+  config.lease = NULL;
+  close_handles(f);
+  open_client(f, NULL, 0, 0);
+  set_collection_clock(f, 1000);
+  check(f, lc_client_open_collection(f->client, &config, &f->a, &f->error));
+  check(f, lc_collection_describe(f->a, &info, &f->error));
+  assert_true(info.lease.active && info.live_count == 1);
+  assert_int_equal(append_json(f, f->a, "blocked", "{}", &entry),
+                   LC_ERR_INVALID);
+  check(f, lc_collection_takeover(f->a, &req, info.lease.lease_id, &f->b,
+                                  &f->error));
+  check(f, lc_collection_release(f->b, &f->error));
+  f->b = NULL;
+  check(f, read_into_memory(f, NULL));
+  assert_output(f, "{}\n");
+}
+
+static void test_collection_lease_cross_process_acquisition(void **state) {
+  fixture *f = *state;
+  int ready[2], start[2], result[2], winners = 0;
+  pid_t children[2];
+  char signal;
+  lc_collection_lease_req req = {"same-owner-label", 60, 0};
+  lc_collection_info info;
+  lc_collection_append_res entry;
+  bind_collection(f, "events", 1, &f->a);
+  set_collection_clock(f, 1000);
+  /* Fork from a closed root, not inherited live mutexes/lock descriptions. */
+  close_handles(f);
+  assert_int_equal(pipe(ready), 0);
+  assert_int_equal(pipe(start), 0);
+  for (int child = 0; child < 2; ++child) {
+    children[child] = fork();
+    assert_true(children[child] >= 0);
+    if (children[child] == 0) {
+      close(ready[0]);
+      close(start[1]);
+      close_handles(f);
+      open_client(f, NULL, 0, 0);
+      bind_collection(f, "events", 0, &f->a);
+      assert_int_equal(write(ready[1], "r", 1), 1);
+      assert_int_equal(read(start[0], &signal, 1), 1);
+      int rc = lc_collection_acquire(f->a, &req, &f->b, &f->error);
+      if (rc == LC_OK) {
+        check(f, append_json(f, f->b, "winner", "{}", &entry));
+        _exit(0); /* Deliberately abandon a live durable lease. */
+      }
+      assert_int_equal(rc, LC_ERR_INVALID);
+      assert_string_equal(f->error.server_code, "collection_leased");
+      _exit(9);
+    }
+  }
+  close(ready[1]);
+  close(start[0]);
+  for (int child = 0; child < 2; ++child)
+    assert_int_equal(read(ready[0], &signal, 1), 1);
+  assert_int_equal(write(start[1], "ss", 2), 2);
+  for (int child = 0; child < 2; ++child) {
+    assert_int_equal(waitpid(children[child], &result[child], 0),
+                     children[child]);
+    assert_true(WIFEXITED(result[child]));
+    assert_true(WEXITSTATUS(result[child]) == 0 ||
+                WEXITSTATUS(result[child]) == 9);
+    winners += WEXITSTATUS(result[child]) == 0;
+  }
+  close(ready[0]);
+  close(start[1]);
+  assert_int_equal(winners, 1);
+  open_client(f, NULL, 0, 0);
+  bind_collection(f, "events", 0, &f->a);
+  check(f, lc_collection_describe(f->a, &info, &f->error));
+  assert_true(info.lease.active && info.live_count == 1);
+  check(f, lc_collection_takeover(f->a, &req, info.lease.lease_id, &f->b,
+                                  &f->error));
+  check(f, append_json(f, f->b, "recovered", "{}", &entry));
+  assert_int_equal(entry.position, 2);
+}
+
+static int
+acquire_private_during_read(void *context,
+                            const lc_collection_read_metadata *metadata,
+                            lc_error *error) {
+  fixture *f = context;
+  lc_collection_lease_req req = {"private", 30, 1};
+  lc_collection *peer = NULL;
+  (void)error;
+  if (metadata->kind == LC_COLLECTION_READ_METADATA_ENTRY && f->b == NULL) {
+    bind_collection(f, "events", 0, &peer);
+    check(f, lc_collection_acquire(peer, &req, &f->b, &f->error));
+    lc_collection_close(peer);
+  }
+  return LC_OK;
+}
+
+static void
+test_collection_private_lease_preserves_admitted_reads(void **state) {
+  fixture *f = *state;
+  lc_collection_read_opts opts = {0};
+  lc_collection_info info;
+  lc_collection_append_res entry;
+  lc_collection_metadata_req expiry = {1, 1, 0, 0};
+  lc_pouch_maintenance_result maintained = {0};
+  bind_collection(f, "events", 1, &f->a);
+  set_collection_clock(f, 1000);
+  append(f, "one", "{}", 1);
+  append(f, "two", "{}", 2);
+  opts.on_metadata = acquire_private_during_read;
+  opts.metadata_context = f;
+  check(f, read_into_memory(f, &opts));
+  assert_output(f, "{}\n{}\n");
+  lc_collection_read_opts_init(&opts);
+  char *cursor = strdup(f->read.checkpoint_cursor);
+  opts.cursor = cursor;
+  assert_int_equal(read_into_memory(f, &opts), LC_ERR_INVALID);
+  free(cursor);
+  check(f, lc_collection_metadata(f->b, &expiry, &info, &f->error));
+  set_collection_clock(f, 1002);
+  check(f, maintain(f, 0, 0, &maintained));
+  lc_pouch_maintenance_result_cleanup(NULL, &maintained);
+  assert_int_equal(append_json(f, f->b, "removed", "{}", &entry),
+                   LC_ERR_INVALID);
+}
+
+static void
+test_collection_lease_codecs_restart_and_failed_control_write(void **state) {
+  fixture *f = *state;
+  lc_collection_lease_req req = {"cai", 60, 1};
+  lc_collection_info before, after;
+  lc_collection_lease_info renewed;
+  lc_collection_append_res entry;
+  check(f, lc_pouch_crypto_generate_key_string(&f->crypto_key, &f->error));
+  for (int mode = 0; mode < 8; ++mode) {
+    close_handles(f);
+    snprintf(f->endpoint, sizeof(f->endpoint), "pouch://%s/lease-codec-%d",
+             f->root, mode);
+    open_client(f, mode & 4 ? f->crypto_key : NULL, (mode & 2) != 0, mode & 1);
+    set_collection_clock(f, 1000);
+    bind_collection(f, "events", 1, &f->a);
+    check(f, lc_collection_acquire(f->a, &req, &f->b, &f->error));
+    check(f, append_json(f, f->b, "original", "{\"n\":1}", &entry));
+    check(f, lc_collection_describe(f->a, &before, &f->error));
+    close_handles(f);
+    /* Opening with the opposite compression setting converts the root. */
+    open_client(f, mode & 4 ? f->crypto_key : NULL, (mode & 2) == 0, mode & 1);
+    set_collection_clock(f, 1000);
+    bind_collection(f, "events", 0, &f->a);
+    check(f, lc_collection_describe(f->a, &after, &f->error));
+    assert_true(after.lease.active && after.live_count == 1);
+    assert_string_equal(before.lease.lease_id, after.lease.lease_id);
+    check(f, lc_collection_takeover(f->a, &req, after.lease.lease_id, &f->b,
+                                    &f->error));
+    check(f, append_json(f, f->b, "original", "{\"n\":1}", &entry));
+    assert_true(entry.duplicate && entry.position == 1);
+    lc_collection_handle *handle = f->b->impl;
+    assert_int_equal(chmod(handle->directory, 0500), 0);
+    assert_int_equal(lc_collection_keepalive(f->b, 120, &renewed, &f->error),
+                     LC_ERR_TRANSPORT);
+    assert_int_equal(lc_collection_release(f->b, &f->error), LC_ERR_TRANSPORT);
+    assert_int_equal(chmod(handle->directory, 0700), 0);
+    check(f, lc_collection_describe(f->b, &after, &f->error));
+    assert_true(after.lease.active && after.lease.expires_at_unix == 1060);
+    check(f, append_json(f, f->b, "after-failure", "{}", &entry));
+    check(f, lc_collection_release(f->b, &f->error));
+    f->b = NULL;
+    check(f, read_into_memory(f, NULL));
+    assert_output(f, "{\"n\":1}\n{}\n");
+  }
+}
+
+static void
+test_collection_lease_expiry_at_publication_and_invalid_requests(void **state) {
+  fixture *f = *state;
+  lc_collection_lease_req req = {"cai", 0, 0};
+  lc_collection_append_req append_req = {"expired", 0, 0, 0, 0};
+  lc_collection_append_res entry;
+  lc_collection_append_status_res status;
+  lc_collection_lease_info renewed;
+  lc_collection *owned = NULL;
+  bind_collection(f, "events", 1, &f->a);
+  set_collection_clock(f, 1000);
+  assert_int_equal(lc_collection_acquire(f->a, &req, &owned, &f->error),
+                   LC_ERR_INVALID);
+  assert_null(owned);
+  req.ttl_seconds = 30;
+  req.owner = "\xff";
+  assert_int_equal(lc_collection_acquire(f->a, &req, &owned, &f->error),
+                   LC_ERR_INVALID);
+  req.owner = "cai";
+  check(f, lc_collection_acquire(f->a, &req, &f->b, &f->error));
+  lease_source source = {{0}, f, NULL, 0, 2};
+  source.source.read = lease_source_read;
+  assert_int_equal(lc_collection_append(f->b, &append_req, &source.source,
+                                        &entry, &f->error),
+                   LC_ERR_INVALID);
+  assert_string_equal(f->error.server_code, "lease_lost");
+  assert_int_equal(lc_collection_keepalive(f->b, 30, &renewed, &f->error),
+                   LC_ERR_INVALID);
+  check(f, lc_collection_append_status(f->a, "expired", &status, &f->error));
+  assert_int_equal(status.state, LC_COLLECTION_APPEND_ABSENT);
+  check(f, append_json(f, f->a, "expired", "{}", &entry));
+}
+
+static void
+test_collection_lease_takeover_survives_nosync_tail_loss(void **state) {
+  fixture *f = *state;
+  lc_collection_lease_req req = {"owner", 60, 0};
+  lc_collection_info info;
+  lc_collection_append_res entry;
+  lc_collection_append_status_res status;
+  int channel[2], exited;
+  char replacement[LC_XID_STRING_SIZE];
+  close_handles(f);
+  assert_int_equal(pipe(channel), 0);
+  pid_t child = fork();
+  assert_true(child >= 0);
+  if (child == 0) {
+    struct stat surviving;
+    close(channel[0]);
+    open_client(f, NULL, 0, 0);
+    set_collection_clock(f, 1000);
+    bind_collection(f, "events", 1, &f->a);
+    check(f, lc_collection_acquire(f->a, &req, &f->b, &f->error));
+    check(f, append_json(f, f->b, "surviving", "{}", &entry));
+    lc_collection_handle *handle = f->b->impl;
+    assert_int_equal(fstat(handle->active_fd, &surviving), 0);
+    assert_int_equal(fsync(handle->active_fd), 0);
+    lc_u64 segment = handle->head.active;
+    check(f, append_json(f, f->b, "lost", "{}", &entry));
+    assert_true(handle->head.active == segment);
+    check(f, lc_collection_describe(f->a, &info, &f->error));
+    lc_collection *owned = NULL;
+    check(f, lc_collection_takeover(f->a, &req, info.lease.lease_id, &owned,
+                                    &f->error));
+    check(f, lc_collection_describe(owned, &info, &f->error));
+    assert_int_equal(
+        write(channel[1], info.lease.lease_id, sizeof(replacement)),
+        sizeof(replacement));
+    assert_int_equal(ftruncate(handle->active_fd, surviving.st_size), 0);
+    assert_int_equal(fsync(handle->active_fd), 0);
+    assert_int_equal(fsync(handle->order.fd), 0);
+    assert_int_equal(fsync(handle->ids.fd), 0);
+    _exit(0);
+  }
+  close(channel[1]);
+  assert_int_equal(read(channel[0], replacement, sizeof(replacement)),
+                   sizeof(replacement));
+  assert_int_equal(waitpid(child, &exited, 0), child);
+  assert_true(WIFEXITED(exited) && WEXITSTATUS(exited) == 0);
+  close(channel[0]);
+  open_client(f, NULL, 0, 0);
+  set_collection_clock(f, 1000);
+  bind_collection(f, "events", 0, &f->a);
+  check(f, lc_collection_describe(f->a, &info, &f->error));
+  assert_true(info.live_count == 1 && info.lease.active &&
+              info.lease.fencing_token == 2);
+  assert_string_equal(info.lease.lease_id, replacement);
+  check(f, lc_collection_append_status(f->a, "lost", &status, &f->error));
+  assert_int_equal(status.state, LC_COLLECTION_APPEND_ABSENT);
+  check(f, lc_collection_takeover(f->a, &req, replacement, &f->b, &f->error));
+  check(f, append_json(f, f->b, "lost", "{}", &entry));
+  assert_true(!entry.duplicate && entry.position == 2);
+}
+
+static void
+test_push_buffer_boundaries_codecs_and_packed_segments(void **state) {
+  fixture *f = *state;
+  const size_t sizes[] = {65535, 65536, 65537, 131072};
+  char *body = malloc(131073), *expected = malloc(512U * 1024U);
+  assert_non_null(body);
+  assert_non_null(expected);
+  check(f, lc_pouch_crypto_generate_key_string(&f->crypto_key, &f->error));
+  for (int mode = 0; mode < 8; ++mode) {
+    close_handles(f);
+    snprintf(f->endpoint, sizeof(f->endpoint), "pouch://%s/buffer-%d", f->root,
+             mode);
+    open_client(f, mode & 1 ? f->crypto_key : NULL, (mode & 2) != 0,
+                (mode & 4) != 0);
+    ((lc_client_handle *)f->client)->pouch->segment_target_bytes =
+        1024U * 1024U;
+    bind_collection(f, "events", 1, &f->a);
+    lc_collection_append_req req = {0};
+    lc_collection_append_res entry;
+    lc_collection_writer *writer = NULL;
+    char id[32];
+    /* Small pushes share the same canonical inode, including with codecs. */
+    for (unsigned int i = 0; i < 64; ++i) {
+      snprintf(id, sizeof(id), "small-%u", i);
+      req.append_id = id;
+      check(f, lc_collection_append_begin(f->a, &req, &writer, &f->error));
+      check(f, lc_collection_writer_write(writer, "{}", 2, &f->error));
+      check(f, lc_collection_writer_commit(writer, &entry, &f->error));
+      lc_collection_writer_close(writer);
+    }
+    assert_int_equal(((lc_collection_handle *)f->a->impl)->head.active, 1);
+    size_t used = 0;
+    for (unsigned int i = 0; i < 64; ++i) {
+      memcpy(expected + used, "{}\n", 3);
+      used += 3;
+    }
+    for (unsigned int i = 0; i < 4; ++i) {
+      size_t size = sizes[i];
+      memcpy(body, "{\"v\":\"", 6);
+      unsigned long random = 17;
+      static const char alphabet[] =
+          "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
+      for (size_t at = 6; at < size - 2; ++at) {
+        random = (random * 1664525UL + 1013904223UL) & 0xffffffffUL;
+        body[at] = alphabet[(random >> 24) & 63];
+      }
+      memcpy(body + size - 2, "\"}", 3);
+      snprintf(id, sizeof(id), "boundary-%u", i);
+      req.append_id = id;
+      check(f, lc_collection_append_begin(f->a, &req, &writer, &f->error));
+      for (size_t at = 0; at < size;) {
+        size_t count = size - at < 997 ? size - at : 997;
+        check(f,
+              lc_collection_writer_write(writer, body + at, count, &f->error));
+        at += count;
+      }
+      check(f, lc_collection_writer_commit(writer, &entry, &f->error));
+      assert_int_equal(entry.bytes, size);
+      lc_collection_writer_close(writer);
+      memcpy(expected + used, body, size);
+      used += size;
+      expected[used++] = '\n';
+    }
+    assert_int_equal(pending_appends(f, NULL, 0), 0);
+    close_handles(f);
+    open_client(f, mode & 1 ? f->crypto_key : NULL, (mode & 2) != 0,
+                (mode & 4) != 0);
+    bind_collection(f, "events", 0, &f->a);
+    check(f, read_into_memory(f, NULL));
+    const void *read;
+    size_t count;
+    check(f, lc_sink_memory_bytes(f->sink, &read, &count, &f->error));
+    assert_int_equal(count, used);
+    assert_memory_equal(read, expected, used);
+    lc_pouch_maintenance_result result = {0};
+    check(f, maintain(f, 1, 0, &result));
+    lc_pouch_maintenance_result_cleanup(NULL, &result);
+    check(f, read_into_memory(f, NULL));
+    check(f, lc_sink_memory_bytes(f->sink, &read, &count, &f->error));
+    assert_int_equal(count, used);
+    assert_memory_equal(read, expected, used);
+  }
+  free(body);
+  free(expected);
+}
+
+static void
+test_push_spool_creation_failure_is_terminal_and_retryable(void **state) {
+  fixture *f = *state;
+  lc_collection_writer *writer = NULL;
+  lc_collection_append_req req = {"io-failure"};
+  lc_collection_append_res entry;
+  char moved[768];
+  char *chunk = malloc(16384);
+  assert_non_null(chunk);
+  memset(chunk, 'x', 16384);
+  bind_collection(f, "events", 1, &f->a);
+  lc_collection_handle *handle = f->a->impl;
+  snprintf(moved, sizeof(moved), "%s-away", handle->directory);
+  check(f, lc_collection_append_begin(f->a, &req, &writer, &f->error));
+  assert_int_equal(rename(handle->directory, moved), 0);
+  check(f, lc_collection_writer_write(writer, "{\"v\":\"", 6, &f->error));
+  int rc = LC_OK;
+  for (unsigned int i = 0; i < 12 && rc == LC_OK; ++i)
+    rc = lc_collection_writer_write(writer, chunk, 16384, &f->error);
+  assert_int_equal(rename(moved, handle->directory), 0);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_int_equal(lc_collection_writer_commit(writer, &entry, &f->error),
+                   LC_ERR_INVALID);
+  check(f, lc_collection_writer_abort(writer, &f->error));
+  lc_collection_writer_close(writer);
+  check(f, append_json(f, f->a, req.append_id, "{}", &entry));
+  assert_true(entry.position == 1 && !entry.duplicate);
+  free(chunk);
+}
+
+static void
+test_packed_push_metadata_survives_compression_conversion(void **state) {
+  fixture *f = *state;
+  lc_collection_append_req req = {0};
+  lc_collection_metadata_req metadata = {1, 60};
+  lc_collection_append_res entry;
+  lc_collection_writer *writer = NULL;
+  check(f, lc_pouch_crypto_generate_key_string(&f->crypto_key, &f->error));
+  for (int mode = 0; mode < 4; ++mode) {
+    close_handles(f);
+    snprintf(f->endpoint, sizeof(f->endpoint), "pouch://%s/packed-recode-%d",
+             f->root, mode);
+    open_client(f, mode & 1 ? f->crypto_key : NULL, (mode & 2) != 0, 0);
+    ((lc_client_handle *)f->client)->pouch->segment_target_bytes =
+        1024U * 1024U;
+    bind_collection(f, "events", 1, &f->a);
+    for (unsigned int i = 1; i <= 3; ++i) {
+      char id[32], body[32];
+      snprintf(id, sizeof(id), "push-%u", i);
+      snprintf(body, sizeof(body), "{\"n\":%u}", i);
+      req.append_id = id;
+      check(f, lc_collection_append_begin(f->a, &req, &writer, &f->error));
+      check(f,
+            lc_collection_writer_write(writer, body, strlen(body), &f->error));
+      check(f, lc_collection_writer_commit(writer, &entry, &f->error));
+      lc_collection_writer_close(writer);
+    }
+    assert_int_equal(((lc_collection_handle *)f->a->impl)->head.active, 1);
+    check(f,
+          lc_collection_entry_metadata(f->a, 2, &metadata, &entry, &f->error));
+    close_handles(f);
+    open_client(f, mode & 1 ? f->crypto_key : NULL, (mode & 2) == 0, 0);
+    bind_collection(f, "events", 0, &f->a);
+    check(f, read_into_memory(f, NULL));
+    assert_output(f, "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n");
+    lc_pouch_maintenance_result result = {0};
+    check(f, maintain(f, 1, 0, &result));
+    lc_pouch_maintenance_result_cleanup(NULL, &result);
+    close_handles(f);
+    open_client(f, mode & 1 ? f->crypto_key : NULL, (mode & 2) != 0, 0);
+    bind_collection(f, "events", 0, &f->a);
+    check(f, read_into_memory(f, NULL));
+    assert_output(f, "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n");
+    lc_collection_append_status_res status;
+    check(f, lc_collection_append_status(f->a, "push-2", &status, &f->error));
+    assert_int_equal(status.entry.retention_expires_at_unix,
+                     entry.retention_expires_at_unix);
+  }
+}
+
+typedef struct push_lease_race {
+  fixture *f;
+  int rc;
+  int fired;
+} push_lease_race;
+
+static void *push_acquire_peer(void *context) {
+  push_lease_race *race = context;
+  lc_collection_lease_req req = {"peer", 30, 0};
+  lc_error error;
+  lc_error_init(&error);
+  race->rc = lc_collection_acquire(race->f->a, &req, &race->f->b, &error);
+  lc_error_cleanup(&error);
+  return NULL;
+}
+
+static int push_lease_after_copy(void *context, lc_collection *collection,
+                                 int phase, lc_error *error) {
+  push_lease_race *race = context;
+  pthread_t thread;
+  (void)collection;
+  (void)error;
+  if (phase == LC_COLLECTION_APPEND_STAGED && !race->fired) {
+    race->fired = 1;
+    assert_int_equal(pthread_create(&thread, NULL, push_acquire_peer, race), 0);
+    assert_int_equal(pthread_join(thread, NULL), 0);
+  }
+  return LC_OK;
+}
+
+static void
+test_push_lease_change_after_copy_rolls_back_before_next_append(void **state) {
+  fixture *f = *state;
+  push_lease_race race = {f, LC_OK, 0};
+  lc_collection_append_req req = {"fenced-after-copy"};
+  lc_collection_append_res entry;
+  lc_collection_append_status_res status;
+  lc_collection_writer *writer = NULL;
+  bind_collection(f, "events", 1, &f->a);
+  check(f, lc_collection_append_begin(f->a, &req, &writer, &f->error));
+  check(f, lc_collection_writer_write(writer, "{}", 2, &f->error));
+  lc_collection_append_test_hook = push_lease_after_copy;
+  lc_collection_append_test_context = &race;
+  assert_int_equal(lc_collection_writer_commit(writer, &entry, &f->error),
+                   LC_ERR_INVALID);
+  lc_collection_append_test_hook = NULL;
+  lc_collection_append_test_context = NULL;
+  assert_true(race.fired && race.rc == LC_OK);
+  lc_collection_writer_close(writer);
+  check(f,
+        lc_collection_append_status(f->a, req.append_id, &status, &f->error));
+  assert_int_equal(status.state, LC_COLLECTION_APPEND_ABSENT);
+  check(f, lc_collection_release(f->b, &f->error));
+  f->b = NULL;
+  check(f, append_json(f, f->a, req.append_id, "{}", &entry));
+  assert_true(entry.position == 1 && !entry.duplicate);
+}
+
+typedef struct lease_allocations {
+  size_t live;
+  size_t largest;
+  int fail;
+} lease_allocations;
+
+static void *lease_allocate(void *context, size_t size) {
+  lease_allocations *stats = context;
+  void *bytes = stats->fail ? NULL : malloc(size);
+  if (bytes != NULL && size > stats->largest)
+    stats->largest = size;
+  if (bytes != NULL)
+    ++stats->live;
+  return bytes;
+}
+static void lease_free(void *context, void *bytes) {
+  lease_allocations *stats = context;
+  if (bytes != NULL) {
+    --stats->live;
+    free(bytes);
+  }
+}
+static void *lease_reallocate(void *context, void *bytes, size_t size) {
+  lease_allocations *stats = context;
+  if (bytes == NULL)
+    return lease_allocate(context, size);
+  if (size == 0) {
+    lease_free(context, bytes);
+    return NULL;
+  }
+  void *result = stats->fail ? NULL : realloc(bytes, size);
+  if (result != NULL && size > stats->largest)
+    stats->largest = size;
+  return result;
+}
+
+static void
+test_push_staging_allocation_failure_and_bounded_heap(void **state) {
+  fixture *f = *state;
+  lease_allocations stats = {0};
+  lc_client_config config;
+  lc_pouch_settings settings;
+  const char *endpoints[] = {f->endpoint};
+  lc_collection_append_req req = {"bounded"};
+  lc_collection_append_res entry;
+  lc_collection_writer *writer = NULL;
+  char *chunk = malloc(16384);
+  assert_non_null(chunk);
+  memset(chunk, 'x', 16384);
+  close_handles(f);
+  lc_client_config_init(&config);
+  lc_pouch_settings_init(&settings);
+  settings.set_mask =
+      LC_POUCH_SETTING_BACKGROUND_COMPACTION | LC_POUCH_SETTING_QUERY_INDEXING;
+  config.endpoints = endpoints;
+  config.endpoint_count = 1;
+  config.default_namespace = "journal";
+  config.pouch_settings = &settings;
+  config.allocator.malloc_fn = lease_allocate;
+  config.allocator.realloc_fn = lease_reallocate;
+  config.allocator.free_fn = lease_free;
+  config.allocator.context = &stats;
+  check(f, lc_client_open(&config, &f->client, &f->error));
+  bind_collection(f, "events", 1, &f->a);
+  check(f, lc_collection_append_begin(f->a, &req, &writer, &f->error));
+  stats.largest = 0;
+  check(f, lc_collection_writer_write(writer, "{\"v\":\"", 6, &f->error));
+  for (unsigned int i = 0; i < 256; ++i)
+    check(f, lc_collection_writer_write(writer, chunk, 16384, &f->error));
+  check(f, lc_collection_writer_write(writer, "\"}", 2, &f->error));
+  check(f, lc_collection_writer_commit(writer, &entry, &f->error));
+  lc_collection_writer_close(writer);
+  assert_true(entry.bytes == 4U * 1024U * 1024U + 8U);
+  assert_true(stats.largest <= 65536U);
+  for (int failure = 0; failure < 2; ++failure) {
+    req.append_id = failure ? "fail-write" : "fail-finish";
+    check(f, lc_collection_append_begin(f->a, &req, &writer, &f->error));
+    check(f, lc_collection_writer_write(writer, failure ? "{\"v\":\"" : "{}",
+                                        failure ? 6 : 2, &f->error));
+    stats.fail = 1;
+    int rc = LC_OK;
+    if (failure) {
+      for (unsigned int i = 0; i < 16 && rc == LC_OK; ++i)
+        rc = lc_collection_writer_write(writer, chunk, 16384, &f->error);
+    } else {
+      rc = lc_collection_writer_commit(writer, &entry, &f->error);
+    }
+    stats.fail = 0;
+    assert_int_equal(rc, LC_ERR_NOMEM);
+    check(f, lc_collection_writer_abort(writer, &f->error));
+    lc_collection_writer_close(writer);
+    check(f, append_json(f, f->a, req.append_id, "{}", &entry));
+    assert_false(entry.duplicate);
+  }
+  close_handles(f);
+  assert_int_equal(stats.live, 0);
+  free(chunk);
+}
+
+static void
+test_collection_lease_allocation_failure_keeps_ownership_free(void **state) {
+  fixture *f = *state;
+  lease_allocations stats = {0};
+  lc_client_config config;
+  lc_pouch_settings settings;
+  lc_collection_lease_req req = {"cai", 30, 0};
+  lc_collection_info info;
+  const char *endpoints[] = {f->endpoint};
+  close_handles(f);
+  lc_client_config_init(&config);
+  lc_pouch_settings_init(&settings);
+  settings.set_mask = LC_POUCH_SETTING_BACKGROUND_COMPACTION;
+  config.endpoints = endpoints;
+  config.endpoint_count = 1;
+  config.default_namespace = "journal";
+  config.pouch_settings = &settings;
+  config.allocator.malloc_fn = lease_allocate;
+  config.allocator.realloc_fn = lease_reallocate;
+  config.allocator.free_fn = lease_free;
+  config.allocator.context = &stats;
+  check(f, lc_client_open(&config, &f->client, &f->error));
+  bind_collection(f, "events", 1, &f->a);
+  stats.fail = 1;
+  assert_int_equal(lc_collection_acquire(f->a, &req, &f->b, &f->error),
+                   LC_ERR_NOMEM);
+  assert_null(f->b);
+  stats.fail = 0;
+  check(f, lc_collection_describe(f->a, &info, &f->error));
+  assert_false(info.lease.active);
+  assert_int_equal(info.lease.fencing_token, 0);
+  check(f, lc_collection_acquire(f->a, &req, &f->b, &f->error));
+  close_handles(f);
+  assert_int_equal(stats.live, 0);
+}
+
+typedef struct lease_journal_record {
+  char record_type[8];
+  lonejson_uint64 sequence;
+  char history_append[64];
+} lease_journal_record;
+static const lonejson_field lease_journal_fields[] = {
+    LONEJSON_FIELD_STRING_FIXED_REQ(lease_journal_record, record_type,
+                                    "record_type", LONEJSON_OVERFLOW_FAIL),
+    LONEJSON_FIELD_U64(lease_journal_record, sequence, "sequence"),
+    LONEJSON_FIELD_STRING_FIXED_REQ(lease_journal_record, history_append,
+                                    "history_append", LONEJSON_OVERFLOW_FAIL)};
+LONEJSON_MAP_DEFINE(lease_journal_map, lease_journal_record,
+                    lease_journal_fields);
+
+static size_t lease_journal_read(void *context, void *bytes, size_t count,
+                                 lc_error *error) {
+  lonejson_generator *generator = context;
+  size_t written = 0;
+  int eof;
+  if (count > 7)
+    count =
+        7; /* Fragment the local JSON encoder without buffering its value. */
+  if (lonejson_generator_read(generator, bytes, count, &written, &eof) !=
+      LONEJSON_STATUS_OK) {
+    lc_error_set(error, LC_ERR_TRANSPORT, 0, "journal encoding failed",
+                 generator->error.message, NULL, NULL);
+    return 0;
+  }
+  return written;
+}
+
+static void
+test_collection_lease_generated_events_and_checkpoints(void **state) {
+  fixture *f = *state;
+  lc_collection_lease_req lease = {"conversation", 30, 0};
+  lc_collection_append_req req = {NULL, 0, 0, 1, 86400};
+  lc_collection_append_res appended;
+  lc_collection_info info;
+  lonejson_error error;
+  lonejson *json = lonejson_new(NULL, &error);
+  lease_journal_record record = {0};
+  lonejson_generator generator;
+  lc_source *source;
+  char id[32];
+  assert_non_null(json);
+  bind_collection(f, "events", 1, &f->a);
+  set_collection_clock(f, 1000);
+  check(f, lc_collection_acquire(f->a, &lease, &f->b, &f->error));
+  strcpy(record.history_append, "already produced text\nwith \"quotes\"");
+  for (unsigned int i = 0; i < 6; ++i) {
+    unsigned int sequence = i == 5 ? 5 : i + 1;
+    strcpy(record.record_type, sequence % 2 ? "event" : "commit");
+    record.sequence = sequence;
+    snprintf(id, sizeof(id), "journal-%u", sequence);
+    req.append_id = id;
+    set_collection_clock(f, 1000 + i);
+    assert_int_equal(
+        lonejson_generator_init(json, &generator, &lease_journal_map, &record),
+        LONEJSON_STATUS_OK);
+    check(f, lc_source_from_callbacks(lease_journal_read, NULL, NULL,
+                                      &generator, &source, &f->error));
+    check(f, lc_collection_append(f->b, &req, source, &appended, &f->error));
+    lc_source_close(source);
+    lonejson_generator_cleanup(&generator);
+    assert_true(appended.position == sequence &&
+                appended.duplicate == (i == 5));
+  }
+  lonejson_free(json);
+  check(f, lc_collection_describe(f->a, &info, &f->error));
+  assert_true(info.live_count == 5 && info.lease.active &&
+              info.lease.expires_at_unix == 1030);
+  assert_true(info.retention_expires_at_unix == 1004 + 86400);
+  check(f, read_into_memory(f, NULL));
+  assert_int_equal(f->read.completed_records, 5);
+  check(f, lc_collection_release(f->b, &f->error));
+  f->b = NULL;
+}
+
+/* The released v0.24.0 head contains the same 96 semantic bytes followed by
+ * 28 reserved zero bytes and its own CRC. This fixture never rewrites entries.
+ */
+static void migration_seal(unsigned char *bytes, size_t size) {
+  unsigned long crc = crc32(0L, bytes, (uInt)(size - 4));
+  for (size_t i = 0; i < 4; ++i)
+    bytes[size - 4 + i] = (unsigned char)(crc >> (8 * i));
+}
+
+static void migration_read(const char *path, void *bytes, size_t size) {
+  int fd = open(path, O_RDONLY);
+  assert_true(fd >= 0);
+  assert_int_equal(read(fd, bytes, size), size);
+  assert_int_equal(close(fd), 0);
+}
+
+static void migration_old_head(fixture *f, const char *path,
+                               unsigned char old[128]) {
+  migration_read(path, old, 96);
+  memset(old + 96, 0, 32);
+  migration_seal(old, 128);
+  check(f,
+        lc_pouch_path_write_bytes_file_mode(path, old, 128, 0600, &f->error));
+}
+
+static int migration_manifest(fixture *f, int strip) {
+  char path[640], bytes[768] = {0}, result[768] = {0};
+  char *line, *save = NULL;
+  snprintf(path, sizeof(path), "%s/manifest", f->endpoint + 8);
+  int fd = open(path, O_RDONLY);
+  assert_true(fd >= 0);
+  ssize_t n = read(fd, bytes, sizeof(bytes) - 1);
+  assert_true(n > 0 && n < (ssize_t)sizeof(bytes) - 1);
+  close(fd);
+  int present = strstr(bytes, "collection_head_bytes=384\n") != NULL;
+  if (!strip)
+    return present;
+  for (line = strtok_r(bytes, "\n", &save); line != NULL;
+       line = strtok_r(NULL, "\n", &save)) {
+    if (strncmp(line, "collection_head_bytes=", 22) == 0)
+      continue;
+    strcat(result, line);
+    strcat(result, "\n");
+  }
+  check(f, lc_pouch_path_write_text_file(path, result, &f->error));
+  return present;
+}
+
+static int migration_open(fixture *f) {
+  const char *endpoints[] = {f->endpoint};
+  lc_client_config config;
+  lc_pouch_settings settings;
+  lc_client_config_init(&config);
+  lc_pouch_settings_init(&settings);
+  settings.set_mask =
+      LC_POUCH_SETTING_SINGLE_WRITER | LC_POUCH_SETTING_BACKGROUND_COMPACTION;
+  settings.single_writer = 0;
+  settings.background_compaction_enabled = 0;
+  config.endpoints = endpoints;
+  config.endpoint_count = 1;
+  config.default_namespace = "journal";
+  config.pouch_settings = &settings;
+  return lc_client_open(&config, &f->client, &f->error);
+}
+
+static int migration_count(void *context, const char *path, int published,
+                           lc_error *error) {
+  (void)path;
+  (void)error;
+  if (published)
+    ++*(int *)context;
+  return LC_OK;
+}
+
+static void test_collection_migration_preserves_data_and_codecs(void **state) {
+  fixture *f = *state;
+  unsigned char old[128], current[LC_COLLECTION_HEAD_BYTES];
+  lc_collection_metadata_req policy = {1, 86400, 1, 1000};
+  lc_collection_info before, after;
+  lc_collection_append_res entry;
+  lc_collection_lease_req lease = {"upgraded", 60, 0};
+  struct stat old_body, new_body, head_stat;
+  char *head, *body, leaf[64];
+  int calls = 0;
+  check(f, lc_pouch_crypto_generate_key_string(&f->crypto_key, &f->error));
+  for (int mode = 0; mode < 8; ++mode) {
+    close_handles(f);
+    snprintf(f->endpoint, sizeof(f->endpoint), "pouch://%s/migrate-%d", f->root,
+             mode);
+    open_client(f, mode & 4 ? f->crypto_key : NULL, mode & 2, mode & 1);
+    bind_collection(f, "events", 1, &f->a);
+    append(f, "deleted", "{}", 1);
+    check(f,
+          append_retention(f, f->a, "surviving", "{\"n\":2}", 1, 3600, &entry));
+    lc_collection_delete_res deleted;
+    check(f, lc_collection_delete_entry(f->a, 1, &deleted, &f->error));
+    check(f, lc_collection_metadata(f->a, &policy, &before, &f->error));
+    lc_collection_handle *handle = f->a->impl;
+    head = strdup(handle->head_path);
+    check(f, lc_collection_record_path(handle, handle->head.active, &body, leaf,
+                                       &f->error));
+    assert_int_equal(stat(body, &old_body), 0);
+    close_handles(f);
+    migration_old_head(f, head, old);
+    migration_manifest(f, 1);
+    char manifest_path[640];
+    snprintf(manifest_path, sizeof(manifest_path), "%s/manifest",
+             f->endpoint + 8);
+    assert_int_equal(chmod(manifest_path, 0600), 0);
+    open_client(f, mode & 4 ? f->crypto_key : NULL, mode & 2, mode & 1);
+    /* The root open itself has completed the upgrade, before any receiver. */
+    assert_true(migration_manifest(f, 0));
+    assert_int_equal(stat(head, &head_stat), 0);
+    assert_int_equal(head_stat.st_size, LC_COLLECTION_HEAD_BYTES);
+    assert_int_equal(head_stat.st_mode & 0777, 0600);
+    assert_int_equal(stat(manifest_path, &head_stat), 0);
+    assert_int_equal(head_stat.st_mode & 0777, 0600);
+    migration_read(head, current, sizeof(current));
+    assert_memory_equal(old, current, 96);
+    assert_int_equal(stat(body, &new_body), 0);
+    assert_true(old_body.st_ino == new_body.st_ino &&
+                old_body.st_size == new_body.st_size &&
+                old_body.st_mtime == new_body.st_mtime);
+    bind_collection(f, "events", 0, &f->a);
+    check(f, lc_collection_describe(f->a, &after, &f->error));
+    assert_true(after.upper_position == before.upper_position &&
+                after.live_count == before.live_count &&
+                after.max_entries == before.max_entries &&
+                after.retention_expires_at_unix ==
+                    before.retention_expires_at_unix &&
+                !after.lease.active && after.lease.fencing_token == 0);
+    check(f, append_json(f, f->a, "surviving", "{\"n\":2}", &entry));
+    assert_true(entry.duplicate && entry.position == 2 &&
+                entry.has_retention_expires_at_unix);
+    check(f, append_json(f, f->a, "deleted", "{}", &entry));
+    assert_true(entry.duplicate && entry.deleted && entry.position == 1);
+    check(f, read_into_memory(f, NULL));
+    assert_output(f, "{\"n\":2}\n");
+    close_handles(f);
+    lc_collection_migrate_test_hook = migration_count;
+    lc_collection_migrate_test_context = &calls;
+    calls = 0;
+    open_client(f, mode & 4 ? f->crypto_key : NULL, mode & 2, mode & 1);
+    assert_int_equal(calls, 0);
+    close_handles(f);
+    lc_collection_migrate_test_hook = NULL;
+    /* An old root requested with different compression upgrades before recode.
+     */
+    migration_old_head(f, head, old);
+    migration_manifest(f, 1);
+    open_client(f, mode & 4 ? f->crypto_key : NULL, !(mode & 2), mode & 1);
+    bind_collection(f, "events", 0, &f->a);
+    check(f, read_into_memory(f, NULL));
+    assert_output(f, "{\"n\":2}\n");
+    check(f, lc_collection_acquire(f->a, &lease, &f->b, &f->error));
+    check(f, append_json(f, f->b, "new", "{}", &entry));
+    assert_int_equal(entry.position, 3);
+    free(head);
+    lc_free_with_allocator(NULL, body);
+  }
+}
+
+static int migration_crash(void *context, const char *path, int published,
+                           lc_error *error) {
+  (void)path;
+  (void)error;
+  int *point = context;
+  if (published == point[0] ||
+      (point[0] == 2 && published && ++point[1] == 2)) {
+    (void)kill(getpid(), SIGKILL);
+    _exit(73);
+  }
+  return LC_OK;
+}
+
+static void test_collection_migration_resumes_after_crash(void **state) {
+  fixture *f = *state;
+  unsigned char old[128];
+  struct stat a, b;
+  char *head_a, *head_b;
+  int status;
+  for (int phase = 0; phase < 3; ++phase) {
+    close_handles(f);
+    snprintf(f->endpoint, sizeof(f->endpoint), "pouch://%s/crash-%d", f->root,
+             phase);
+    open_client(f, NULL, 0, 0);
+    bind_collection(f, "a", 1, &f->a);
+    bind_collection(f, "b", 1, &f->b);
+    head_a = strdup(((lc_collection_handle *)f->a->impl)->head_path);
+    head_b = strdup(((lc_collection_handle *)f->b->impl)->head_path);
+    close_handles(f);
+    migration_old_head(f, head_a, old);
+    migration_old_head(f, head_b, old);
+    migration_manifest(f, 1);
+    pid_t child = fork();
+    assert_true(child >= 0);
+    if (child == 0) {
+      int point[] = {phase, 0};
+      lc_collection_migrate_test_hook = migration_crash;
+      lc_collection_migrate_test_context = point;
+      (void)migration_open(f);
+      _exit(74);
+    }
+    assert_int_equal(waitpid(child, &status, 0), child);
+    assert_true(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+    assert_false(migration_manifest(f, 0));
+    assert_int_equal(stat(head_a, &a), 0);
+    assert_int_equal(stat(head_b, &b), 0);
+    assert_int_equal(a.st_size + b.st_size,
+                     256 + phase * (LC_COLLECTION_HEAD_BYTES - 128));
+    check(f, migration_open(f));
+    assert_true(migration_manifest(f, 0));
+    bind_collection(f, "a", 0, &f->a);
+    append(f, "after-recovery", "{}", 1);
+    bind_collection(f, "b", 0, &f->b);
+    free(head_a);
+    free(head_b);
+  }
+}
+
+static void
+test_collection_migration_rejects_corruption_and_write_failure(void **state) {
+  fixture *f = *state;
+  unsigned char old[128], damaged[129], observed[129];
+  bind_collection(f, "events", 1, &f->a);
+  char *head = strdup(((lc_collection_handle *)f->a->impl)->head_path);
+  char *directory = strdup(((lc_collection_handle *)f->a->impl)->directory);
+  close_handles(f);
+  migration_old_head(f, head, old);
+  migration_manifest(f, 1);
+  for (int variant = 0; variant < 6; ++variant) {
+    memcpy(damaged, old, sizeof(old));
+    damaged[128] = 0;
+    size_t size = 128;
+    if (variant == 0)
+      damaged[0] ^= 1;
+    if (variant == 1)
+      damaged[96] = 1;
+    if (variant == 2)
+      memset(damaged + 8, 0, 8);
+    if (variant == 3)
+      size = 127;
+    if (variant == 4)
+      size = 129;
+    if (variant == 5)
+      memset(damaged + 72, 255, 8);
+    if (variant == 1 || variant == 2 || variant == 5)
+      migration_seal(damaged, 128);
+    check(f, lc_pouch_path_write_bytes_file(head, damaged, size, &f->error));
+    assert_int_equal(migration_open(f), LC_ERR_PROTOCOL);
+    assert_null(f->client);
+    assert_false(migration_manifest(f, 0));
+    migration_read(head, observed, size);
+    assert_memory_equal(damaged, observed, size);
+  }
+  check(f, lc_pouch_path_write_bytes_file(head, old, 128, &f->error));
+  const char *invalid_layouts[] = {
+      "collection_head_bytes=0\n", "collection_head_bytes=999\n",
+      "collection_head_bytes=384\ncollection_head_bytes=384\n"};
+  char manifest_path[640];
+  snprintf(manifest_path, sizeof(manifest_path), "%s/manifest",
+           f->endpoint + 8);
+  for (size_t i = 0; i < sizeof(invalid_layouts) / sizeof(invalid_layouts[0]);
+       ++i) {
+    int fd = open(manifest_path, O_WRONLY | O_APPEND);
+    assert_true(fd >= 0);
+    assert_int_equal(write(fd, invalid_layouts[i], strlen(invalid_layouts[i])),
+                     strlen(invalid_layouts[i]));
+    assert_int_equal(close(fd), 0);
+    assert_int_equal(migration_open(f), LC_ERR_PROTOCOL);
+    assert_null(f->client);
+    migration_read(head, observed, 128);
+    assert_memory_equal(old, observed, 128);
+    migration_manifest(f, 1);
+  }
+  assert_int_equal(chmod(directory, 0500), 0);
+  assert_int_equal(migration_open(f), LC_ERR_TRANSPORT);
+  assert_null(f->client);
+  assert_int_equal(chmod(directory, 0700), 0);
+  migration_read(head, observed, 128);
+  assert_memory_equal(old, observed, 128);
+  assert_false(migration_manifest(f, 0));
+  assert_int_equal(unlink(head), 0);
+  assert_int_equal(migration_open(f), LC_ERR_TRANSPORT);
+  assert_null(f->client);
+  assert_false(migration_manifest(f, 0));
+  check(f, lc_pouch_path_write_bytes_file(head, old, 128, &f->error));
+  check(f, migration_open(f));
+  bind_collection(f, "events", 0, &f->a);
+  append(f, "valid", "{}", 1);
+  free(head);
+  free(directory);
+}
+
+static void test_collection_migration_refuses_active_clients(void **state) {
+  fixture *f = *state;
+  unsigned char old[128];
+  lc_client *other = NULL;
+  bind_collection(f, "events", 1, &f->a);
+  char *head = strdup(((lc_collection_handle *)f->a->impl)->head_path);
+  lc_collection_close(f->a);
+  f->a = NULL;
+  migration_old_head(f, head, old);
+  migration_manifest(f, 1);
+  other = f->client;
+  f->client = NULL;
+  assert_int_equal(migration_open(f), LC_ERR_PENDING);
+  assert_null(f->client);
+  assert_string_equal(f->error.server_code, "collection_upgrade_busy");
+  assert_false(migration_manifest(f, 0));
+  lc_client_close(other);
+  check(f, migration_open(f));
+  bind_collection(f, "events", 0, &f->a);
+  append(f, "valid", "{}", 1);
+  close_handles(f);
+  int ready[2], done[2], status;
+  char byte;
+  assert_int_equal(pipe(ready), 0);
+  assert_int_equal(pipe(done), 0);
+  pid_t child = fork();
+  assert_true(child >= 0);
+  if (child == 0) {
+    close(ready[0]);
+    close(done[1]);
+    if (migration_open(f) != LC_OK)
+      _exit(75);
+    if (write(ready[1], "r", 1) != 1 || read(done[0], &byte, 1) != 1)
+      _exit(76);
+    lc_client_close(f->client);
+    lc_error_cleanup(&f->error);
+    free(head);
+    _exit(0);
+  }
+  close(ready[1]);
+  close(done[0]);
+  assert_int_equal(read(ready[0], &byte, 1), 1);
+  migration_old_head(f, head, old);
+  migration_manifest(f, 1);
+  assert_int_equal(migration_open(f), LC_ERR_PENDING);
+  assert_null(f->client);
+  assert_string_equal(f->error.server_code, "collection_upgrade_busy");
+  assert_false(migration_manifest(f, 0));
+  assert_int_equal(write(done[1], "d", 1), 1);
+  assert_int_equal(waitpid(child, &status, 0), child);
+  assert_true(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  close(ready[0]);
+  close(done[1]);
+  check(f, migration_open(f));
+  bind_collection(f, "events", 0, &f->a);
+  check(f, read_into_memory(f, NULL));
+  assert_output(f, "{}\n");
+  free(head);
+}
+
+static int migration_conversion_crash(void *context, int phase,
+                                      lc_error *error) {
+  (void)error;
+  if (phase == *(int *)context) {
+    (void)kill(getpid(), SIGKILL);
+    _exit(77);
+  }
+  return LC_OK;
+}
+
+static void test_collection_migration_recovers_staged_conversion(void **state) {
+  fixture *f = *state;
+  unsigned char old[128];
+  const char *trees[] = {"namespaces", ".compression-new", ".compression-old"};
+  char path[768];
+  int status;
+  for (int phase = LC_POUCH_RECODE_READY; phase <= LC_POUCH_RECODE_RECLAIMED;
+       ++phase) {
+    close_handles(f);
+    snprintf(f->endpoint, sizeof(f->endpoint), "pouch://%s/ready-%d", f->root,
+             phase);
+    open_client(f, NULL, 0, 0);
+    bind_collection(f, "events", 1, &f->a);
+    append(f, "original", "{\"n\":1}", 1);
+    char *suffix = strdup(((lc_collection_handle *)f->a->impl)->head_path +
+                          strlen(f->endpoint + 8) + strlen("/namespaces"));
+    close_handles(f);
+    pid_t child = fork();
+    assert_true(child >= 0);
+    if (child == 0) {
+      lc_pouch_recode_test_hook = migration_conversion_crash;
+      lc_pouch_recode_test_context = &phase;
+      open_client(f, NULL, 1, 0);
+      _exit(78);
+    }
+    assert_int_equal(waitpid(child, &status, 0), child);
+    assert_true(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+    /* Reproduce the released converter's 128-byte heads in every retained
+     * tree, including a ready replacement that is not installed yet. */
+    for (size_t i = 0; i < sizeof(trees) / sizeof(trees[0]); ++i) {
+      struct stat st;
+      snprintf(path, sizeof(path), "%s/%s%s", f->endpoint + 8, trees[i],
+               suffix);
+      if (stat(path, &st) == 0)
+        migration_old_head(f, path, old);
+      else
+        assert_int_equal(errno, ENOENT);
+    }
+    migration_manifest(f, 1);
+    check(f, migration_open(f));
+    assert_true(migration_manifest(f, 0));
+    snprintf(path, sizeof(path), "%s/namespaces%s", f->endpoint + 8, suffix);
+    struct stat st;
+    assert_int_equal(stat(path, &st), 0);
+    assert_int_equal(st.st_size, LC_COLLECTION_HEAD_BYTES);
+    bind_collection(f, "events", 0, &f->a);
+    check(f, read_into_memory(f, NULL));
+    assert_output(f, "{\"n\":1}\n");
+    append(f, "new", "{}", 2);
+    free(suffix);
+  }
+}
+
+static void test_collection_migration_catalog_and_existing_lease(void **state) {
+  fixture *f = *state;
+  lc_collection *other;
+  lc_collection_config config = {0};
+  lc_collection_lease_req lease = {"preserved-owner", 3600, 1};
+  lc_collection_info before, after;
+  lc_collection_append_res entry;
+  unsigned char old[128], owned[LC_COLLECTION_HEAD_BYTES],
+      observed[LC_COLLECTION_HEAD_BYTES];
+  char *head_a, *head_b, *head_c, *orphan;
+  char orphan_path[768];
+  bind_collection(f, "events", 1, &f->a);
+  bind_collection(f, "leased", 1, &f->b);
+  check(f, lc_collection_acquire(f->b, &lease, &other, &f->error));
+  check(f, append_json(f, other, "private", "{}", &entry));
+  lc_collection_close(other);
+  check(f, lc_collection_describe(f->b, &before, &f->error));
+  head_a = strdup(((lc_collection_handle *)f->a->impl)->head_path);
+  head_b = strdup(((lc_collection_handle *)f->b->impl)->head_path);
+  config.ns = "another-namespace";
+  config.name = "other";
+  check(f, lc_client_create_collection(f->client, &config, &other, &f->error));
+  head_c = strdup(((lc_collection_handle *)other->impl)->head_path);
+  lc_collection_close(other);
+  snprintf(orphan_path, sizeof(orphan_path), "%s/../00000000000000000000",
+           ((lc_collection_handle *)f->a->impl)->directory);
+  check(f, lc_pouch_path_ensure_directory(orphan_path, "orphan fixture",
+                                          &f->error));
+  /* A dropped binding may already have lost its head during reclamation. */
+  orphan = strdup(orphan_path);
+  close_handles(f);
+  migration_old_head(f, head_a, old);
+  migration_old_head(f, head_c, old);
+  migration_read(head_b, owned, sizeof(owned));
+  migration_manifest(f, 1);
+  check(f, migration_open(f));
+  migration_read(head_b, observed, sizeof(observed));
+  assert_memory_equal(owned, observed, sizeof(owned));
+  bind_collection(f, "leased", 0, &f->a);
+  check(f, lc_collection_describe(f->a, &after, &f->error));
+  assert_true(after.lease.active && after.lease.private_read);
+  assert_string_equal(before.lease.lease_id, after.lease.lease_id);
+  assert_true(before.lease.fencing_token == after.lease.fencing_token);
+  assert_int_equal(read_into_memory(f, NULL), LC_ERR_INVALID);
+  check(f, lc_collection_takeover(f->a, &lease, after.lease.lease_id, &f->b,
+                                  &f->error));
+  check(f, append_json(f, f->b, "private", "{}", &entry));
+  assert_true(entry.duplicate && entry.position == 1);
+  config.lease = NULL;
+  check(f, lc_client_open_collection(f->client, &config, &other, &f->error));
+  lc_collection_close(other);
+  struct stat st;
+  assert_int_equal(stat(orphan, &st), 0);
+  free(head_a);
+  free(head_b);
+  free(head_c);
+  free(orphan);
+}
+
 int main(int argc, char **argv) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test_setup_teardown(
+          test_collection_migration_recovers_staged_conversion, setup,
+          teardown),
+      cmocka_unit_test_setup_teardown(
+          test_collection_migration_catalog_and_existing_lease, setup,
+          teardown),
+      cmocka_unit_test_setup_teardown(
+          test_collection_migration_preserves_data_and_codecs, setup, teardown),
+      cmocka_unit_test_setup_teardown(
+          test_collection_migration_resumes_after_crash, setup, teardown),
+      cmocka_unit_test_setup_teardown(
+          test_collection_migration_rejects_corruption_and_write_failure, setup,
+          teardown),
+      cmocka_unit_test_setup_teardown(
+          test_collection_migration_refuses_active_clients, setup, teardown),
+      cmocka_unit_test_setup_teardown(
+          test_collection_lease_generated_events_and_checkpoints, setup,
+          teardown),
+      cmocka_unit_test_setup_teardown(
+          test_collection_lease_lifecycle_and_mutation_fences, setup, teardown),
+      cmocka_unit_test_setup_teardown(
+          test_collection_private_lease_takeover_expiry_and_stale_writers,
+          setup, teardown),
+      cmocka_unit_test_setup_teardown(
+          test_collection_pull_publication_rechecks_ownership, setup, teardown),
+      cmocka_unit_test_setup_teardown(
+          test_collection_lease_initial_creation_and_restart, setup, teardown),
+      cmocka_unit_test_setup_teardown(
+          test_collection_lease_cross_process_acquisition, setup, teardown),
+      cmocka_unit_test_setup_teardown(
+          test_collection_private_lease_preserves_admitted_reads, setup,
+          teardown),
+      cmocka_unit_test_setup_teardown(
+          test_collection_lease_codecs_restart_and_failed_control_write, setup,
+          teardown),
+      cmocka_unit_test_setup_teardown(
+          test_collection_lease_expiry_at_publication_and_invalid_requests,
+          setup, teardown),
+      cmocka_unit_test_setup_teardown(
+          test_collection_lease_takeover_survives_nosync_tail_loss, setup,
+          teardown),
+      cmocka_unit_test_setup_teardown(
+          test_collection_lease_allocation_failure_keeps_ownership_free, setup,
+          teardown),
       cmocka_unit_test_setup_teardown(
           test_selection_coalesced_nonmatches_preserve_input_budget, setup,
           teardown),
@@ -4036,10 +5625,27 @@ int main(int argc, char **argv) {
       cmocka_unit_test_setup_teardown(
           test_push_writer_expiry_and_replacement_fence, setup, teardown),
       cmocka_unit_test_setup_teardown(
+          test_push_lease_change_after_copy_rolls_back_before_next_append,
+          setup, teardown),
+      cmocka_unit_test_setup_teardown(
+          test_push_buffer_boundaries_codecs_and_packed_segments, setup,
+          teardown),
+      cmocka_unit_test_setup_teardown(
+          test_packed_push_metadata_survives_compression_conversion, setup,
+          teardown),
+      cmocka_unit_test_setup_teardown(
+          test_push_spool_creation_failure_is_terminal_and_retryable, setup,
+          teardown),
+      cmocka_unit_test_setup_teardown(
+          test_push_staging_allocation_failure_and_bounded_heap, setup,
+          teardown),
+      cmocka_unit_test_setup_teardown(
           test_push_writer_nosync_loss_recovers_parent_and_count, setup,
           teardown),
       cmocka_unit_test_setup_teardown(
           test_push_writer_sync_failure_retains_retry_binding, setup, teardown),
+      cmocka_unit_test_setup_teardown(
+          test_segment_seals_recover_lost_projections, setup, teardown),
       cmocka_unit_test_setup_teardown(
           test_push_writer_recovers_every_publication_boundary, setup,
           teardown),

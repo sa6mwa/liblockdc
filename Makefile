@@ -34,6 +34,8 @@ COLLECTION_COMPARE_ROWS ?= 8192
 COLLECTION_COMPARE_JSON_BYTES ?= 4096
 COLLECTION_COMPARE_RUNS ?= 3
 COLLECTION_COMPARE_DIR ?= $(ROOT)/build/collection-read-compare
+COLLECTION_LAYOUT_DIR ?= $(ROOT)/build/collection-layout
+COLLECTION_PULL_DIR ?= $(ROOT)/build/collection-pull
 POUCH_GO_BENCH ?= .
 POUCH_GO_BENCHTIME ?= 3s
 POUCH_GO_BENCH_COUNT ?= 1
@@ -193,7 +195,8 @@ POUCH_GO_BENCH_LDFLAGS := \
 LOCKD_GO_CACHE_ENV := GOMODCACHE=$(ROOT)/.cache/go/pkg/mod GOCACHE=$(ROOT)/.cache/go/build GOBIN=$(ROOT)/.cache/go/bin
 LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VERSION)
 
-.PHONY: compare-collection-read \
+.PHONY: compare-collection-read compare-collection-layouts compare-collection-layouts-smoke \
+  compare-collection-pull compare-collection-pull-smoke \
 	help \
 	__deps-debug __deps-release __deps-cross \
 	__build-debug __build-host __build-x86_64-linux-gnu-release __build-release __build-e2e __build-coverage __build-fuzz \
@@ -253,6 +256,10 @@ help:
 		'make pouch-integration-fuzz Run production-code Pouch integration mutation fuzzing (FUZZ_TIME=$(FUZZ_TIME)).' \
 		'make bench              Standard short name for benchmarks.' \
 		'make compare-collection-read  Compare page-cache-cold raw JSONL and collection reads; manual diagnostic, never a gate.' \
+		'make compare-collection-layouts  Compare raw/pull/push/buffered producer layouts, inode growth and compaction; manual diagnostic.' \
+		'make compare-collection-layouts-smoke  Verify the layout experiment under Debug with allocation tracking.' \
+		'make compare-collection-pull  Compare direct and staged pull on identical sources; manual diagnostic.' \
+		'make compare-collection-pull-smoke  Verify pull comparison sources, boundaries and concurrency under Debug.' \
 		'make benchmarks         Build the shipped x86_64-linux-gnu release preset and run the local benchmark matrix (BENCH_ITERS=$(BENCH_ITERS)).' \
 		'make bench-check        Run native benchmarks and enforce Pouch-vs-lockd performance thresholds.' \
 		'make bench-gate         Run native benchmarks and enforce Pouch-vs-lockd performance thresholds.' \
@@ -565,6 +572,18 @@ __perf-gate:
 	$(TIMED) 'perf-gate benchmark-prepare' $(MAKE_RECURSE) __benchmark-pouch-go-prepare
 	$(TIMED) 'perf-gate pouch-go-parity' $(MAKE_RECURSE) __benchmark-pouch-go-parity-gate
 	$(TIMED) 'perf-gate pouch-go-durable-parity' $(MAKE_RECURSE) __benchmark-pouch-go-durable-gate
+
+compare-collection-layouts:
+	bash ./scripts/compare_collection_layouts.sh measure '$(COLLECTION_LAYOUT_DIR)'
+
+compare-collection-layouts-smoke:
+	bash ./scripts/compare_collection_layouts.sh smoke '$(COLLECTION_LAYOUT_DIR)'
+
+compare-collection-pull:
+	bash ./scripts/compare_collection_layouts.sh pull '$(COLLECTION_PULL_DIR)'
+
+compare-collection-pull-smoke:
+	bash ./scripts/compare_collection_layouts.sh pull-smoke '$(COLLECTION_PULL_DIR)'
 
 compare-collection-read:
 	$(CMAKE) --preset $(X86_64_GNU_RELEASE_PRESET)

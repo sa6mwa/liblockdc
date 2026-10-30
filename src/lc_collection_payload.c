@@ -42,6 +42,7 @@ int lc_collection_payload_open(lc_collection_payload *payload,
   int n;
   int owned;
   int rc;
+  const EVP_MD *digest;
   lc_collection_payload_reset(payload);
   if (record->metadata_only) {
     if (!payload->body_fd_initialized) {
@@ -78,13 +79,18 @@ int lc_collection_payload_open(lc_collection_payload *payload,
           error, LC_ERR_PROTOCOL, "collection_corrupt",
           "collection body has a different identity binding");
   }
-  if (payload->hash == NULL)
+  digest = NULL;
+  if (payload->hash == NULL) {
     payload->hash = EVP_MD_CTX_new();
+    digest = EVP_sha256();
+  }
   if (payload->hash == NULL)
     return lc_collection_failure(
         error, LC_ERR_NOMEM, NULL,
         "failed to allocate collection body hash context");
-  if (EVP_DigestInit_ex(payload->hash, EVP_sha256(), NULL) != 1)
+  /* Reinitializing this read's context with NULL retains its selected SHA-256
+   * implementation; no provider lookup is needed for every next entry. */
+  if (EVP_DigestInit_ex(payload->hash, digest, NULL) != 1)
     return lc_collection_failure(error, LC_ERR_TRANSPORT, NULL,
                                  "failed to initialize collection body hash");
   if (record->descriptor[0] != '\0' ||

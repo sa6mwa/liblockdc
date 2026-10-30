@@ -280,9 +280,11 @@ static int lc_catalog_open(lc_client *self, const lc_collection_config *config,
   }
   rc = lc_pouch_client_public_namespace(client, config->ns, &ns, error);
   if (rc == LC_OK && !create &&
-      (config->has_retention_seconds || config->has_max_entries))
-    rc = lc_collection_failure(error, LC_ERR_INVALID, NULL,
-                               "opening a collection cannot set retention");
+      (config->has_retention_seconds || config->has_max_entries ||
+       config->lease != NULL))
+    rc = lc_collection_failure(
+        error, LC_ERR_INVALID, NULL,
+        "opening a collection cannot set creation policies or acquire a lease");
   if (rc == LC_OK)
     rc =
         lc_state_retention_validate(config->has_retention_seconds,
@@ -350,6 +352,10 @@ static int lc_catalog_open(lc_client *self, const lc_collection_config *config,
                 : 0,
             config->has_max_entries ? config->max_entries : 0U, out, error);
       if (rc == LC_OK)
+        if (config->lease != NULL)
+          rc = lc_collection_lease_initialize((*out)->impl, config->lease,
+                                              error);
+      if (rc == LC_OK)
         rc = lc_collection_catalog_write(catalog, id, config->name, error);
       if (rc != LC_OK && *out != NULL) {
         (*out)->close(*out);
@@ -396,6 +402,8 @@ int lc_client_collection_capabilities_method(lc_client *self,
     out->count_retention = 1;
     out->append_collection_retention = 1;
     out->append_writer = 1;
+    out->append_staged = 1;
+    out->leases = out->lease_takeover = out->private_reads = 1;
   }
   return LC_OK;
 }

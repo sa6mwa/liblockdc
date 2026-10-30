@@ -6,6 +6,12 @@ void lc_collection_config_init(lc_collection_config *config) {
   if (config != NULL)
     memset(config, 0, sizeof(*config));
 }
+void lc_collection_lease_req_init(lc_collection_lease_req *req) {
+  if (req != NULL) {
+    memset(req, 0, sizeof(*req));
+    req->ttl_seconds = 30;
+  }
+}
 void lc_collection_append_req_init(lc_collection_append_req *req) {
   if (req != NULL)
     memset(req, 0, sizeof(*req));
@@ -34,6 +40,39 @@ static int lc_collection_bad_receiver(lc_error *error) {
   return lc_error_set(error, LC_ERR_INVALID, 0L,
                       "operation requires a supporting collection receiver",
                       NULL, NULL, NULL);
+}
+
+int lc_collection_acquire(lc_collection *collection,
+                          const lc_collection_lease_req *req,
+                          lc_collection **out, lc_error *error) {
+  if (out != NULL)
+    *out = NULL;
+  if (collection == NULL || collection->acquire == NULL)
+    return lc_collection_bad_receiver(error);
+  return collection->acquire(collection, req, out, error);
+}
+int lc_collection_takeover(lc_collection *collection,
+                           const lc_collection_lease_req *req,
+                           const char *observed_lease_id, lc_collection **out,
+                           lc_error *error) {
+  if (out != NULL)
+    *out = NULL;
+  if (collection == NULL || collection->takeover == NULL)
+    return lc_collection_bad_receiver(error);
+  return collection->takeover(collection, req, observed_lease_id, out, error);
+}
+int lc_collection_keepalive(lc_collection *collection, long ttl_seconds,
+                            lc_collection_lease_info *out, lc_error *error) {
+  if (out != NULL)
+    memset(out, 0, sizeof(*out));
+  if (collection == NULL || collection->keepalive == NULL)
+    return lc_collection_bad_receiver(error);
+  return collection->keepalive(collection, ttl_seconds, out, error);
+}
+int lc_collection_release(lc_collection *collection, lc_error *error) {
+  if (collection == NULL || collection->release == NULL)
+    return lc_collection_bad_receiver(error);
+  return collection->release(collection, error);
 }
 
 int lc_client_create_collection(lc_client *client,
@@ -104,6 +143,17 @@ int lc_collection_append_begin(lc_collection *collection,
   if (collection == NULL || collection->append_begin == NULL)
     return lc_collection_bad_receiver(error);
   return collection->append_begin(collection, req, out, error);
+}
+int lc_collection_append_staged(lc_collection *collection,
+                                const lc_collection_append_req *req,
+                                lc_source *source,
+                                lc_collection_append_res *out,
+                                lc_error *error) {
+  if (out != NULL)
+    memset(out, 0, sizeof(*out));
+  if (collection == NULL || collection->append_staged == NULL)
+    return lc_collection_bad_receiver(error);
+  return collection->append_staged(collection, req, source, out, error);
 }
 int lc_collection_writer_write(lc_collection_writer *writer, const void *bytes,
                                size_t count, lc_error *error) {

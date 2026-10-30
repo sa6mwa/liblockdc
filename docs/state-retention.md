@@ -430,12 +430,14 @@ its own maintenance cadence may differ from Pouch's.
 
 The compatibility requirement concerns existing calls and older remote
 servers. Extending transparent public C structures changes the shared-library
-ABI: version 0.22.0 advances the core ABI to 6 from ABI 5 in `v0.21.0`.
-Package metadata and provider linkage must agree. Recompile all C consumers
-and rebuild the optional PostgreSQL provider against the new core. Existing
-initialized request calls retain their behavior after recompilation; mapped C
-save call sites additionally need the
-new options argument (`NULL` preserves existing behavior). This does not
+ABI. State retention introduced core ABI 6 in v0.22.0, after ABI 5 in v0.21.0.
+Subsequent collection layout changes use core ABI 8; see
+[current ABI compatibility](../README.md#c-abi-and-storage-compatibility).
+Package metadata and provider linkage must agree. Recompile C consumers
+and rebuild the optional PostgreSQL provider against the matching core. Existing
+initialized request calls retain their behavior after recompilation. Callers
+upgrading from before v0.22.0 must additionally supply the mapped C save options
+argument (`NULL` preserves the previous behavior). This does not
 promise that old Pouch storage engines can share retention-bearing stores with
 new writers.
 The optional provider's own ABI is independent; updating its core-ABI

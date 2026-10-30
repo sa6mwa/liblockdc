@@ -558,6 +558,36 @@ struct lc_sink {
   void *impl;
 };
 
+/** Collection-wide ownership for many independently committed appends. owner
+ * is a nonempty UTF-8 label of at most 128 bytes, not shared credentials. TTL
+ * must be positive; acquisition never waits. private_read defaults to zero:
+ * committed entries remain public. Selecting it hides payload reads from other
+ * receivers until release/expiry. */
+typedef struct lc_collection_lease_req {
+  /** Diagnostic label, never an acquisition or sharing credential. */
+  const char *owner;
+  /** Positive lifetime measured from acquisition/renewal time. */
+  long ttl_seconds;
+  /** Nonzero admits payload reads only by the live owner. */
+  int private_read;
+} lc_collection_lease_req;
+
+/** Bounded ownership observation, copied by value. active is evaluated at the
+ * observation time. An expired record retains its fencing high-water mark.
+ * Observing these fields does not credential a receiver. */
+typedef struct lc_collection_lease_info {
+  /** Nonzero only while the observed lease has not expired. */
+  int active;
+  char owner[129];
+  /** Observation/precondition for takeover, not a receiver credential. */
+  char lease_id[LC_XID_STRING_SIZE];
+  /** Monotonic ownership epoch; retained after release and never reused. */
+  uint64_t fencing_token;
+  /** Absolute Unix seconds; zero means no recorded lease. */
+  lc_unix_seconds expires_at_unix;
+  int private_read;
+} lc_collection_lease_info;
+
 /** Collection creation/open options. Names are nonempty UTF-8, at most 255
  * bytes. An absent namespace selects the client's default namespace.
  * Collection expiry drops the owner and all remaining entries; it does not
@@ -575,6 +605,9 @@ typedef struct lc_collection_config {
    * appends may temporarily exceed the limit. */
   int has_max_entries;
   uint64_t max_entries;
+  /** Optional creation-only lease, established before publishing the name.
+   * The returned receiver is credentialed; borrowed only during creation. */
+  const lc_collection_lease_req *lease;
 } lc_collection_config;
 
 /** Collection identity and current counts. Strings are borrowed from the
@@ -594,11 +627,13 @@ typedef struct lc_collection_info {
   /** Configured live entry limit, zero for unlimited. This is not a disk cap.
    */
   uint64_t max_entries;
+  lc_collection_lease_info lease;
 } lc_collection_info;
 
 /** Endpoint-local capabilities, queried without a network request. Pouch
- * supports LQL, both cursors, ranges, first-N, count retention, append writers
- * and atomic parent renewal. Last-N and position selection are currently false.
+ * supports LQL, both cursors, ranges, first-N, count retention, append writers,
+ * explicit staged pull, atomic parent renewal and optional collection leases.
+ * Last-N and position selection are currently false.
  * Remote clients currently return all fields as zero. */
 typedef struct lc_collection_capabilities {
   int collections;
@@ -611,10 +646,18 @@ typedef struct lc_collection_capabilities {
   int position_selection;
   /** Supports per-collection max_entries and lazy oldest-first trimming. */
   int count_retention;
-  /** Supports owned push-fed append writers without whole-value buffering. */
+  /** Supports owned push-fed append writers with bounded encoded staging. */
   int append_writer;
-  /** Supports atomic parent retention directives on either append form. */
+  /** Supports explicit single-pass sources through that same staged writer. */
+  int append_staged;
+  /** Supports atomic parent retention directives on all append forms. */
   int append_collection_retention;
+  /** Supports optional collection-wide writer ownership. */
+  int leases;
+  /** Supports conditional replacement of the observed live owner. */
+  int lease_takeover;
+  /** Supports private payload visibility during ownership. */
+  int private_reads;
 } lc_collection_capabilities;
 
 /** Required retry identity, scoped to a collection incarnation. Supply 1..128
@@ -787,17 +830,43 @@ typedef struct lc_collection_read_res {
  * reclamation until the active call unwinds. Each returned collection must
  * still be closed separately. */
 struct lc_collection {
+  /** Returns another owned receiver carrying fresh credentials. */
+  int (*acquire)(lc_collection *self, const lc_collection_lease_req *req,
+                 lc_collection **out, lc_error *error);
+  /** Replaces exactly the observed live lease, never unconditionally. */
+  int (*takeover)(lc_collection *self, const lc_collection_lease_req *req,
+                  const char *observed_lease_id, lc_collection **out,
+                  lc_error *error);
+  /** Renews only ownership; it does not renew retention or commit entries. */
+  int (*keepalive)(lc_collection *self, long ttl_seconds,
+                   lc_collection_lease_info *out, lc_error *error);
+  /** Releases and closes on success. Failed release leaves the receiver open.
+   * Local close never releases durable ownership. */
+  int (*release)(lc_collection *self, lc_error *error);
+  /** Observes identity, counts, retention and ownership without reading bodies.
+   */
   int (*describe)(lc_collection *self, lc_collection_info *out,
                   lc_error *error);
-  /** Changes the collection's own retention without visiting its entries. */
+  /** Changes collection expiry/count policy; cleanup is deferred to
+   * maintenance. */
   int (*metadata)(lc_collection *self, const lc_collection_metadata_req *req,
                   lc_collection_info *out, lc_error *error);
+  /** Borrows a single-pass source; direct pull retains append authority while
+   * reading it. Use staged pull for sources that may wait externally. */
   int (*append)(lc_collection *self, const lc_collection_append_req *req,
                 lc_source *source, lc_collection_append_res *out,
                 lc_error *error);
-  /** Begins an owned push-fed writer without publishing an entry. */
+  /** Borrows a single-pass source through the writer's bounded encoded staging
+   * path; source reads hold no publication locks. Never resets/closes source.
+   */
+  int (*append_staged)(lc_collection *self, const lc_collection_append_req *req,
+                       lc_source *source, lc_collection_append_res *out,
+                       lc_error *error);
+  /** Copies the request into an owned writer without publishing an entry.
+   * Close the writer on success or failure, independently of this receiver. */
   int (*append_begin)(lc_collection *self, const lc_collection_append_req *req,
                       lc_collection_writer **out, lc_error *error);
+  /** Observes a retry binding without a payload; absence reserves nothing. */
   int (*append_status)(lc_collection *self, const char *append_id,
                        lc_collection_append_status_res *out, lc_error *error);
   /** Changes only a live entry's retention; reads/writes no payload bytes. */
@@ -820,12 +889,16 @@ struct lc_collection {
 
 /** Owned incremental append. Writes borrow bytes for the call and return
  * LC_OK/status, not the lc_sink boolean convention. Zero bytes are not EOF.
- * Commit supplies EOF and is terminal; errors may have an uncertain published
+ * Commit supplies EOF and is terminal; pre-operation argument rejection need
+ * not consume the writer. Errors may have an uncertain published
  * outcome. Abort/close never publish or undo a committed append. Close every
  * returned writer, including after success/error. No publication locks are held
  * between calls. Sequential thread transfer is allowed; overlapping operations
  * fail. Closing an active writer defers destruction until its call unwinds.
- * The writer retains its collection/client even after their public close. */
+ * The writer retains its collection/client even after their public close.
+ * Pouch validates/encodes once and stages up to 64 KiB of encoded bytes on
+ * the heap, then an anonymous spool. Commit copies to shared rolling segments;
+ * encrypted roots spool ciphertext. Parser/codec scratch is additional. */
 struct lc_collection_writer {
   int (*write)(lc_collection_writer *self, const void *bytes, size_t count,
                lc_error *error);
@@ -838,6 +911,30 @@ struct lc_collection_writer {
 
 /** Initializes a creation/open config with no selected retention policy. */
 void lc_collection_config_init(lc_collection_config *config);
+/** Initializes a request with a 30-second TTL, public reads and no owner. */
+void lc_collection_lease_req_init(lc_collection_lease_req *req);
+/** Acquires collection-wide ownership. Unleased collections remain multiwriter.
+ * Stale credentialed receivers never fall back to unleased mutation. The
+ * original receiver is unchanged; close every returned owned receiver. */
+int lc_collection_acquire(lc_collection *collection,
+                          const lc_collection_lease_req *req,
+                          lc_collection **out, lc_error *error);
+/** Conditional takeover requires the observed current live lease ID. It fences
+ * publication but does not interrupt a source callback. Direct pull retains
+ * append authority while consuming its source; other threads can renew/take
+ * over and peer readers can capture the committed view. Use staged pull or push
+ * for input that may wait externally. Source callback reentry rules still
+ * apply.
+ */
+int lc_collection_takeover(lc_collection *collection,
+                           const lc_collection_lease_req *req,
+                           const char *observed_lease_id, lc_collection **out,
+                           lc_error *error);
+int lc_collection_keepalive(lc_collection *collection, long ttl_seconds,
+                            lc_collection_lease_info *out, lc_error *error);
+/** Releases ownership and closes the receiver on success, without rolling
+ * back any committed entry. On failure it remains open for retry/close. */
+int lc_collection_release(lc_collection *collection, lc_error *error);
 void lc_collection_append_req_init(lc_collection_append_req *req);
 void lc_collection_metadata_req_init(lc_collection_metadata_req *req);
 void lc_collection_read_opts_init(lc_collection_read_opts *opts);
@@ -879,23 +976,51 @@ int lc_collection_entry_metadata(lc_collection *collection, uint64_t position,
                                  const lc_collection_metadata_req *req,
                                  lc_collection_append_res *out,
                                  lc_error *error);
-/** Consumes a borrowed source once; never automatically replays an upload.
- * A post-publication error may be ambiguous: use append_status or explicitly
- * retry the same ID with a fresh source. An identical retry preserves expiry.
+/** Direct pull consumes a borrowed source once under append authority; it never
+ * resets/closes the source or automatically replays an upload. Slow source
+ * reads delay other appends to this collection; staged pull releases that
+ * authority while consuming input. Same-receiver callback operations and peer
+ * mutations of this collection fail; peer reads and independent collections may
+ * progress. A post-publication error may be ambiguous: use append_status or
+ * explicitly retry the same ID with a fresh source. An identical retry
+ * preserves expiry.
  */
 int lc_collection_append(lc_collection *collection,
                          const lc_collection_append_req *req, lc_source *source,
                          lc_collection_append_res *out, lc_error *error);
+/** Explicit staged pull for slow or concurrent producers. Borrows and consumes
+ * source once, never resets or closes it, and never retries automatically.
+ * Uses the same validation, 64 KiB encoded staging/spill, fencing and commit
+ * protocol as append_begin/write/commit. No publication locks are held while
+ * reading source. Source callbacks retain append's reentry rules: same-receiver
+ * operations and peer mutations of this collection fail; peer reads and other
+ * collections may progress. Closing public owners does not invalidate the call.
+ * Source/validation failures publish nothing; commit errors can be uncertain.
+ * Compare direct append for fast inputs: staging may cost more CPU and I/O. */
+int lc_collection_append_staged(lc_collection *collection,
+                                const lc_collection_append_req *req,
+                                lc_source *source,
+                                lc_collection_append_res *out, lc_error *error);
+/** Starts an owned push writer, copying request strings before return. It keeps
+ * its owners alive but holds no publication locks between fragment calls.
+ * Returns NULL output on failure; close a returned writer on every outcome. */
 int lc_collection_append_begin(lc_collection *collection,
                                const lc_collection_append_req *req,
                                lc_collection_writer **out, lc_error *error);
+/** Borrows one raw JSON fragment for the call. Returns LC_OK/status, not a sink
+ * boolean; zero bytes are not EOF. Validation/encoding failures are terminal.
+ */
 int lc_collection_writer_write(lc_collection_writer *writer, const void *bytes,
                                size_t count, lc_error *error);
+/** Finishes validation and publishes one entry; output is required. After a
+ * publication error, use append_status with the original append ID. */
 int lc_collection_writer_commit(lc_collection_writer *writer,
                                 lc_collection_append_res *out, lc_error *error);
 /** Idempotently discards an unfinished append; safe after write/commit failure.
  */
 int lc_collection_writer_abort(lc_collection_writer *writer, lc_error *error);
+/** Releases the owned writer, discarding any unfinished staging. Never commits
+ * or undoes publication. The C pointer is invalid after this call. */
 void lc_collection_writer_close(lc_collection_writer *writer);
 /** Observes ABSENT/COMMITTED/DELETED without a body. ABSENT returns LC_OK and
  * does not cancel an upload in progress. Deleted retry identities are retained.
@@ -4482,6 +4607,11 @@ void lc_attachment_delete_all_op_init(lc_attachment_delete_all_op *request);
 
 /**
  * Opens a new client handle.
+ *
+ * Pouch open automatically upgrades released collection heads under exclusive
+ * root access, preserving entry files. Close all other clients for first
+ * upgrade; contention returns LC_ERR_PENDING/collection_upgrade_busy. Later
+ * opens skip migration. Older binaries cannot use the upgraded collections.
  *
  * @param config Client construction settings.
  * @param out Receives the newly allocated client on success.

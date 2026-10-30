@@ -834,8 +834,83 @@ static void test_relocation_crosses_large_buffer_boundaries(void **state) {
   free(compare);
 }
 
+static void
+test_staged_encoded_copy_checks_integrity_and_rolls_back(void **state) {
+  fixture *f = *state;
+  lc_pouch_collection_writer *writer = NULL;
+  lc_pouch_collection_record body, published, prior, read;
+  const void *encoded;
+  size_t length;
+  unsigned char *copy;
+  uint64_t end;
+  for (int mode = 0; mode < 4; ++mode) {
+    for (int failure = 0; failure < 3; ++failure) {
+      open_case(f, mode, 0);
+      assert_int_equal(append_json(f, "prior", "{}", 1, 1, &prior), LC_OK);
+      end = file_end(f);
+      assert_int_equal(lc_sink_to_memory(&f->sink, &f->error), LC_OK);
+      assert_int_equal(
+          lc_pouch_collection_writer_open_staged(
+              f->pouch, f->sink, f->id, "staged", 0, 0, 0, &writer, &f->error),
+          LC_OK);
+      assert_int_equal(lc_pouch_collection_writer_write(writer, "{ \"n\" : 2 }",
+                                                        11, &f->error),
+                       LC_OK);
+      assert_int_equal(
+          lc_pouch_collection_writer_finish(writer, &body, &f->error), LC_OK);
+      assert_int_equal(file_end(f), end);
+      assert_int_equal(
+          lc_sink_memory_bytes(f->sink, &encoded, &length, &f->error), LC_OK);
+      assert_int_equal(length, body.stored_bytes);
+      assert_true(length > 0);
+      copy = malloc(length);
+      assert_non_null(copy);
+      memcpy(copy, encoded, length);
+      if (failure == 2)
+        copy[length / 2] ^= 1;
+      assert_int_equal(lc_source_from_memory(copy, length - (failure == 1),
+                                             &f->source, &f->error),
+                       LC_OK);
+      int rc = lc_pouch_collection_writer_copy_staged(writer, f->fd, leaf,
+                                                      f->source, &f->error);
+      assert_int_equal(rc, failure ? LC_ERR_PROTOCOL : LC_OK);
+      if (!failure) {
+        assert_int_equal(lc_pouch_collection_writer_publish(
+                             writer, leaf, 2, 2, &published, &f->error),
+                         LC_OK);
+        assert_int_equal(lc_pouch_collection_record_read(
+                             f->fd, end, file_end(f), leaf, &read, &f->error),
+                         LC_OK);
+        assert_true(read.published && read.position == 2 && read.bytes == 7);
+        assert_string_equal(read.etag, body.etag);
+        memset(copy, 0, length);
+        assert_int_equal(pread(f->fd, copy, length, (off_t)read.payload_offset),
+                         length);
+        assert_memory_equal(copy, encoded, length); /* No re-encoding. */
+      }
+      lc_pouch_collection_writer_close(writer);
+      writer = NULL;
+      lc_source_close(f->source);
+      f->source = NULL;
+      if (failure) {
+        assert_int_equal(file_end(f), end);
+        clear_error(f);
+        assert_int_equal(append_json(f, "next", "{}", 2, 2, &published), LC_OK);
+        assert_int_equal(published.record_offset, end);
+      }
+      lc_sink_close(f->sink);
+      f->sink = NULL;
+      assert_body(f, &prior, "{}");
+      free(copy);
+    }
+  }
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test_setup_teardown(
+          test_staged_encoded_copy_checks_integrity_and_rolls_back, setup,
+          teardown),
       cmocka_unit_test_setup_teardown(
           test_invalid_retention_metadata_and_payload_references_fail, setup,
           teardown),

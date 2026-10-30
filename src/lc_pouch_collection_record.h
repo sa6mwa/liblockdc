@@ -49,12 +49,28 @@ int lc_pouch_collection_writer_write(lc_pouch_collection_writer *writer,
 int lc_pouch_collection_writer_finish(lc_pouch_collection_writer *writer,
                                       lc_pouch_collection_record *out,
                                       lc_error *error);
+/* Consumes and validates a source with bounded scratch, without publishing. */
+int lc_pouch_collection_writer_consume(lc_pouch_collection_writer *writer,
+                                       lc_pouch *pouch, lc_source *source,
+                                       lc_pouch_collection_record *out,
+                                       lc_error *error);
 int lc_pouch_collection_writer_publish(lc_pouch_collection_writer *writer,
                                        const char *container_leaf,
                                        uint64_t position, uint64_t generation,
                                        lc_pouch_collection_record *out,
                                        lc_error *error);
 void lc_pouch_collection_writer_close(lc_pouch_collection_writer *writer);
+/* Stages only encoded payload bytes in a borrowed sink. NULL hashes retries.
+ * Copy borrows a finished staging source and canonical fd under append
+ * authority; close rolls its unpublished range back before authority leaves. */
+int lc_pouch_collection_writer_open_staged(
+    lc_pouch *pouch, lc_sink *destination, const char *collection_id,
+    const char *append_id, lc_pouch_unix_seconds retention,
+    int has_collection_retention, lc_pouch_unix_seconds collection_retention,
+    lc_pouch_collection_writer **out, lc_error *error);
+int lc_pouch_collection_writer_copy_staged(lc_pouch_collection_writer *writer,
+                                           int fd, const char *leaf,
+                                           lc_source *source, lc_error *error);
 
 /* Caller owns append authority and a repaired tail. Borrows fd and source.
  * Validation failure rolls back the unpublished byte range. After published is

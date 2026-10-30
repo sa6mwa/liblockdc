@@ -288,6 +288,13 @@ returns the normal structured `lockdc.open` error. Set
 `pouch = { single_writer = false }` where shared writers are explicitly
 required.
 
+Opening a Pouch root also upgrades released collection control metadata before
+returning the client. First upgrade requires all other clients to be closed,
+even for shared mode; contention returns status `LC_ERR_PENDING` and an error
+table with `server_code = "collection_upgrade_busy"`. Entry bodies are not
+rewritten. The upgrade is resumable after interruption and later opens skip
+the migration walk. See [collection storage upgrade](collection-leases.md#storage-upgrade).
+
 Typed Pouch settings are local-only: supplying a non-empty `pouch` table to a
 remote or Unix-socket client returns the normal structured open error. See
 [typed Pouch open settings](pouch-open-settings-api.md) for every key and its
@@ -374,21 +381,26 @@ changing retention. Omit `namespace` to select the client default. Creation
 assigns a collection ID; drop/recreation invalidates old receivers and cursors.
 `client:list_collections({namespace=...}, visitor)` visits descriptions in name
 order without entry bodies. The visitor accepts a description by returning
-`true` or nothing. `client:collection_capabilities()` reports current and future
-selection support. Pouch currently enables `collections`, `lql_filter`, `resume`,
-`checkpoint`, `ranges`, `first_n`, `count_retention`, `append_writer`, and
-`append_collection_retention`; `last_n` and
-`position_selection` are false.
+`true` or nothing. `client:collection_capabilities()` reports supported collection
+operations. Pouch currently enables `collections`, `lql_filter`, `resume`,
+`checkpoint`, `ranges`, `first_n`, `count_retention`, `append_writer`,
+`append_staged`, `append_collection_retention`, `leases`, `lease_takeover`, and
+`private_reads`; `last_n` and `position_selection` are false.
 A remote client's capability query returns all false without a network request;
 other collection operations are unsupported. Unknown selection options are
 rejected rather than ignored.
 
 | Collection method | Result |
 | --- | --- |
-| `describe()` | Namespace, name, collection ID, upper position, live count, indexing and collection retention |
+| `acquire({owner=..., ttl_seconds=30, private_read=false})` | Another owned collection receiver bound to fresh lease credentials |
+| `takeover(request, observed_lease_id)` | Owned receiver replacing exactly the observed live lease |
+| `keepalive({ttl_seconds=30})` | Refreshed ownership metadata, without changing retention |
+| `release()` | True; releases ownership and closes this receiver on success |
+| `describe()` | Namespace, name, collection ID, upper position, live count, indexing, retention and lease metadata |
 | `metadata({retention_seconds=..., max_entries="1000"})` | Updated collection description |
 | `append({append_id=..., retention_seconds=..., collection_retention_seconds=...}, source)` | Position, ETag, bytes, duplicate/deleted and retention facts |
-| `append_begin(request)` | Owned raw-JSON writer; same request as `append`, without a source |
+| `append_staged(request, source)` | Same request, sources and result as append, using the existing writer's bounded encoded staging and commit path |
+| `append_begin(request)` | Owned raw-JSON writer; Pouch stages up to 64 KiB of encoded bytes, then spools; commit copies into a shared segment |
 | `append_status(append_id)` | `state="absent"`, `"committed"`, or `"deleted"`; assigned identities include an `entry` table |
 | `entry_metadata(position, {retention_seconds=...})` | Entry facts after a body-preserving retention change |
 | `read(options, sink)` | `nil, result`; on failure `nil, error, code, partial_result` |
@@ -404,7 +416,7 @@ integer seconds replace it from commit. New objects default to no expiry.
 Observations return `retention_support` and, when known,
 `retention_expires_at_unix`, including zero for no expiry.
 
-Both append forms accept optional `collection_retention_seconds`: omission
+All append forms accept optional `collection_retention_seconds`: omission
 preserves the parent deadline, zero clears it, and positive integer seconds
 reset it from the new append's commit timestamp. Only new membership renews;
 identical retries, reads and failures before publication do not. Results/status
@@ -416,13 +428,24 @@ An append writer accepts `writer:write(raw_json_string)` repeatedly, then
 `writer:commit()` or `writer:abort()`, and always `writer:close()`. `write` and
 `abort` return true on success; `commit` returns the normal append result.
 Failures return `nil, error, code`. Empty writes are not EOF. Strings are
-borrowed for each call; the binding does not decode JSON, buffer a whole value,
-or introduce a producer thread. No collection lock is held between calls.
+borrowed for each call; the binding does not decode JSON or introduce a producer
+thread. Native Pouch stages up to 64 KiB of encoded bytes, then an anonymous
+spool, and copies them into a shared segment at commit. No collection lock is
+held between calls.
 Writers retain their owners independently of public collection/client close.
 Commit is terminal, abort is idempotent, and close/GC never publishes. After
 an uncertain commit error, use `append_status`, including when constructing
 the Lua result failed after native publication. See
 [incremental appends](collection-writer.md) for lifecycle and storage costs.
+
+`collection:append_staged(request, source)` consumes a source through that same
+writer and closes its internal writer on every outcome. It does not hold
+publication locks while invoking the source's read callback. Callback reentry,
+owner closure, retry identity and retention rules match ordinary append; the Lua
+source adapter is closed as usual and is never automatically reset or replayed.
+Source failure/cancellation publishes nothing; a commit or result-allocation
+error can have a committed outcome. Fast inputs may cost less with direct
+`append`; staging is an explicit caller choice.
 
 Collection retention expires the collection itself with all remaining entries.
 Entry retention expires only that state. An empty collection remains until its

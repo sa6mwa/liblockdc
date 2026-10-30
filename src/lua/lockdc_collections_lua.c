@@ -18,11 +18,16 @@ enum collection_operation {
   METADATA,
   ENTRY_METADATA,
   APPEND,
+  APPEND_STAGED,
   APPEND_STATUS,
   READ,
   DELETE_ENTRY,
   DROP,
   APPEND_BEGIN,
+  ACQUIRE,
+  TAKEOVER,
+  KEEPALIVE,
+  RELEASE,
   WRITER_WRITE,
   WRITER_COMMIT,
   WRITER_ABORT
@@ -139,6 +144,17 @@ static void set_bool(lua_State *L, const char *key, int value) {
   lua_setfield(L, -2, key);
 }
 
+static void push_lease(lua_State *L, const lc_collection_lease_info *lease) {
+  lua_newtable(L);
+  set_bool(L, "active", lease->active);
+  set_text(L, "owner", lease->owner);
+  set_text(L, "lease_id", lease->lease_id);
+  lcdc_set_u64_decimal(L, "fencing_token", lease->fencing_token);
+  lcdc_set_version_field(L, "expires_at_unix",
+                         (lc_version)lease->expires_at_unix);
+  set_bool(L, "private_read", lease->private_read);
+}
+
 static void push_info(lua_State *L, const lc_collection_info *info) {
   lua_newtable(L);
   set_text(L, "namespace", info->ns);
@@ -148,6 +164,8 @@ static void push_info(lua_State *L, const lc_collection_info *info) {
   lcdc_set_u64_decimal(L, "live_count", info->live_count);
   lcdc_set_u64_decimal(L, "max_entries", info->max_entries);
   set_bool(L, "query_indexing", info->query_indexing);
+  push_lease(L, &info->lease);
+  lua_setfield(L, -2, "lease");
   lcdc_set_state_retention(L, info->retention_support,
                            info->has_retention_expires_at_unix,
                            info->retention_expires_at_unix);
@@ -443,9 +461,36 @@ static int cancelled(void *context) {
   return stop;
 }
 
+static int lease_options(collection_call *call, int index,
+                         lc_collection_lease_req *req, int acquisition) {
+  static const char *const keys[] = {"owner", "ttl_seconds", "private_read",
+                                     NULL};
+  static const char *const renewal[] = {"ttl_seconds", NULL};
+  lua_State *L = call->L;
+  int rc, selected;
+  index = lua_absindex(L, index);
+  lc_collection_lease_req_init(req);
+  rc = options(call, index, acquisition ? keys : renewal, 1);
+  if (rc == LC_OK && acquisition)
+    rc = text_field(call, index, "owner", 0, &req->owner);
+  if (rc == LC_OK)
+    rc = retention_field(call, index, "ttl_seconds", &selected,
+                         &req->ttl_seconds);
+  if (rc == LC_OK && !selected)
+    req->ttl_seconds = 30;
+  if (rc == LC_OK && acquisition) {
+    lua_getfield(L, index, "private_read");
+    if (!lua_isnil(L, -1) && !lua_isboolean(L, -1))
+      rc = invalid(call, "private_read must be a boolean");
+    req->private_read = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+  }
+  return rc;
+}
+
 static int worker(lua_State *L) {
   static const char *const config_keys[] = {
-      "namespace", "name", "retention_seconds", "max_entries", NULL};
+      "namespace", "name", "retention_seconds", "max_entries", "lease", NULL};
   static const char *const metadata_keys[] = {"retention_seconds",
                                               "max_entries", NULL};
   static const char *const append_keys[] = {
@@ -466,6 +511,8 @@ static int worker(lua_State *L) {
   lc_collection_read_opts read;
   lc_collection_capabilities capabilities;
   lc_collection_info info;
+  lc_collection_lease_req lease;
+  lc_collection_lease_info ownership;
   collection_ud *ud;
   writer_ud *writing;
   const char *value;
@@ -520,6 +567,13 @@ static int worker(lua_State *L) {
       if (rc == LC_OK)
         rc = position_field(call, 2, "max_entries", &config.has_max_entries,
                             &config.max_entries);
+      if (rc == LC_OK) {
+        lua_getfield(L, 2, "lease");
+        if (!lua_isnil(L, -1)) {
+          rc = lease_options(call, lua_gettop(L), &lease, 1);
+          config.lease = &lease;
+        }
+      }
       if (rc == LC_OK)
         rc = lc_lua_client_view(L, 1, &client, &call->error);
       if (rc != LC_OK)
@@ -574,12 +628,22 @@ static int worker(lua_State *L) {
     set_bool(L, "append_collection_retention",
              capabilities.append_collection_retention);
     set_bool(L, "append_writer", capabilities.append_writer);
+    set_bool(L, "append_staged", capabilities.append_staged);
+    set_bool(L, "leases", capabilities.leases);
+    set_bool(L, "lease_takeover", capabilities.lease_takeover);
+    set_bool(L, "private_reads", capabilities.private_reads);
     return 1;
   }
   ud = luaL_testudata(L, 1, COLLECTION_MT);
   if (ud == NULL || ud->handle == NULL || ud->active)
     return failure(L, call,
                    invalid(call, "expected a live, idle collection receiver"));
+  if (call->operation == ACQUIRE || call->operation == TAKEOVER ||
+      call->operation == KEEPALIVE) {
+    rc = lease_options(call, 2, &lease, call->operation != KEEPALIVE);
+    if (rc == LC_OK && call->operation == TAKEOVER)
+      rc = text(call, 3, 0, &value);
+  }
   if (call->operation == METADATA || call->operation == ENTRY_METADATA) {
     int index = call->operation == METADATA ? 2 : 3;
     lc_collection_metadata_req_init(&change);
@@ -593,7 +657,8 @@ static int worker(lua_State *L) {
                           &change.max_entries);
     if (rc == LC_OK && call->operation == ENTRY_METADATA)
       rc = position(call, 2, &seq);
-  } else if (call->operation == APPEND || call->operation == APPEND_BEGIN) {
+  } else if (call->operation == APPEND || call->operation == APPEND_STAGED ||
+             call->operation == APPEND_BEGIN) {
     lc_collection_append_req_init(&append);
     rc = options(call, 2, append_keys, 1);
     if (rc == LC_OK)
@@ -606,7 +671,8 @@ static int worker(lua_State *L) {
       rc = retention_field(call, 2, "collection_retention_seconds",
                            &append.has_collection_retention_seconds,
                            &append.collection_retention_seconds);
-    if (rc == LC_OK && call->operation == APPEND)
+    if (rc == LC_OK &&
+        (call->operation == APPEND || call->operation == APPEND_STAGED))
       rc = lcdc_source_from_value(L, 3, &call->source, &call->error);
   } else if (call->operation == APPEND_STATUS)
     rc = text(call, 2, 0, &value);
@@ -649,6 +715,31 @@ static int worker(lua_State *L) {
   call->receiver = ud;
   ud->active = 1;
   switch (call->operation) {
+  case ACQUIRE:
+  case TAKEOVER: {
+    collection_ud *owned = lua_newuserdatauv(L, sizeof(*owned), 1);
+    memset(owned, 0, sizeof(*owned));
+    luaL_setmetatable(L, COLLECTION_MT);
+    lua_pushvalue(L, 1);
+    lua_setiuservalue(L, -2, 1);
+    if (ud->handle == NULL)
+      rc = invalid(call, "collection closed during lease receiver allocation");
+    else if (call->operation == ACQUIRE)
+      rc = lc_collection_acquire(handle, &lease, &owned->handle, &call->error);
+    else
+      rc = lc_collection_takeover(handle, &lease, value, &owned->handle,
+                                  &call->error);
+    return rc == LC_OK ? 1 : failure(L, call, rc);
+  }
+  case KEEPALIVE:
+    rc = lc_collection_keepalive(handle, lease.ttl_seconds, &ownership,
+                                 &call->error);
+    break;
+  case RELEASE:
+    rc = lc_collection_release(handle, &call->error);
+    if (rc == LC_OK)
+      ud->handle = NULL;
+    break;
   case DESCRIBE:
     rc = lc_collection_describe(handle, &info, &call->error);
     break;
@@ -662,6 +753,10 @@ static int worker(lua_State *L) {
   case APPEND:
     rc = lc_collection_append(handle, &append, call->source, &entry,
                               &call->error);
+    break;
+  case APPEND_STAGED:
+    rc = lc_collection_append_staged(handle, &append, call->source, &entry,
+                                     &call->error);
     break;
   case APPEND_BEGIN:
     writing = lua_newuserdatauv(L, sizeof(*writing), 1);
@@ -696,9 +791,12 @@ static int worker(lua_State *L) {
   }
   if (rc != LC_OK)
     return failure(L, call, rc);
-  if (call->operation == DESCRIBE || call->operation == METADATA)
+  if (call->operation == KEEPALIVE)
+    push_lease(L, &ownership);
+  else if (call->operation == DESCRIBE || call->operation == METADATA)
     push_info(L, &info);
-  else if (call->operation == APPEND || call->operation == ENTRY_METADATA)
+  else if (call->operation == APPEND || call->operation == APPEND_STAGED ||
+           call->operation == ENTRY_METADATA)
     push_entry(L, &entry);
   else if (call->operation == APPEND_STATUS) {
     lua_newtable(L);
@@ -764,9 +862,14 @@ static int dispatch(lua_State *L, int operation) {
 #define COLLECTION_METHOD(name, operation)                                     \
   static int name(lua_State *L) { return dispatch(L, operation); }
 COLLECTION_METHOD(describe, DESCRIBE)
+COLLECTION_METHOD(acquire, ACQUIRE)
+COLLECTION_METHOD(takeover, TAKEOVER)
+COLLECTION_METHOD(keepalive, KEEPALIVE)
+COLLECTION_METHOD(release, RELEASE)
 COLLECTION_METHOD(metadata, METADATA)
 COLLECTION_METHOD(entry_metadata, ENTRY_METADATA)
 COLLECTION_METHOD(append, APPEND)
+COLLECTION_METHOD(append_staged, APPEND_STAGED)
 COLLECTION_METHOD(append_begin, APPEND_BEGIN)
 COLLECTION_METHOD(writer_write, WRITER_WRITE)
 COLLECTION_METHOD(writer_commit, WRITER_COMMIT)
@@ -785,10 +888,15 @@ int lcdc_collection_capabilities(lua_State *L) {
 
 void lcdc_collections_install(lua_State *L) {
   static const luaL_Reg methods[] = {{"describe", describe},
+                                     {"acquire", acquire},
+                                     {"takeover", takeover},
+                                     {"keepalive", keepalive},
+                                     {"release", release},
                                      {"metadata", metadata},
                                      {"entry_metadata", entry_metadata},
                                      {"append", append},
                                      {"append_begin", append_begin},
+                                     {"append_staged", append_staged},
                                      {"append_status", append_status},
                                      {"read", read_entries},
                                      {"delete_entry", delete_entry},

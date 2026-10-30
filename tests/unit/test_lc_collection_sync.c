@@ -32,9 +32,15 @@ typedef struct fixture {
   unsigned int sync_calls;
   int fail_sync;
   int release;
+  const char *body;
 } fixture;
 
 static fixture *sync_fixture;
+typedef enum append_kind {
+  DIRECT_APPEND,
+  PUSH_APPEND,
+  STAGED_APPEND
+} append_kind;
 
 typedef struct writer {
   lc_collection *collection;
@@ -42,6 +48,7 @@ typedef struct writer {
   const char *body;
   lc_collection_append_res result;
   int rc;
+  append_kind kind;
 } writer;
 
 static void check(fixture *f, int rc) {
@@ -161,10 +168,24 @@ static void *append_thread(void *context) {
   lc_error_init(&error);
   lc_collection_append_req_init(&request);
   request.append_id = w->id;
-  w->rc = lc_source_from_memory(w->body, strlen(w->body), &source, &error);
-  if (w->rc == LC_OK)
-    w->rc = lc_collection_append(w->collection, &request, source, &w->result,
-                                 &error);
+  if (w->kind == PUSH_APPEND) {
+    lc_collection_writer *push = NULL;
+    w->rc = lc_collection_append_begin(w->collection, &request, &push, &error);
+    if (w->rc == LC_OK)
+      w->rc =
+          lc_collection_writer_write(push, w->body, strlen(w->body), &error);
+    if (w->rc == LC_OK)
+      w->rc = lc_collection_writer_commit(push, &w->result, &error);
+    lc_collection_writer_close(push);
+  } else {
+    w->rc = lc_source_from_memory(w->body, strlen(w->body), &source, &error);
+    if (w->rc == LC_OK)
+      w->rc = w->kind == STAGED_APPEND
+                  ? lc_collection_append_staged(w->collection, &request, source,
+                                                &w->result, &error)
+                  : lc_collection_append(w->collection, &request, source,
+                                         &w->result, &error);
+  }
   lc_source_close(source);
   lc_error_cleanup(&error);
   return NULL;
@@ -184,7 +205,8 @@ static int tracked_sync(int fd) {
 }
 
 static void parallel(fixture *f, int exclusive, int same_receiver,
-                     int duplicate, int failure, long segment) {
+                     int duplicate, int failure, long segment,
+                     append_kind kind) {
   const char *ids[] = {"one", "two", "three", "four"};
   pthread_t threads[WRITERS];
   writer workers[WRITERS] = {{0}};
@@ -201,7 +223,8 @@ static void parallel(fixture *f, int exclusive, int same_receiver,
   for (size_t i = 0; i < WRITERS; ++i) {
     workers[i].collection = f->handles[same_receiver ? 0 : i];
     workers[i].id = ids[duplicate ? 0 : i];
-    workers[i].body = "{\"event\":true}";
+    workers[i].body = f->body != NULL ? f->body : "{\"event\":true}";
+    workers[i].kind = kind;
     assert_int_equal(
         pthread_create(&threads[i], NULL, append_thread, &workers[i]), 0);
   }
@@ -246,22 +269,73 @@ static void parallel(fixture *f, int exclusive, int same_receiver,
 }
 
 static void test_shared_handles(void **state) {
-  parallel(*state, 0, 0, 0, 0, 65536);
+  parallel(*state, 0, 0, 0, 0, 65536, 0);
 }
 static void test_exclusive_handles(void **state) {
-  parallel(*state, 1, 0, 0, 0, 65536);
+  parallel(*state, 1, 0, 0, 0, 65536, 0);
 }
 static void test_same_receiver(void **state) {
-  parallel(*state, 0, 1, 0, 0, 65536);
+  parallel(*state, 0, 1, 0, 0, 65536, 0);
 }
 static void test_duplicate_pending_identity(void **state) {
-  parallel(*state, 0, 0, 1, 0, 65536);
+  parallel(*state, 0, 0, 1, 0, 65536, 0);
 }
 static void test_sync_failure_reaches_every_waiter(void **state) {
-  parallel(*state, 0, 0, 0, 1, 65536);
+  parallel(*state, 0, 0, 0, 1, 65536, 0);
 }
 static void test_rotation_preserves_commit_descriptors(void **state) {
-  parallel(*state, 0, 1, 0, 0, 256);
+  parallel(*state, 0, 1, 0, 0, 256, 0);
+}
+
+static void test_push_shared_group(void **state) {
+  parallel(*state, 0, 0, 0, 0, 65536, 1);
+}
+static void test_push_exclusive_same_receiver_group(void **state) {
+  parallel(*state, 1, 1, 0, 0, 65536, 1);
+}
+static void test_push_duplicate_group(void **state) {
+  parallel(*state, 0, 0, 1, 0, 65536, 1);
+}
+static void test_push_sync_failure_group(void **state) {
+  parallel(*state, 0, 1, 0, 1, 65536, 1);
+}
+static void test_push_rotation_group(void **state) {
+  parallel(*state, 0, 1, 0, 0, 256, 1);
+}
+
+static void spilled_group(void **state, append_kind kind) {
+  fixture *f = *state;
+  char *body = malloc(131073);
+  assert_non_null(body);
+  memcpy(body, "{\"v\":\"", 6);
+  memset(body + 6, 'x', 131064);
+  memcpy(body + 131070, "\"}", 3);
+  f->body = body;
+  parallel(f, 0, 1, 0, 0, 1024 * 1024, kind);
+  f->body = NULL;
+  free(body);
+}
+
+static void test_push_spilled_group_on_default_thread_stacks(void **state) {
+  spilled_group(state, PUSH_APPEND);
+}
+static void test_staged_spilled_group_on_default_thread_stacks(void **state) {
+  spilled_group(state, STAGED_APPEND);
+}
+static void test_staged_shared_group(void **state) {
+  parallel(*state, 0, 0, 0, 0, 65536, STAGED_APPEND);
+}
+static void test_staged_exclusive_same_receiver_group(void **state) {
+  parallel(*state, 1, 1, 0, 0, 65536, STAGED_APPEND);
+}
+static void test_staged_duplicate_group(void **state) {
+  parallel(*state, 0, 0, 1, 0, 65536, STAGED_APPEND);
+}
+static void test_staged_sync_failure_group(void **state) {
+  parallel(*state, 0, 1, 0, 1, 65536, STAGED_APPEND);
+}
+static void test_staged_rotation_group(void **state) {
+  parallel(*state, 0, 1, 0, 0, 256, STAGED_APPEND);
 }
 
 static int hold_commit(void *context, lc_collection *collection,
@@ -591,6 +665,29 @@ static void test_process_writers_release_shared_root_before_sync(void **state) {
 
 int main(void) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test_setup_teardown(test_staged_shared_group, setup,
+                                      teardown),
+      cmocka_unit_test_setup_teardown(test_staged_exclusive_same_receiver_group,
+                                      setup, teardown),
+      cmocka_unit_test_setup_teardown(test_staged_duplicate_group, setup,
+                                      teardown),
+      cmocka_unit_test_setup_teardown(test_staged_sync_failure_group, setup,
+                                      teardown),
+      cmocka_unit_test_setup_teardown(test_staged_rotation_group, setup,
+                                      teardown),
+      cmocka_unit_test_setup_teardown(
+          test_staged_spilled_group_on_default_thread_stacks, setup, teardown),
+      cmocka_unit_test_setup_teardown(test_push_shared_group, setup, teardown),
+      cmocka_unit_test_setup_teardown(test_push_exclusive_same_receiver_group,
+                                      setup, teardown),
+      cmocka_unit_test_setup_teardown(test_push_duplicate_group, setup,
+                                      teardown),
+      cmocka_unit_test_setup_teardown(test_push_sync_failure_group, setup,
+                                      teardown),
+      cmocka_unit_test_setup_teardown(test_push_rotation_group, setup,
+                                      teardown),
+      cmocka_unit_test_setup_teardown(
+          test_push_spilled_group_on_default_thread_stacks, setup, teardown),
       cmocka_unit_test_setup_teardown(test_shared_handles, setup, teardown),
       cmocka_unit_test_setup_teardown(test_exclusive_handles, setup, teardown),
       cmocka_unit_test_setup_teardown(test_same_receiver, setup, teardown),

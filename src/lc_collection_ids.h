@@ -42,7 +42,10 @@ int lc_collection_ids_find(lc_collection_ids *ids,
                            lc_collection_id_match_fn match, void *context,
                            lc_collection_id_ref *out, int *found,
                            lc_error *error);
-/* Replaying an older reference never overwrites a later deletion binding.
+/* Stages the slot and in-memory count/generation under metadata authority.
+ * checkpoint must follow before releasing that authority: it publishes the
+ * complete header once, together with its canonical replay boundary.
+ * Replaying an older reference never overwrites a later deletion binding.
  * Relocation at the same generation may replace the canonical file reference.
  * Growth copies one small entry at a time and publishes a synced replacement.
  */

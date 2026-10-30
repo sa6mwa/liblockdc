@@ -218,8 +218,63 @@ static void test_binding_updates_do_not_resize_at_load_threshold(void **state) {
   assert_true(f->ids.capacity == 128 && f->ids.count == 33);
 }
 
+static void test_staged_entries_publish_only_with_checkpoint(void **state) {
+  fixture *f = *state;
+  lc_collection_id_ref ref = reference(1);
+  unsigned char before[64], staged[64];
+  assert_int_equal(pread(f->ids.fd, before, sizeof(before), 0), sizeof(before));
+  assert_int_equal(lc_collection_ids_put(&f->ids, &ref, &f->error), LC_OK);
+  assert_int_equal(pread(f->ids.fd, staged, sizeof(staged), 0), sizeof(staged));
+  /* A slot update must not publish an intermediate header that the following
+   * canonical replay checkpoint immediately replaces. */
+  assert_memory_equal(before, staged, sizeof(before));
+  assert_int_equal(
+      lc_collection_ids_checkpoint(&f->ids, 1, 1, 2, 500, &f->error), LC_OK);
+  lc_collection_ids_close(&f->ids);
+  assert_int_equal(lc_collection_ids_open(f->path, 0, NULL, &f->ids, &f->error),
+                   LC_OK);
+  assert_true(f->ids.count == 1 && f->ids.generation == 1 &&
+              f->ids.replay_segment == 2 && f->ids.replay_offset == 500);
+}
+
+static void test_failed_checkpoint_preserves_replay_boundary(void **state) {
+  fixture *f = *state;
+  lc_collection_id_ref ref = reference(1), observed;
+  int found;
+  assert_int_equal(
+      lc_collection_ids_checkpoint(&f->ids, 0, 0, 1, 100, &f->error), LC_OK);
+  assert_int_equal(lc_collection_ids_put(&f->ids, &ref, &f->error), LC_OK);
+  assert_int_equal(close(f->ids.fd), 0);
+  f->ids.fd = open(f->path, O_RDONLY);
+  assert_true(f->ids.fd >= 0);
+  assert_int_equal(
+      lc_collection_ids_checkpoint(&f->ids, 1, 1, 1, 200, &f->error),
+      LC_ERR_TRANSPORT);
+  lc_error_cleanup(&f->error);
+  lc_error_init(&f->error);
+  lc_collection_ids_close(&f->ids);
+  assert_int_equal(lc_collection_ids_open(f->path, 0, NULL, &f->ids, &f->error),
+                   LC_OK);
+  assert_true(f->ids.count == 0 && f->ids.generation == 0 &&
+              f->ids.replay_segment == 1 && f->ids.replay_offset == 100);
+  /* Replay sees the already-written slot and the authoritative count repairs
+   * its header without duplicating the identity or advancing the wrong tail. */
+  assert_int_equal(lc_collection_ids_put(&f->ids, &ref, &f->error), LC_OK);
+  assert_int_equal(
+      lc_collection_ids_checkpoint(&f->ids, 1, 1, 1, 200, &f->error), LC_OK);
+  assert_int_equal(lc_collection_ids_find(&f->ids, ref.digest, position_match,
+                                          &ref.position, &observed, &found,
+                                          &f->error),
+                   LC_OK);
+  assert_true(found && observed.position == 1 && f->ids.count == 1);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test_setup_teardown(
+          test_staged_entries_publish_only_with_checkpoint, setup, teardown),
+      cmocka_unit_test_setup_teardown(
+          test_failed_checkpoint_preserves_replay_boundary, setup, teardown),
       cmocka_unit_test_setup_teardown(test_grow_reopen_and_peer_refresh, setup,
                                       teardown),
       cmocka_unit_test_setup_teardown(

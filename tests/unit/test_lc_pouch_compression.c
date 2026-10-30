@@ -1086,7 +1086,8 @@ static void bound_head_conversion(fixture *f, int corrupt) {
   lc_collection_config config;
   lc_collection *collection;
   lc_collection_read_opts options = {0};
-  unsigned char bytes[128], damaged[128];
+  unsigned char bytes[LC_COLLECTION_HEAD_BYTES],
+      damaged[LC_COLLECTION_HEAD_BYTES];
   char *head;
   FILE *fp;
   unsigned int direction;
@@ -1523,7 +1524,7 @@ static void private_stage_conversion(fixture *f, int failure) {
   lc_collection_handle *handle;
   lc_collection_read_opts options = {0};
   private_stage p;
-  unsigned char head_bytes[128], bad;
+  unsigned char head_bytes[LC_COLLECTION_HEAD_BYTES], bad;
   char namespaces[640], child[1024];
   unsigned int mask, direction;
   int fd, rc, n;

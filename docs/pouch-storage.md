@@ -1941,9 +1941,13 @@ large-payload performance.
 
 ## Crypto And Compression
 
-Crypto is optional and disabled by default. Compression is optional and disabled
-by default. A transformed root cannot be reopened in plaintext mode, and a
-plaintext root cannot be reopened as transformed.
+Encryption is optional and disabled by default. Encryption policy and key
+identity cannot change on open: an encrypted root requires its matching key,
+and an existing unencrypted root cannot be opened as encrypted. Compression
+defaults to none for new roots; omission inherits an existing root's mode.
+An explicit compression change converts the root under exclusive ownership,
+preserving its encryption policy. See
+[compression changes on open](pouch-compression.md).
 
 Transforms belong at the log payload storage boundary. They are streaming
 wrappers around payload bytes written into segment/snapshot records.

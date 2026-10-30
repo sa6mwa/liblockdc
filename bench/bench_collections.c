@@ -1,14 +1,13 @@
 #include "bench_collections.h"
 #include "../tests/support/lc_test_tmp.h"
 #include "lc/lc.h"
+#include "lc_api_internal.h"
 
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
-#define COLLECTION_BENCH_PREFIX "/tmp/liblockdc-pouch-bench-collections-"
 
 typedef struct collection_counter {
   uint64_t bytes;
@@ -25,6 +24,10 @@ static double collection_now(void) {
 static int collection_enabled(const char *name, int fallback) {
   const char *value = getenv(name);
   return value == NULL ? fallback : strcmp(value, "0") != 0;
+}
+
+static double collection_cpu(void) {
+  return (double)clock() / (double)CLOCKS_PER_SEC;
 }
 
 typedef struct collection_append_gate {
@@ -112,8 +115,11 @@ static int collection_append_many(lc_client *client, lc_collection *collection,
   pthread_t threads[32];
   lc_collection_config config;
   lc_collection_info info;
+  lc_collection_lease_req lease = {"benchmark", 3600, 0};
+  char name[64];
   long i, created;
-  int rc;
+  int rc, independent =
+              collection_enabled("LOCKDC_COLLECTION_BENCH_INDEPENDENT", 0);
   memset(workers, 0, sizeof(workers));
   memset(&gate, 0, sizeof(gate));
   lc_collection_config_init(&config);
@@ -147,8 +153,25 @@ static int collection_append_many(lc_client *client, lc_collection *collection,
     workers[i].entries = entries;
     workers[i].first = i;
     workers[i].stride = writers;
-    rc = lc_client_open_collection(client, &config, &workers[i].collection,
-                                   error);
+    if (independent) {
+      workers[i].entries = entries / writers + (i < entries % writers);
+      workers[i].first = 0;
+      workers[i].stride = 1;
+      snprintf(name, sizeof(name), "journal-%ld", i);
+      config.name = name;
+      config.lease = collection_enabled("LOCKDC_COLLECTION_BENCH_LEASE", 0)
+                         ? &lease
+                         : NULL;
+      if (i == 0)
+        workers[i].collection = collection;
+      else
+        rc = lc_client_create_collection(client, &config,
+                                         &workers[i].collection, error);
+    } else if (collection_enabled("LOCKDC_COLLECTION_BENCH_LEASE", 0))
+      workers[i].collection = collection;
+    else
+      rc = lc_client_open_collection(client, &config, &workers[i].collection,
+                                     error);
     if (rc == LC_OK) {
       if (pthread_create(&threads[i], NULL, collection_append_worker,
                          &workers[i]) != 0)
@@ -168,13 +191,22 @@ static int collection_append_many(lc_client *client, lc_collection *collection,
       rc = workers[i].rc;
   }
   for (i = 0; i < writers; ++i) {
-    lc_collection_close(workers[i].collection);
+    if (rc == LC_OK && independent) {
+      rc = lc_collection_describe(workers[i].collection, &info, error);
+      if (rc == LC_OK && (info.live_count != (uint64_t)workers[i].entries ||
+                          info.upper_position != (uint64_t)workers[i].entries))
+        rc = LC_ERR_PROTOCOL;
+    }
+    if (workers[i].collection != collection)
+      lc_collection_close(workers[i].collection);
     free(workers[i].body);
   }
   pthread_cond_destroy(&gate.condition);
   pthread_mutex_destroy(&gate.mutex);
   if (rc == LC_OK)
     rc = lc_collection_describe(collection, &info, error);
+  if (independent)
+    entries = entries / writers + (entries % writers != 0);
   if (rc == LC_OK && (info.live_count != (uint64_t)entries ||
                       info.upper_position != (uint64_t)entries))
     rc = LC_ERR_PROTOCOL;
@@ -200,7 +232,7 @@ static int collection_measure(lc_collection *collection, const char *selector,
   lc_collection_read_res result;
   lc_sink sink;
   collection_counter counter;
-  double start, seconds;
+  double start, seconds, cpu;
   int rc;
   lc_collection_read_opts_init(&opts);
   lc_collection_read_res_init(&result);
@@ -209,9 +241,11 @@ static int collection_measure(lc_collection *collection, const char *selector,
   memset(&counter, 0, sizeof(counter));
   sink.impl = &counter;
   sink.write = collection_count;
+  cpu = collection_cpu();
   start = collection_now();
   rc = lc_collection_read(collection, &opts, &sink, &result, error);
   seconds = collection_now() - start;
+  cpu = collection_cpu() - cpu;
   if (rc == LC_OK &&
       (!result.complete || result.completed_records != expected ||
        counter.records != expected ||
@@ -220,33 +254,37 @@ static int collection_measure(lc_collection *collection, const char *selector,
     rc = LC_ERR_PROTOCOL;
   }
   printf("metric=collection-read phase=%s filter=%s records=%lu bytes=%lu "
-         "seconds=%.6f MiB_per_second=%.3f\n",
+         "seconds=%.6f cpu_seconds=%.6f MiB_per_second=%.3f\n",
          phase, selector == NULL ? "none" : selector,
          (unsigned long)counter.records, (unsigned long)counter.bytes, seconds,
+         cpu,
          seconds > 0.0 ? (double)counter.bytes / 1048576.0 / seconds : 0.0);
   lc_collection_read_res_cleanup(&result);
   return rc;
 }
 
-/* Public-only workload: a fresh root, bounded documents, count-checked
- * streaming to a non-materializing sink, then a complete client reopen. Run
- * identical inputs with LOCKDC_COLLECTION_BENCH_INDEX=0/1 for the scan/index
- * comparison. */
+/* Public append/read workload with a fresh root and count-checked bounded
+ * streaming. Optional retention invokes the same internal maintenance pass as
+ * the background worker, avoiding a wait for its wall-clock cadence. */
 int bench_collections(long entries) {
-  char template_path[] = COLLECTION_BENCH_PREFIX "XXXXXX";
+  char template_path[512], prefix[512];
   char root[512], endpoint[640];
   const char *endpoints[1];
   const char *payload_env;
+  const char *directory;
+  char *limit_end;
   char *body, *key;
   lc_client_config config;
   lc_pouch_settings settings;
   lc_collection_config cc;
+  lc_collection_lease_req lease = {"benchmark", 3600, 0};
   lc_collection *collection;
   lc_client *client;
   lc_error error;
   size_t padding, body_bytes;
-  long writers;
-  double start, seconds;
+  long writers, read_entries;
+  unsigned long limit;
+  double start, seconds, cpu;
   int rc, phase;
   body = key = NULL;
   collection = NULL;
@@ -259,15 +297,42 @@ int bench_collections(long entries) {
   payload_env = getenv("LOCKDC_COLLECTION_BENCH_PAYLOAD");
   padding =
       payload_env == NULL ? 1024U : (size_t)strtoul(payload_env, NULL, 10);
-  if (padding > 1048576U || entries <= 0 || entries > 1000000L || writers < 1 ||
-      writers > 32) {
-    fprintf(stderr, "collection benchmark requires 1..1000000 entries and "
-                    "0..1048576 padding bytes, and 1..32 writers\n");
+  payload_env = getenv("LOCKDC_COLLECTION_BENCH_MAX_ENTRIES");
+  limit_end = NULL;
+  limit = payload_env == NULL ? 0UL : strtoul(payload_env, &limit_end, 10);
+  if (payload_env != NULL && (limit_end == payload_env || *limit_end != '\0')) {
+    fprintf(stderr, "collection retention limit must be an integer\n");
     rc = LC_ERR_INVALID;
     goto done;
   }
-  if (!lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
-                           COLLECTION_BENCH_PREFIX)) {
+  if (padding > 1048576U || entries <= 0 || entries > 1000000L || writers < 1 ||
+      writers > 32 || limit > 1000000UL) {
+    fprintf(stderr, "collection benchmark requires 1..1000000 entries and "
+                    "0..1048576 padding bytes, 1..32 writers and "
+                    "0..1000000 retained entries\n");
+    rc = LC_ERR_INVALID;
+    goto done;
+  }
+  read_entries = collection_enabled("LOCKDC_COLLECTION_BENCH_INDEPENDENT", 0)
+                     ? entries / writers + (entries % writers != 0)
+                     : entries;
+  directory = getenv("LOCKDC_COLLECTION_BENCH_DIRECTORY");
+  if (directory == NULL)
+    directory = "/tmp";
+  if (directory[0] != '/') {
+    fprintf(stderr, "collection benchmark directory must be absolute\n");
+    rc = LC_ERR_INVALID;
+    goto done;
+  }
+  if (snprintf(prefix, sizeof(prefix), "%s/liblockdc-pouch-bench-collections-",
+               directory) >= (int)sizeof(prefix) ||
+      snprintf(template_path, sizeof(template_path), "%sXXXXXX", prefix) >=
+          (int)sizeof(template_path)) {
+    fprintf(stderr, "collection benchmark directory is too long\n");
+    rc = LC_ERR_INVALID;
+    goto done;
+  }
+  if (!lc_test_tmp_mkdtemp(template_path, root, sizeof(root), prefix)) {
     rc = LC_ERR_TRANSPORT;
     goto done;
   }
@@ -309,24 +374,36 @@ int bench_collections(long entries) {
   config.pouch_settings = &settings;
   lc_collection_config_init(&cc);
   cc.name = "journal";
+  cc.has_max_entries = limit != 0UL;
+  cc.max_entries = (uint64_t)limit;
+  cc.lease =
+      collection_enabled("LOCKDC_COLLECTION_BENCH_LEASE", 0) ? &lease : NULL;
   rc = lc_client_open(&config, &client, &error);
   if (rc == LC_OK)
     rc = lc_client_create_collection(client, &cc, &collection, &error);
+  cc.has_max_entries = 0; /* Creation-only input must not be sent on reopen. */
+  cc.lease = NULL;
   if (rc != LC_OK)
     goto done;
   printf("collection-config entries=%ld padding=%lu writers=%ld shared=%d "
          "index=%d sync=%d "
-         "crypto=%d compression=%s push=%d\n",
+         "crypto=%d compression=%s push=%d max_entries=%lu directory=%s "
+         "lease=%d independent=%d\n",
          entries, (unsigned long)padding, writers, !settings.single_writer,
          settings.query_indexing_enabled, settings.durable_sync, key != NULL,
          settings.compression,
-         collection_enabled("LOCKDC_COLLECTION_BENCH_PUSH", 0));
+         collection_enabled("LOCKDC_COLLECTION_BENCH_PUSH", 0), limit,
+         directory, collection_enabled("LOCKDC_COLLECTION_BENCH_LEASE", 0),
+         collection_enabled("LOCKDC_COLLECTION_BENCH_INDEPENDENT", 0));
+  cpu = collection_cpu();
   start = collection_now();
   rc = collection_append_many(client, collection, body, body_bytes, entries,
                               writers, &error);
   seconds = collection_now() - start;
-  printf("metric=collection-append entries=%ld seconds=%.6f per_op_us=%.3f\n",
-         entries, seconds, seconds * 1000000.0 / (double)entries);
+  cpu = collection_cpu() - cpu;
+  printf("metric=collection-append entries=%ld seconds=%.6f cpu_seconds=%.6f "
+         "per_op_us=%.3f\n",
+         entries, seconds, cpu, seconds * 1000000.0 / (double)entries);
   for (phase = 0; phase < 3 && rc == LC_OK; ++phase) {
     const char *label = phase == 0 ? "first" : phase == 1 ? "repeat" : "reopen";
     if (phase == 2) {
@@ -339,15 +416,56 @@ int bench_collections(long entries) {
         rc = lc_client_open_collection(client, &cc, &collection, &error);
     }
     if (rc == LC_OK)
-      rc = collection_measure(collection, NULL, label, (uint64_t)entries,
+      rc = collection_measure(collection, NULL, label, (uint64_t)read_entries,
                               body_bytes, &error);
     if (rc == LC_OK)
       rc = collection_measure(collection, "eq{field=/bucket,value=needle}",
-                              label, (uint64_t)((entries - 1L) / 64L + 1L),
+                              label, (uint64_t)((read_entries - 1L) / 64L + 1L),
                               body_bytes, &error);
     if (rc == LC_OK)
       rc = collection_measure(collection, "eq{field=/bucket,value=absent}",
                               label, 0U, body_bytes, &error);
+  }
+  if (rc == LC_OK && limit != 0UL) {
+    lc_pouch_maintenance_options options = {0};
+    lc_pouch_maintenance_result maintained = {0};
+    lc_collection_info info;
+    uint64_t retained =
+        (uint64_t)read_entries < limit ? (uint64_t)read_entries : limit;
+    options.ns = "bench";
+    cpu = collection_cpu();
+    start = collection_now();
+    rc = lc_pouch_maintenance_run(((lc_client_handle *)client)->pouch, &options,
+                                  &maintained, &error);
+    seconds = collection_now() - start;
+    cpu = collection_cpu() - cpu;
+    if (rc == LC_OK)
+      rc = lc_collection_describe(collection, &info, &error);
+    if (rc == LC_OK && (info.live_count != retained ||
+                        info.upper_position != (uint64_t)read_entries ||
+                        maintained.retention_deleted_state_count !=
+                            (uint64_t)read_entries - retained))
+      rc = LC_ERR_PROTOCOL;
+    printf(
+        "metric=collection-retention entries=%ld max_entries=%lu removed=%lu "
+        "seconds=%.6f cpu_seconds=%.6f\n",
+        entries, limit, (unsigned long)maintained.retention_deleted_state_count,
+        seconds, cpu);
+    lc_pouch_maintenance_result_cleanup(NULL, &maintained);
+    if (rc == LC_OK)
+      rc = collection_measure(collection, NULL, "retained", retained,
+                              body_bytes, &error);
+    lc_collection_close(collection);
+    collection = NULL;
+    lc_client_close(client);
+    client = NULL;
+    if (rc == LC_OK)
+      rc = lc_client_open(&config, &client, &error);
+    if (rc == LC_OK)
+      rc = lc_client_open_collection(client, &cc, &collection, &error);
+    if (rc == LC_OK)
+      rc = collection_measure(collection, NULL, "retained-reopen", retained,
+                              body_bytes, &error);
   }
 done:
   if (rc != LC_OK)
@@ -358,7 +476,7 @@ done:
   lc_pouch_crypto_key_string_free(key);
   free(body);
   if (root[0] != '\0')
-    lc_test_tmp_cleanup_path(root, COLLECTION_BENCH_PREFIX);
+    lc_test_tmp_cleanup_path(root, prefix);
   lc_error_cleanup(&error);
   return rc == LC_OK ? 0 : 1;
 }

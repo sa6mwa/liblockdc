@@ -76,6 +76,11 @@ int lc_pouch_crypto_writer_open(lc_pouch_crypto *crypto, const char *context,
                                 int fd, int allow_compression,
                                 lc_pouch_crypto_writer **out, lc_error *error);
 lc_sink *lc_pouch_crypto_writer_sink(lc_pouch_crypto_writer *writer);
+/* Encoded output goes to a borrowed sink, after compression/encryption. */
+int lc_pouch_crypto_writer_open_sink(lc_pouch_crypto *crypto,
+                                     const char *context, lc_sink *destination,
+                                     lc_pouch_crypto_writer **out,
+                                     lc_error *error);
 int lc_pouch_crypto_writer_finish(lc_pouch_crypto_writer *writer,
                                   uint64_t *plain_bytes, uint64_t *cipher_bytes,
                                   unsigned long *stored_crc,

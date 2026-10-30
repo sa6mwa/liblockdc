@@ -3,6 +3,14 @@ local function assert_ok(value, err)
   if not value and type(err) == "table" then error(err.message, 2) end
   return assert(value, err)
 end
+local function assert_reclaim_errors(stats)
+  -- The one-second expiry/count cap can become eligible before the publishing
+  -- transaction releases its lease. That conflict preserves the marker for
+  -- retry; other failures must still fail this test. Final counts below prove
+  -- that the retained work completes and the identities can be used again.
+  assert(stats.terminal_reclaim_failures == 0 or
+    stats.last_error == "pouch lease already held", stats.last_error)
+end
 local root = assert(os.getenv("LOCKDC_POUCH_ROOT"))
 local client = assert(lockdc.open({
   endpoints = { "pouch://" .. root },
@@ -95,7 +103,7 @@ local stats
 repeat
   stats = assert(dispatcher:stats())
   assert(type(stats.terminal_reclaims) == "number")
-  assert(stats.terminal_reclaim_failures == 0)
+  assert_reclaim_errors(stats)
   if stats.terminal_reclaims >= 3 then break end
   local no_job, err = dispatcher:next(50)
   assert(no_job == nil and (err == nil or err.code == lockdc.ERR_TIMEOUT))
@@ -176,7 +184,7 @@ for _, kind in ipairs({ "completed", "inbox", "command" }) do
   local cap_stats
   repeat
     cap_stats = assert(cap_dispatcher:stats())
-    assert(cap_stats.terminal_reclaim_failures == 0)
+    assert_reclaim_errors(cap_stats)
     if cap_stats.terminal_reclaims == 1 then break end
     local no_job, err = cap_dispatcher:next(50)
     assert(no_job == nil and (err == nil or err.code == lockdc.ERR_TIMEOUT))

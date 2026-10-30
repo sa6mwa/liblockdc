@@ -27,7 +27,7 @@ Release archives are produced for:
 
 The library itself is delivered as:
 
-- `liblockdc.so`
+- `liblockdc.so` on Linux or `liblockdc.dylib` on Darwin
 - `liblockdc.a`
 
 ## Capabilities
@@ -65,10 +65,18 @@ JSON bodies, permanent positions, LQL filtering, raw ordered streaming, and
 optional collection/entry age retention and per-collection live-entry limits
 through the C and Lua APIs. Count limits lazily retain the newest N entries
 without trimming on append. [Push-fed append writers](docs/collection-writer.md)
-accept bounded raw JSON fragments; either append form can renew parent retention
-atomically with a new entry. The
-same contract defines a future lockd server interface; remote collections are
-currently unsupported.
+accept bounded raw JSON fragments; all append forms can renew parent retention
+atomically with a new entry. Explicit staged pull feeds a source through the
+same writer for slow or concurrent transfers.
+Optional [collection leases](docs/collection-leases.md)
+grant exclusive ownership across many committed appends, with keepalive,
+conditional takeover and optional private reads. Unleased collections retain
+multiwriter behavior. The same contract defines a future lockd server interface;
+remote collections are currently unsupported. Pouch automatically upgrades
+released collection heads on root open without rewriting entry bodies. First
+upgrade requires all other
+clients to be closed; later opens skip migration. See
+[storage upgrade](docs/collection-leases.md#storage-upgrade).
 The executable direct deployment pair is
 [`examples/outbox_producer.c`](examples/outbox_producer.c) and
 [`examples/lua/outbox_dispatcher.lua`](examples/lua/outbox_dispatcher.lua):
@@ -136,19 +144,28 @@ support when available; a successful write without retention metadata does not
 confirm that an older server applied the option. Older servers remain usable
 without retention. See [state retention](docs/state-retention.md).
 
-Version 0.22.0 advances the core shared-library ABI from 5 to **6**. Rebuild C
-consumers and the optional PostgreSQL provider; mapped C `save()` calls also
-need the new options argument. See [upgrade instructions](CHANGELOG.md#upgrading-from-021x).
-
-Version 0.24.0 advances the core ABI to **7** from ABI 6 in v0.23.0 for
-collection retention fields and the incremental append-writer surface. Rebuild C
-consumers and the optional PostgreSQL provider; its own ABI remains 0. See
-[upgrade instructions](CHANGELOG.md#upgrading-from-023x).
-
 The public API remains the same receiver-function SDK surface for remote and
 Pouch clients. State bodies, queue payloads, attachments, scan output,
 query-document output, crypto, and compression use real streaming paths unless
 the caller explicitly chooses an in-memory source or sink.
+Collection push and staged-pull appends use bounded encoded staging as described
+in [the append contract](docs/collection-writer.md); collection reads remain raw
+ordered streams.
+
+## C ABI and storage compatibility
+
+The collection lease, receiver and staged-append capability layouts use core
+ABI **8**, advancing once from ABI **7** in v0.24.0. Rebuild C consumers and
+the optional PostgreSQL provider together; the provider's own ABI remains **0**.
+This single ABI change covers the combined collection additions. See
+[upgrade instructions](CHANGELOG.md#upgrading-from-024x).
+
+Pouch upgrades released collection heads on open under exclusive root access,
+preserving positions, retry identities, retention and entry bodies. Close other
+clients before the first upgrade and keep older binaries away from the upgraded
+root. Shared-library ABI and on-disk format versions are independent. Earlier
+source migrations, including the mapped `save()` options argument introduced
+with state retention, remain documented in the [release notes](CHANGELOG.md).
 
 ## Build system
 
@@ -388,8 +405,9 @@ Before squashing, exercise the entire release build and test graph from clean
 generated state with the candidate version and intended optional capabilities:
 
 ```bash
+: "${LOCKDC_VERSION_OVERRIDE:?Set this to the intended candidate version}"
 make clean
-LOCKDC_VERSION_OVERRIDE=0.24.0 LOCKDC_BUILD_POSTGRES=ON \
+LOCKDC_VERSION_OVERRIDE="$LOCKDC_VERSION_OVERRIDE" LOCKDC_BUILD_POSTGRES=ON \
   make prerelease release-matrix
 ```
 

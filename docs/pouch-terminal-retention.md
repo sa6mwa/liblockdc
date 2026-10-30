@@ -46,10 +46,11 @@ history should keep it in dedicated archival storage.
 All producers and dispatchers for one namespace must use the same retention
 configuration. Explicit settings are rejected for remote lockd; this policy
 qualifies local Pouch only. The added public configuration and statistics
-fields were introduced in shared-library ABI generation 5. Version 0.24.0 uses
-core ABI 7 (6 in v0.23.0), covering per-object state retention,
-collections and collection count retention; see
-[upgrade instructions](../CHANGELOG.md#upgrading-from-023x).
+fields were introduced in shared-library ABI generation 5. Current collection
+receiver/capability layouts use core ABI 8; rebuild C consumers and the optional
+PostgreSQL provider against the same core. See
+[ABI compatibility](../README.md#c-abi-and-storage-compatibility) and
+[upgrade instructions](../CHANGELOG.md#upgrading-from-024x).
 
 ## Scheduling and safety
 
@@ -85,7 +86,11 @@ records can be reclaimed. A later turn retries the retained marker.
 Dispatcher statistics expose `terminal_reclaims` and
 `terminal_reclaim_failures`. The first counts safely retired markers, including
 stale markers; it is not a count of application records deleted. Failures also
-appear in `last_error`. Dead letters retain their separate counters.
+appear in `last_error`. Lease contention while an application is still
+publishing a terminal outcome also increments the failure counter; the marker
+is preserved and retried after the lease is released. A nonzero counter alone
+does not mean cleanup is permanently stuck. Dead letters retain their separate
+counters.
 
 ## Existing records and policy changes
 
